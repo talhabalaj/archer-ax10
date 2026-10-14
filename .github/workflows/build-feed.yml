@@ -41,6 +41,26 @@ jobs:
           done
           ls -l feed
 
+      - name: Adapt LuCI client rates to the stock AX10 iwinfo schema
+        run: |
+          python3 scripts/patch_luci_rates.py --feed feed
+          mkdir -p check-luci
+          python3 - <<'PY'
+          import io, pathlib, tarfile
+          package = next(pathlib.Path('feed').glob('ax10-luci_*.ipk'))
+          with tarfile.open(package) as outer:
+              payload = outer.extractfile('./data.tar.gz').read()
+          with tarfile.open(fileobj=io.BytesIO(payload)) as data:
+              dist = data.extractfile('./opt/ax10-luci/luci-dist.tar.gz').read()
+          with tarfile.open(fileobj=io.BytesIO(dist)) as web:
+              for relative in ('network.js', 'view/status/include/60_wifi.js', 'view/network/wireless.js'):
+                  content = web.extractfile('./www/luci-static/resources/' + relative).read()
+                  target = pathlib.Path('check-luci') / relative
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(content)
+          PY
+          node tests/luci-rates.cjs check-luci
+
       - name: Build the Packages index
         run: sh index.sh feed
 

@@ -29,6 +29,13 @@ curl -4Lk https://github.com/talhabalaj/archer-ax10/releases/latest/download/ins
 
 LuCI and debloat remain separate package choices, as on the upstream site.
 
+The personal feed patches LuCI's Wi-Fi client tables for the stock AX10
+`iwinfo` response: flat `rx_rate` / `tx_rate` fields are normalized before
+rendering, and unavailable rate or channel-width data is displayed without
+inventing values. This fixes `Cannot read properties of undefined (reading
+'rate')` on the status and wireless pages. The feed build runs
+`node tests/luci-rates.cjs` against the patched package before publishing.
+
 The OpenVPN hook and SSH availability must be verified after an actual reboot.
 
 Upstream: https://github.com/lee-soft/archer-ax10. Rooting groundwork:
