@@ -45,14 +45,18 @@ jobs:
         run: sh index.sh feed
 
       - name: Assemble release assets (feed + boot bootstrap)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p dist
           cp feed/*.ipk feed/Packages feed/Packages.gz dist/
-          # The opkg payload (opt.tar.gz + install.sh + busybox) is NOT bundled here — it
-          # has one canonical home, the ax10-opkg "payload" release, which boot.sh fetches
-          # directly. This feed ships only the .ipks, the index, boot.sh, and the :2222 seed.
+          # Mirror the upstream payload in our release so all runtime downloads
+          # use the owner's repository. Our installer sets that same feed URL.
+          gh release download payload --repo lee-soft/ax10-opkg \
+            --pattern 'opt.tar.gz' --pattern 'busybox-armv7l' --dir dist
           cp bootstrap/dropbear_vanilla dist/
-          cp boot.sh dist/
+          cp boot.sh install.sh dist/
+          (cd dist && sha256sum * > manifest.sha256)
           ls -l dist
 
       - name: Publish feed release

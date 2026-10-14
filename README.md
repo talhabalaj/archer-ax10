@@ -1,5 +1,10 @@
 # archer-ax10
 
+Personal fork: see [ROUTER_SETUP.md](ROUTER_SETUP.md) for the SSH-first boot setup,
+LAN access, and release URLs used on this router. The fork's `boot.sh` starts only
+the SSH lifeline; `install.sh` installs opkg separately. The original upstream
+documentation follows below.
+
 > ⚡ **Just want it working?** Skip the build — grab the prebuilt binaries and get started in minutes at **[archer-boot.pages.dev](https://archer-boot.pages.dev)** (root the router first via [Waujito/TPLlAX1500GPL](https://github.com/Waujito/TPLlAX1500GPL)).
 
 A self-assembling boot + package system for the **TP-Link Archer AX10** (Broadcom BCM963178,
