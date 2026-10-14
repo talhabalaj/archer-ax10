@@ -16,13 +16,13 @@ HOSTKEY_B64="$(/sbin/uci -q get openvpn.archer_boot.host_key)"
 HOSTKEY_ARGS=""
 if [ -n "$HOSTKEY_B64" ]; then
     umask 077
-    printf '%s' "$HOSTKEY_B64" | /bin/busybox base64 -d > /tmp/archer-boot-host.key || exit 1
+    printf '%s' "$HOSTKEY_B64" | /usr/bin/openssl base64 -d -A > /tmp/archer-boot-host.key || exit 1
     HOSTKEY_ARGS="-r /tmp/archer-boot-host.key"
 fi
 unset HOSTKEY_B64
 # SSH is reachable from the LAN bridge, independent of any client's DHCP IP.
-/sbin/iptables -C INPUT -p tcp --dport "$SSH_PORT" -j DROP 2>/dev/null || /sbin/iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j DROP
-/sbin/iptables -C INPUT -i br-lan -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || /sbin/iptables -I INPUT 1 -i br-lan -p tcp --dport "$SSH_PORT" -j ACCEPT
+/usr/sbin/iptables -C INPUT -p tcp --dport "$SSH_PORT" -j DROP 2>/dev/null || /usr/sbin/iptables -I INPUT 1 -p tcp --dport "$SSH_PORT" -j DROP
+/usr/sbin/iptables -C INPUT -i br-lan -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || /usr/sbin/iptables -I INPUT 1 -i br-lan -p tcp --dport "$SSH_PORT" -j ACCEPT
 # This dummy OpenVPN instance only provides the persisted startup hook.
 [ "$(/sbin/uci -q get openvpn.server.enabled)" = off ] && /sbin/fw openvpn_block udp 1194 home 2>/dev/null
 
