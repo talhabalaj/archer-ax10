@@ -6,7 +6,8 @@ from pathlib import Path
 import re
 import tarfile
 
-VERSION = "1.0-3personal1"
+VERSION = "1.0-4personal1"
+RESOURCE_SUFFIX = "-personal-compat2"
 NORMALIZE = """return Promise.all(tasks).then(function(values){return Array.prototype.concat.apply([],values).map(function(st){['rx','tx'].forEach(function(dir){if(st[dir]==null&&typeof st[dir+'_rate']=='number'&&isFinite(st[dir+'_rate']))st[dir]={rate:st[dir+'_rate']};});return st;});});"""
 
 
@@ -21,6 +22,9 @@ def patch_js(relative, data):
     elif relative == "view/network/wireless.js":
         old = "function format_wifirate(rate){var s='%.1f\\xa0%s, %d\\xa0%s'.format(rate.rate/1000,_('Mbit/s'),rate.mhz,_('MHz')),"
         new = "function format_wifirate(rate){if(!rate||typeof rate.rate!='number'||!isFinite(rate.rate))return'?';var s='%.1f\\xa0%s'.format(rate.rate/1000,_('Mbit/s'));if(typeof rate.mhz=='number'&&rate.mhz>0)s+=', %d\\xa0%s'.format(rate.mhz,_('MHz'));var "
+    elif relative == "view/system/leds.js":
+        old = "var leds=data[0];var plugins=data[1];for(var k in leds)"
+        new = "var leds=data[0]||{};var plugins=data[1]||[];var names=Object.keys(leds).filter(function(name){return leds[name]&&Array.isArray(leds[name].triggers)&&leds[name].triggers.length;});if(!names.length)return E('div',{'class':'alert-message notice'},_('LED control through LuCI is unavailable on this firmware. Use the TP-Link web interface for LED settings.'));Object.keys(leds).forEach(function(name){if(names.indexOf(name)<0)delete leds[name];});for(var k in leds)"
     else:
         return data
     if new in text:
@@ -30,15 +34,27 @@ def patch_js(relative, data):
     return text.replace(old, new).encode()
 
 
-FILES = ("network.js", "view/status/include/60_wifi.js", "view/network/wireless.js")
+FILES = ("network.js", "view/status/include/60_wifi.js", "view/network/wireless.js", "view/system/leds.js")
 VERSION_FILE = "usr/lib/lua/luci/version.lua"
 HEADER_FILE = "usr/lib/lua/luci/view/header.htm"
+CACHE_FILE = "usr/lib/lua/luci/cacheloader.lua"
+CONFIG_FILE = "usr/lib/lua/luci/config.lua"
+
+
+def replace_once(data, old, new, label):
+    text = data.decode()
+    if new in text:
+        return data
+    if text.count(old) != 1:
+        raise ValueError(f"Unexpected {label}")
+    return text.replace(old, new).encode()
 
 
 def patch_header(data):
     text = data.decode()
     old = "git-23.093.57360-bcm5"
-    new = old + "-personal-rates1"
+    text = text.replace(old + "-personal-rates1", old)
+    new = old + RESOURCE_SUFFIX
     if new in text:
         return data
     if text.count(old) != 3:
@@ -48,9 +64,10 @@ def patch_header(data):
 
 def patch_version(data):
     text = data.decode()
-    if "-personal-rates1" in text:
+    text = text.replace("-personal-rates1", "")
+    if RESOURCE_SUFFIX in text:
         return data
-    text, count = re.subn(r'(luciversion\s*=\s*"[^"]+)(")', r'\1-personal-rates1\2', text)
+    text, count = re.subn(r'(luciversion\s*=\s*"[^"]+)(")', lambda m: m[1] + RESOURCE_SUFFIX + m[2], text)
     if count != 1:
         raise ValueError("Missing LuCI resource version")
     return text.encode()
@@ -71,6 +88,12 @@ def rewrite_tar(data, transform):
 def patch_ipk(ipk):
     touched = set()
     def web(relative, data):
+        if relative == CACHE_FILE:
+            touched.add(CACHE_FILE)
+            return replace_once(data, "ccache.cache_ondemand()", 'ccache.cache_ondemand("/tmp/luci-personal-modulecache")', "module cache loader")
+        if relative == CONFIG_FILE:
+            touched.add(CONFIG_FILE)
+            return replace_once(data, 'get_all("luci", key)', 'get_all("luci_personal", key)', "LuCI config loader")
         if relative == HEADER_FILE:
             touched.add(HEADER_FILE)
             return patch_header(data)
@@ -87,9 +110,14 @@ def patch_ipk(ipk):
         if relative == "opt/ax10-luci/luci-dist.tar.gz":
             return rewrite_tar(data, web)
         if relative == "opt/ax10-luci/luci-setup.sh":
+            data = replace_once(data,
+                "cp /tmp/luci-app/etc/config/luci /etc/config/luci",
+                "cp /tmp/luci-app/etc/config/luci /etc/config/luci_personal",
+                "LuCI config install")
             old = "chmod +x /tmp/luci-app/www/cgi-bin/luci /tmp/luci-app/www/cgi-bin/luci.lua 2>/dev/null\n"
-            new = old + "# Reload the personal asset version after an upgrade.\nrm -f /tmp/luci-modulecache/6C7563692E76657273696F6E\n"
+            new = old + "# Reload the personal asset version after an upgrade.\nrm -f /tmp/luci-personal-modulecache/6C7563692E76657273696F6E\n"
             text = data.decode()
+            text = text.replace("rm -f /tmp/luci-modulecache/6C7563692E76657273696F6E", "rm -f /tmp/luci-personal-modulecache/6C7563692E76657273696F6E")
             if new not in text:
                 if text.count(old) != 1:
                     raise ValueError("Unexpected LuCI setup script")
@@ -113,7 +141,7 @@ def patch_ipk(ipk):
         return data
 
     result = rewrite_tar(ipk.read_bytes(), outer)
-    expected = set(FILES) | {VERSION_FILE, HEADER_FILE}
+    expected = set(FILES) | {VERSION_FILE, HEADER_FILE, CACHE_FILE, CONFIG_FILE}
     if touched != expected:
         raise ValueError(f"Missing LuCI files: {expected - touched}")
     destination = ipk.with_name(f"ax10-luci_{VERSION}_armv7-3.2.ipk")

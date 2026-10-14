@@ -38,6 +38,14 @@ also prevents browsers from reusing the old JavaScript after an upgrade.
 The feed build runs
 `node tests/luci-rates.cjs` against the patched package before publishing.
 
+Modern LuCI uses its own `/etc/config/luci_personal` configuration and
+`/tmp/luci-personal-modulecache` compiled modules. The package does not
+replace the TP-Link GUI's LuCI configuration or share its module cache.
+On this stock firmware, the LED driver has no standard kernel trigger
+interface; LuCI displays a notice directing LED settings to the TP-Link
+interface instead of throwing a JavaScript error. Package checks also
+cover this limitation and the separation of the two GUIs.
+
 The OpenVPN hook and SSH availability must be verified after an actual reboot.
 
 Upstream: https://github.com/lee-soft/archer-ax10. Rooting groundwork:
