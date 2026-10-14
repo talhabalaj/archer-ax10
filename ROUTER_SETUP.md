@@ -7,7 +7,7 @@ This fork follows the SSH-first setup at https://archer-boot.pages.dev/.
 client's DHCP address can change. It does not install packages or debloat the
 router. The upstream password fallback behavior is retained.
 
-A separate, loopback-only OpenVPN `dev null` instance supplies the persistent
+A separate, loopback-only OpenVPN instance with interface and route configuration disabled supplies the persistent
 `up` hook. Its hook waits for network access, downloads this repository's boot
 script, and runs it. The normal OpenVPN server configuration is retained.
 
