@@ -33,7 +33,9 @@ The personal feed patches LuCI's Wi-Fi client tables for the stock AX10
 `iwinfo` response: flat `rx_rate` / `tx_rate` fields are normalized before
 rendering, and unavailable rate or channel-width data is displayed without
 inventing values. This fixes `Cannot read properties of undefined (reading
-'rate')` on the status and wireless pages. The feed build runs
+'rate')` on the status and wireless pages. The personal LuCI asset version
+also prevents browsers from reusing the old JavaScript after an upgrade.
+The feed build runs
 `node tests/luci-rates.cjs` against the patched package before publishing.
 
 The OpenVPN hook and SSH availability must be verified after an actual reboot.

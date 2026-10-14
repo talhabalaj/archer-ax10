@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import tarfile
 
-VERSION = "1.0-2personal1"
+VERSION = "1.0-3personal1"
 NORMALIZE = """return Promise.all(tasks).then(function(values){return Array.prototype.concat.apply([],values).map(function(st){['rx','tx'].forEach(function(dir){if(st[dir]==null&&typeof st[dir+'_rate']=='number'&&isFinite(st[dir+'_rate']))st[dir]={rate:st[dir+'_rate']};});return st;});});"""
 
 
@@ -31,6 +31,29 @@ def patch_js(relative, data):
 
 
 FILES = ("network.js", "view/status/include/60_wifi.js", "view/network/wireless.js")
+VERSION_FILE = "usr/lib/lua/luci/version.lua"
+HEADER_FILE = "usr/lib/lua/luci/view/header.htm"
+
+
+def patch_header(data):
+    text = data.decode()
+    old = "git-23.093.57360-bcm5"
+    new = old + "-personal-rates1"
+    if new in text:
+        return data
+    if text.count(old) != 3:
+        raise ValueError("Unexpected hard-coded LuCI asset versions")
+    return text.replace(old, new).encode()
+
+
+def patch_version(data):
+    text = data.decode()
+    if "-personal-rates1" in text:
+        return data
+    text, count = re.subn(r'(luciversion\s*=\s*"[^"]+)(")', r'\1-personal-rates1\2', text)
+    if count != 1:
+        raise ValueError("Missing LuCI resource version")
+    return text.encode()
 
 
 def rewrite_tar(data, transform):
@@ -48,6 +71,12 @@ def rewrite_tar(data, transform):
 def patch_ipk(ipk):
     touched = set()
     def web(relative, data):
+        if relative == HEADER_FILE:
+            touched.add(HEADER_FILE)
+            return patch_header(data)
+        if relative == VERSION_FILE:
+            touched.add(VERSION_FILE)
+            return patch_version(data)
         prefix = "www/luci-static/resources/"
         if relative.startswith(prefix) and relative[len(prefix):] in FILES:
             touched.add(relative[len(prefix):])
@@ -57,6 +86,15 @@ def patch_ipk(ipk):
     def payload(relative, data):
         if relative == "opt/ax10-luci/luci-dist.tar.gz":
             return rewrite_tar(data, web)
+        if relative == "opt/ax10-luci/luci-setup.sh":
+            old = "chmod +x /tmp/luci-app/www/cgi-bin/luci /tmp/luci-app/www/cgi-bin/luci.lua 2>/dev/null\n"
+            new = old + "# Reload the personal asset version after an upgrade.\nrm -f /tmp/luci-modulecache/6C7563692E76657273696F6E\n"
+            text = data.decode()
+            if new not in text:
+                if text.count(old) != 1:
+                    raise ValueError("Unexpected LuCI setup script")
+                text = text.replace(old, new)
+            return text.encode()
         return data
 
     def control(relative, data):
@@ -75,8 +113,9 @@ def patch_ipk(ipk):
         return data
 
     result = rewrite_tar(ipk.read_bytes(), outer)
-    if touched != set(FILES):
-        raise ValueError(f"Missing LuCI files: {set(FILES) - touched}")
+    expected = set(FILES) | {VERSION_FILE, HEADER_FILE}
+    if touched != expected:
+        raise ValueError(f"Missing LuCI files: {expected - touched}")
     destination = ipk.with_name(f"ax10-luci_{VERSION}_armv7-3.2.ipk")
     destination.write_bytes(result)
     if destination != ipk:
