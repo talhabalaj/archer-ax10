@@ -49,7 +49,8 @@ WL="${WL:-/usr/sbin/wl}"
 HAPD_CLI="${HAPD_CLI:-hostapd_cli -p /var/run/hostapd}"
 BRCTL="${BRCTL:-brctl}"
 IP="${IP:-ip}"
-IPT="${IPT:-/usr/sbin/iptables}"
+# -w: wait for the xtables lock; TP-Link's scripts and the watcher can overlap.
+IPT="${IPT:-/usr/sbin/iptables -w}"
 MOUNT="${MOUNT:-mount}"
 UMOUNT="${UMOUNT:-umount}"
 NET="${NET:-/sys/class/net}"
@@ -299,7 +300,7 @@ firewall_remove() {
 # at once): the caps match IPv4 addresses, and IPv6 would bypass them.
 # The main Wi-Fi and wifi-iot are never touched.
 TC="${TC:-tc}"
-IPT6="${IPT6:-/usr/sbin/ip6tables}"
+IPT6="${IPT6:-/usr/sbin/ip6tables -w}"
 CH_GUEST6=AX10_GUEST6
 IFB="${IFB:-ifb0}"
 CH_GUEST=AX10_GUEST
@@ -369,19 +370,22 @@ guest_sync() {
         $TC class add dev "$i" parent 1: classid 1:1 htb rate 1000mbit
         $TC qdisc add dev "$i" ingress
     done
+    QD=$((GL_DOWN * 2)); [ "$QD" -ge 5 ] || QD=5
+    QU=$((GL_UP * 2)); [ "$QU" -ge 5 ] || QU=5
     n=10
     echo "$slow" | while read m ip i; do
         [ -n "$m" ] || continue
         $IPT -t mangle -A $CH_GUEST -s "$ip" -j BLOGSKIP
         $IPT -t mangle -A $CH_GUEST -d "$ip" -j BLOGSKIP
         # Short leaf queues: the default (txqueuelen 1000) adds seconds of delay at
-        # a few Mbps. No fq_codel/sfq in this kernel; 30 packets keeps it ~50-70 ms.
+        # a few Mbps, and there is no fq_codel/sfq in this kernel. Size each queue
+        # to ~25 ms at the cap (2 full-size packets per Mbps, at least 5).
         $TC class add dev "$i" parent 1: classid 1:$n htb rate "${GL_DOWN}mbit" ceil "${GL_DOWN}mbit"
-        $TC qdisc add dev "$i" parent 1:$n handle $n: pfifo limit 30
+        $TC qdisc add dev "$i" parent 1:$n handle $n: pfifo limit "$QD"
         $TC filter add dev "$i" parent 1: protocol ip prio 1 u32 match ip dst "$ip/32" flowid 1:$n
         $TC filter add dev "$i" parent ffff: protocol ip prio 1 u32 match ip src "$ip/32" action mirred egress redirect dev "$IFB"
         $TC class add dev "$IFB" parent 1: classid 1:$n htb rate "${GL_UP}mbit" ceil "${GL_UP}mbit"
-        $TC qdisc add dev "$IFB" parent 1:$n handle $n: pfifo limit 30
+        $TC qdisc add dev "$IFB" parent 1:$n handle $n: pfifo limit "$QU"
         $TC filter add dev "$IFB" parent 1: protocol ip prio 1 u32 match ip src "$ip/32" flowid 1:$n
         n=$((n + 1))
     done

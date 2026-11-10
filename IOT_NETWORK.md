@@ -193,9 +193,11 @@ on TCP 8899, which is what the `allow_lan` exception permits.
 - IPv6 bypassed the IPv4-only caps (fast.com uses IPv6), so limited guests get
   IPv6 rejected (`ip6tables` chain `AX10_GUEST6` at FORWARD position 1, ahead of
   "accept established", `icmp6-adm-prohibited`) and fall back to IPv4.
-- No `fq_codel`/`codel`/`sfq` in this kernel; each class gets `pfifo limit 30`
-  instead of the default 1000-packet queue, which added hundreds of ms under
-  load at 5 Mbps.
+- No `fq_codel`/`codel`/`sfq` in this kernel. Each class gets a `pfifo` sized
+  to ~25 ms at its cap (2 packets per Mbps, min 5) instead of the default
+  1000-packet queue. Measured: a fixed 30 packets gave +80 ms loaded latency at
+  5 Mbps (vs ~1 ms on the unshaped main Wi-Fi). Shorter queues trade a little
+  throughput on long-RTT paths for lower latency.
 - Live updates: stop the running watcher before rebuilding by hand, or two
   rebuilds race (`RTNETLINK answers: Invalid argument`).
 
