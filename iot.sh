@@ -346,6 +346,14 @@ inittab_add() {
     { grep -v "$TAG" "$INITTAB" 2>/dev/null; echo "::respawn:/bin/sh $SELF watch # $TAG"; } > "$INITTAB.new"
     cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"; kill -HUP 1 2>/dev/null
 }
+# A running watcher keeps the functions it loaded at start; after iot.sh is
+# replaced on disk, kill it so init respawns it with the new code.
+watcher_restart() {
+    for d in /proc/[0-9]*; do
+        [ "${d#/proc/}" = "$$" ] && continue
+        case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
+    done
+}
 inittab_del() {
     grep -q "$TAG" "$INITTAB" 2>/dev/null || return 0
     grep -v "$TAG" "$INITTAB" > "$INITTAB.new"; cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"
@@ -467,9 +475,9 @@ case "$1" in
         done ;;
     start)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
-        apply; inittab_add; log "watcher registered" ;;
+        apply; inittab_add; watcher_restart; log "watcher registered" ;;
     stop) stop ;;
-    ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install ;;
+    ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_restart ;;
     ui-remove) ui_remove ;;
     boot)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
