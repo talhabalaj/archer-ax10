@@ -21,14 +21,23 @@
 
     $.su.storeManager.define("iotClientStore", {
         type: "store",
-        fields: [{ name: "key" }, { name: "name" }, { name: "mac" }, { name: "ip" }, { name: "internet" }],
+        fields: [{ name: "key" }, { name: "name" }, { name: "mac" }, { name: "ip" }, { name: "status" }, { name: "internet" }],
         proxy: { url: $.su.url("/admin/iot_net?form=clients") }
     });
 
     $.su.storeManager.define("iotHomeStore", {
         type: "store",
-        fields: [{ name: "key" }, { name: "name" }, { name: "mac" }, { name: "ip" }, { name: "allowed" }],
+        fields: [{ name: "key" }, { name: "name" }, { name: "mac" }, { name: "ip" }, { name: "status" }, { name: "allowed" }],
         proxy: { url: $.su.url("/admin/iot_net?form=homes") }
+    });
+
+    // Popup editors for renaming a row (same pattern as the stock DHCP reservation page).
+    $.each(["iotClientEdit", "iotHomeEdit"], function (i, name) {
+        $.su.modelManager.define(name, {
+            type: "model",
+            fields: [{ name: "key" }, { name: "name", allowBlank: false, maxLength: 40 }, { name: "mac" },
+                     { name: "ip" }, { name: "status" }, { name: "internet" }, { name: "allowed" }]
+        });
     });
 
     // A store's sync sends only the first changed row (key/new/old), so save each
@@ -46,12 +55,35 @@
 
     function switchColumn(text, dataIndex) {
         return { text: text, dataIndex: dataIndex, xtype: "customWidget", widgetName: "switch",
-                 settings: { trueValue: "on", falseValue: "off" }, width: "20%" };
+                 settings: { trueValue: "on", falseValue: "off" }, width: "12%" };
+    }
+
+    var editColumn = {
+        xtype: "actioncolumn", text: T.EDIT, width: "8%",
+        renderer: function () {
+            return '<a href="javascript:void(0)" class="grid-content-btn grid-content-btn-edit btn-edit"><span class="icon"></span><span class="text"></span></a>';
+        }
+    };
+
+    function gridConfig(switchCol, editContent) {
+        return {
+            minLines: 0,
+            paging: {},
+            popEditor: { editTitle: T.RENAME, content: editContent, fields: [{ name: "name" }] },
+            columns: [
+                { text: T.NAME, dataIndex: "name", width: "26%" },
+                { text: T.MAC, dataIndex: "mac", width: "18%" },
+                { text: T.IP, dataIndex: "ip", width: "14%" },
+                { text: T.STATUS, dataIndex: "status", width: "22%" },
+                switchCol,
+                editColumn
+            ]
+        };
     }
 
     $.su.moduleManager.define("iotNetwork", {
         services: ["ajax"],
-        models: ["iotNetworkModel"],
+        models: ["iotNetworkModel", "iotClientEdit", "iotHomeEdit"],
         stores: ["iotClientStore", "iotHomeStore"],
         views: ["iotNetworkView"],
         listeners: {
@@ -62,19 +94,11 @@
             }
         },
         init: function (me, views, models, stores) {
-            var columns = function (last) {
-                return [
-                    { text: T.NAME, dataIndex: "name", width: "30%" },
-                    { text: T.MAC, dataIndex: "mac", width: "25%" },
-                    { text: T.IP, dataIndex: "ip", width: "25%" },
-                    last
-                ];
-            };
             this.configViews({
                 id: "iotNetworkView",
                 items: [
-                    { id: "iot-client-grid", configs: { minLines: 0, paging: {}, columns: columns(switchColumn(T.INTERNET, "internet")) } },
-                    { id: "iot-home-grid", configs: { minLines: 0, paging: {}, columns: columns(switchColumn(T.ALLOW, "allowed")) } }
+                    { id: "iot-client-grid", configs: gridConfig(switchColumn(T.INTERNET, "internet"), "#iot-client-edit") },
+                    { id: "iot-home-grid", configs: gridConfig(switchColumn(T.ALLOW, "allowed"), "#iot-home-edit") }
                 ]
             });
             this.listen({
@@ -89,11 +113,13 @@
             this.control({
                 "#iot-client-grid": {
                     ev_grid_tbar_refresh: function () { stores.iotClientStore.load(); },
-                    ev_grid_custom_change: saveOnFlip(stores.iotClientStore, "internet")
+                    ev_grid_custom_change: saveOnFlip(stores.iotClientStore, "internet"),
+                    ev_grid_save: function () { setTimeout(function () { stores.iotClientStore.sync(); }, 0); }
                 },
                 "#iot-home-grid": {
                     ev_grid_tbar_refresh: function () { stores.iotHomeStore.load(); },
-                    ev_grid_custom_change: saveOnFlip(stores.iotHomeStore, "allowed")
+                    ev_grid_custom_change: saveOnFlip(stores.iotHomeStore, "allowed"),
+                    ev_grid_save: function () { setTimeout(function () { stores.iotHomeStore.sync(); }, 0); }
                 }
             });
         }

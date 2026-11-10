@@ -32,6 +32,7 @@
 #   iot.sh apply      (re)apply everything once
 #   iot.sh watch      foreground loop: re-apply whenever TP-Link undoes our state
 #   iot.sh status     show what is in place
+#   iot.sh guest      apply + show the guest speed limit
 #   iot.sh set <key> <value>   save a setting (iot_ prefix optional), e.g.
 #                     iot.sh set ssid "wifi iot"      iot.sh set key "<password>"
 #                     iot.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
@@ -287,6 +288,108 @@ firewall_remove() {
     rm -f "$RUN/fw.sig"
 }
 
+# --------------------------------------------------------- guest speed limit
+# Optional per-device speed cap for TP-Link's guest networks (iot_guest_limit=1).
+# Each guest gets iot_guest_down / iot_guest_up Mbps unless its MAC is listed in
+# iot_guest_fast. Limited guests are exempted from Broadcom acceleration
+# (BLOGSKIP) so their packets pass through the qdiscs: download is shaped with an
+# htb class per guest on the guest Wi-Fi interface, upload by redirecting the
+# interface's ingress to ifb0 and shaping there. Full-speed guests keep
+# acceleration. Limited guests get no IPv6 (rejected, so they fall back to IPv4
+# at once): the caps match IPv4 addresses, and IPv6 would bypass them.
+# The main Wi-Fi and wifi-iot are never touched.
+TC="${TC:-tc}"
+IPT6="${IPT6:-/usr/sbin/ip6tables}"
+CH_GUEST6=AX10_GUEST6
+IFB="${IFB:-ifb0}"
+CH_GUEST=AX10_GUEST
+guest_load() {
+    GL_ON="$(cfg guest_limit 0)"
+    GL_DOWN="$(cfg guest_down 5)"
+    GL_UP="$(cfg guest_up 2)"
+    GL_FAST="$(cfg guest_fast '')"
+}
+guest_ifs() {   # guest Wi-Fi interfaces from TP-Link's own config (wifi-iface guest=on)
+    for sec in $($UCI show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.guest='\{0,1\}on'\{0,1\}$/\1/p"); do
+        i="$($UCI -q get "wireless.$sec.ifname")"; [ -d "$NET/$i" ] && echo "$i"
+    done
+}
+guest_macs() {  # every connected guest MAC
+    for i in $(guest_ifs); do $WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'; done
+}
+guest_list() {  # "mac ip ifname" for every connected guest with a known IP
+    for i in $(guest_ifs); do
+        for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'); do
+            ip="$(awk -v m="$m" 'tolower($4)==m && $3=="0x2" {print $1; exit}' /proc/net/arp 2>/dev/null)"
+            [ -n "$ip" ] || ip="$(awk -v m="$m" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+            [ -n "$ip" ] && echo "$m $ip $i"
+        done
+    done
+}
+is_fast() { for f in $GL_FAST; do [ "$(echo "$f" | tr A-F a-f)" = "$1" ] && return 0; done; return 1; }
+guest_clear() {
+    for i in $(guest_ifs); do
+        $TC qdisc del dev "$i" root 2>/dev/null; $TC qdisc del dev "$i" ingress 2>/dev/null
+    done
+    $TC qdisc del dev "$IFB" root 2>/dev/null
+    while $IPT -t mangle -D PREROUTING -j $CH_GUEST 2>/dev/null; do :; done
+    while $IPT -t mangle -D FORWARD -j $CH_GUEST 2>/dev/null; do :; done
+    $IPT -t mangle -F $CH_GUEST 2>/dev/null; $IPT -t mangle -X $CH_GUEST 2>/dev/null
+    while $IPT6 -D FORWARD -j $CH_GUEST6 2>/dev/null; do :; done
+    $IPT6 -F $CH_GUEST6 2>/dev/null; $IPT6 -X $CH_GUEST6 2>/dev/null
+}
+guest_sync() {
+    guest_load
+    if [ "$GL_ON" != 1 ]; then
+        [ -f "$RUN/guest.sig" ] && { guest_clear; rm -f "$RUN/guest.sig"; log "guest speed limit off"; }
+        return 0
+    fi
+    list="$(guest_list)"
+    slow="$(echo "$list" | while read m ip i; do [ -n "$m" ] && ! is_fast "$m" && echo "$m $ip $i"; done)"
+    slow6="$(guest_macs | while read m; do [ -n "$m" ] && ! is_fast "$m" && echo "$m"; done | sort -u | tr '\n' ' ')"
+    sig="$GL_DOWN|$GL_UP|$slow|$slow6"
+    [ "$(cat "$RUN/guest.sig" 2>/dev/null)" = "$sig" ] && $IPT -t mangle -C PREROUTING -j $CH_GUEST 2>/dev/null &&
+        $IPT -t mangle -C FORWARD -j $CH_GUEST 2>/dev/null && $IPT6 -C FORWARD -j $CH_GUEST6 2>/dev/null && return 0
+    guest_clear
+    lsmod 2>/dev/null | grep -q '^xt_BLOGSKIP' || insmod /lib/modules/iplatform/xt_BLOGSKIP.ko 2>/dev/null
+    $IPT -t mangle -N $CH_GUEST 2>/dev/null
+    # PREROUTING sees uploads; downloads only carry the guest's address after
+    # de-NAT, so the same chain is also hooked into FORWARD.
+    $IPT -t mangle -I PREROUTING 1 -j $CH_GUEST
+    $IPT -t mangle -I FORWARD 1 -j $CH_GUEST
+    # No IPv6 for limited guests; ahead of the stock "accept established" rule.
+    $IPT6 -N $CH_GUEST6 2>/dev/null
+    $IPT6 -I FORWARD 1 -j $CH_GUEST6
+    for m in $slow6; do $IPT6 -A $CH_GUEST6 -m mac --mac-source "$m" -j REJECT --reject-with icmp6-adm-prohibited; done
+    $IP link set "$IFB" up 2>/dev/null
+    $TC qdisc add dev "$IFB" root handle 1: htb default 1
+    $TC class add dev "$IFB" parent 1: classid 1:1 htb rate 1000mbit
+    for i in $(guest_ifs); do
+        $TC qdisc add dev "$i" root handle 1: htb default 1
+        $TC class add dev "$i" parent 1: classid 1:1 htb rate 1000mbit
+        $TC qdisc add dev "$i" ingress
+    done
+    n=10
+    echo "$slow" | while read m ip i; do
+        [ -n "$m" ] || continue
+        $IPT -t mangle -A $CH_GUEST -s "$ip" -j BLOGSKIP
+        $IPT -t mangle -A $CH_GUEST -d "$ip" -j BLOGSKIP
+        # Short leaf queues: the default (txqueuelen 1000) adds seconds of delay at
+        # a few Mbps. No fq_codel/sfq in this kernel; 30 packets keeps it ~50-70 ms.
+        $TC class add dev "$i" parent 1: classid 1:$n htb rate "${GL_DOWN}mbit" ceil "${GL_DOWN}mbit"
+        $TC qdisc add dev "$i" parent 1:$n handle $n: pfifo limit 30
+        $TC filter add dev "$i" parent 1: protocol ip prio 1 u32 match ip dst "$ip/32" flowid 1:$n
+        $TC filter add dev "$i" parent ffff: protocol ip prio 1 u32 match ip src "$ip/32" action mirred egress redirect dev "$IFB"
+        $TC class add dev "$IFB" parent 1: classid 1:$n htb rate "${GL_UP}mbit" ceil "${GL_UP}mbit"
+        $TC qdisc add dev "$IFB" parent 1:$n handle $n: pfifo limit 30
+        $TC filter add dev "$IFB" parent 1: protocol ip prio 1 u32 match ip src "$ip/32" flowid 1:$n
+        n=$((n + 1))
+    done
+    command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+    echo "$sig" > "$RUN/guest.sig"
+    log "guest speed limit: $(echo "$slow" | grep -c .) guest(s) at ${GL_DOWN}/${GL_UP} Mbps, IPv6 off for $(echo $slow6 | wc -w)"
+}
+
 # --------------------------------------------------------------- apply/stop
 # One pass. Returns 0 when everything is in place.
 apply() {
@@ -351,7 +454,7 @@ inittab_add() {
 watcher_restart() {
     for d in /proc/[0-9]*; do
         [ "${d#/proc/}" = "$$" ] && continue
-        case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
+        case "$( { tr '\0' ' ' < "$d/cmdline"; } 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
     done
 }
 inittab_del() {
@@ -360,7 +463,7 @@ inittab_del() {
     kill -HUP 1 2>/dev/null
     for d in /proc/[0-9]*; do
         [ "${d#/proc/}" = "$$" ] && continue
-        case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
+        case "$( { tr '\0' ' ' < "$d/cmdline"; } 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
     done
 }
 
@@ -372,7 +475,7 @@ WWW="${WWW:-/www/webpages}"
 LUCI_CTL="${LUCI_CTL:-/usr/lib/lua/luci/controller/admin}"
 UI_SRC="$RUN/ui"
 OV="$RUN/overlay"
-UI_VER=iot2
+UI_VER=iot4
 mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
 overlay() {   # overlay <dir> <name>: bind a writable RAM copy over <dir>, echo the copy's path
     if ! mounted "$1"; then
@@ -402,16 +505,21 @@ ui_install() {
     rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null
 
     w="$(overlay "$WWW/modules/advanced/wireless" wireless)" || return 1
-    rm -rf "$w/iotNetwork"; cp -a "$UI_SRC/iotNetwork" "$w/iotNetwork"; chmod -R a+rX "$w/iotNetwork"
+    for m in iotNetwork guestSpeed; do
+        rm -rf "$w/$m"; cp -a "$UI_SRC/$m" "$w/$m"; chmod -R a+rX "$w/$m"
+    done
 
     c="$(overlay "$WWW/config" config)" || return 1
     grep -q '"iotNetwork"' "$c/navigator.json" ||
         sed -i 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"iotNetwork","text":"IOT_NETWORK"}/' "$c/navigator.json"
+    grep -q '"guestSpeed"' "$c/navigator.json" ||
+        sed -i 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"guestSpeed","text":"GUEST_SPEED"}/' "$c/navigator.json"
     # (Re)register the module; the ?t= version makes browsers fetch updated files.
-    grep -q "iotNetwork/script.js?t=$UI_VER\"" "$c/modules.json" || {
-        sed -i 's#"iotNetwork":{[^}]*},##' "$c/modules.json"
-        sed -i "1s#^{#{\"iotNetwork\":{\"controller\":\"./modules/advanced/wireless/iotNetwork/script.js?t=$UI_VER\",\"view\":\"./modules/advanced/wireless/iotNetwork/view.html?t=$UI_VER\"},#" "$c/modules.json"
-    }
+    for m in iotNetwork guestSpeed; do
+        grep -q "$m/script.js?t=$UI_VER\"" "$c/modules.json" && continue
+        sed -i "s#\"$m\":{[^}]*},##" "$c/modules.json"
+        sed -i "1s#^{#{\"$m\":{\"controller\":\"./modules/advanced/wireless/$m/script.js?t=$UI_VER\",\"view\":\"./modules/advanced/wireless/$m/view.html?t=$UI_VER\"},#" "$c/modules.json"
+    done
 
     lang="$($UCI -q get locale.sysinfo.locale)"; lang="${lang:-en_US}"
     [ -f "$WWW/locale/$lang/lan.js" ] || lang=en_US
@@ -421,7 +529,7 @@ ui_install() {
         grep -v '^;\$\.su\.CHAR\.MENU_ITEMS_NAME\.IOT_NETWORK' "$l/lan.js" > "$l/lan.js.new"
         { echo; cat "$UI_SRC/locale.js"; } >> "$l/lan.js.new"; cat "$l/lan.js.new" > "$l/lan.js"; rm -f "$l/lan.js.new"
     fi
-    log "web UI page installed (Advanced > Wireless > IoT Network)"
+    log "web UI pages installed (Advanced > Wireless > IoT Network, Guest Speed)"
 }
 ui_remove() {
     for d in "$LUCI_CTL" "$WWW/modules/advanced/wireless" "$WWW/config" "$WWW"/locale/*; do
@@ -469,21 +577,23 @@ case "$1" in
     watch)
         while :; do
             apply >/dev/null 2>&1
+            guest_sync >/dev/null 2>&1
             lifeline_guard
             trim_log
             sleep "${INTERVAL:-15}"
         done ;;
     start)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
-        apply; inittab_add; watcher_restart; log "watcher registered" ;;
-    stop) stop ;;
+        apply; guest_sync; inittab_add; watcher_restart; log "watcher registered" ;;
+    stop) stop; guest_clear; rm -f "$RUN/guest.sig" ;;
+    guest) guest_sync; guest_load; echo "guest limit: $GL_ON  ${GL_DOWN}/${GL_UP} Mbps  full-speed: ${GL_FAST:-none}"; guest_list ;;
     ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_restart ;;
     ui-remove) ui_remove ;;
     boot)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
         # In-process, not "$0 start": the fetched file is not executable.
-        [ "$(cfg enabled 0)" = 1 ] && { apply; inittab_add; log "watcher registered"; }
+        [ "$(cfg enabled 0)" = 1 ] && { apply; guest_sync; inittab_add; log "watcher registered"; }
         lifeline_guard ;;
     status) status ;;
     set)

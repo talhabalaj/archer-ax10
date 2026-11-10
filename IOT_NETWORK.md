@@ -178,6 +178,34 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   ECDSA key is regenerated each boot (`-R`). Pin the RSA key in known_hosts
   and connect with `-o HostKeyAlgorithms=ssh-rsa` to avoid host-key warnings.
 
+### Guest speed limit (Advanced → Wireless → Guest Speed)
+- Caps each device on TP-Link's guest networks (`iot_guest_limit`,
+  `iot_guest_down`/`iot_guest_up` in Mbps, per device); MACs in
+  `iot_guest_fast` are exempt ("Full speed" switch). Main Wi-Fi and wifi-iot
+  are never shaped. `iot.sh guest` applies and prints it; the watcher keeps it
+  in sync as guests come and go.
+- Broadcom acceleration bypasses Linux queues, so limited guests are exempted
+  with the `BLOGSKIP` target (`/lib/modules/iplatform/xt_BLOGSKIP.ko`) in mangle
+  PREROUTING (uploads) **and** FORWARD (downloads only carry the guest address
+  after de-NAT). Download: `htb` class per guest on the guest Wi-Fi interface,
+  `u32 match ip dst`. Upload: ingress qdisc → `mirred` redirect to `ifb0` →
+  `htb` class per guest.
+- IPv6 bypassed the IPv4-only caps (fast.com uses IPv6), so limited guests get
+  IPv6 rejected (`ip6tables` chain `AX10_GUEST6` at FORWARD position 1, ahead of
+  "accept established", `icmp6-adm-prohibited`) and fall back to IPv4.
+- No `fq_codel`/`codel`/`sfq` in this kernel; each class gets `pfifo limit 30`
+  instead of the default 1000-packet queue, which added hundreds of ms under
+  load at 5 Mbps.
+- Live updates: stop the running watcher before rebuilding by hand, or two
+  rebuilds race (`RTNETLINK answers: Invalid argument`).
+
+### Device lists on the pages
+- Rows show where a device is now (Wi-Fi SSID and band from `wl assoclist`,
+  wired/mesh port from `brctl showmacs`, else ARP), mark the device viewing the
+  page (`REMOTE_ADDR`), sort online first, and can be renamed (UCI list
+  `iot_names`, `mac=name`). The stock grid's store sync sends only the first
+  changed row, so list switches save immediately via `ev_grid_custom_change`.
+
 ### Known trade-offs
 - While the IoT network runs, OneMesh onboarding of a **new** satellite over
   2.4 GHz won't work (its config slot is in use). Existing satellites use
