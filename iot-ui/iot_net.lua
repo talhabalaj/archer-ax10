@@ -49,6 +49,7 @@ local function read_settings()
         hidden   = get("hidden", "0") == "1" and "on" or "off",
         gateway  = get("ip", "192.168.50.1"),
         allow_lan = get("allow_lan", ""),
+        lan_mode = get("lan_mode", "all"),
     }
 end
 
@@ -65,6 +66,7 @@ local function write_settings(form)
     if ssid ~= nil then opts.ssid = ssid end
     if key ~= nil then opts.key = key end
     if form.allow_lan ~= nil then opts.allow_lan = form.allow_lan end
+    if form.lan_mode == "all" or form.lan_mode == "selected" then opts.lan_mode = form.lan_mode end
     save(opts)
     return read_settings()
 end
@@ -94,8 +96,8 @@ end
 
 local function update_client(form)
     local new = form.new and json.decode(form.new) or form
-    local mac = new and (new.mac or new.key)
-    if not mac then return false, "-1" end
+    local mac = new and (new.mac or new.key or form.key)
+    if not mac or not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then return false, "-1" end
     mac = mac:lower()
     local out = {}
     for _, m in ipairs(words(get("noinet", ""))) do
@@ -107,10 +109,61 @@ local function update_client(form)
     return new
 end
 
+------------------------------------------------- home devices allowed to reach IoT
+-- Home-network devices (DHCP leases outside the IoT subnet), plus allowlisted MACs
+-- that are currently offline so they can still be removed. With lan_mode
+-- "selected", only allowlisted MACs may open connections to IoT devices.
+local function homes()
+    local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
+    local allow = words(get("lan_allow", ""))
+    local list, seen = {}, {}
+    local f = io.open("/tmp/dhcp.leases")
+    if f then
+        for line in f:lines() do
+            local _, mac, ip, name = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+            if ip and not (prefix and ip:sub(1, #prefix + 1) == prefix .. ".") and not seen[mac:lower()] then
+                seen[mac:lower()] = true
+                list[#list + 1] = {
+                    key = mac:lower(), mac = mac:upper(), ip = ip,
+                    name = (name ~= "*" and name) or "Unknown",
+                    allowed = has(allow, mac) and "on" or "off",
+                }
+            end
+        end
+        f:close()
+    end
+    for _, m in ipairs(allow) do
+        if not seen[m:lower()] then
+            list[#list + 1] = { key = m:lower(), mac = m:upper(), ip = "---", name = "Offline device", allowed = "on" }
+        end
+    end
+    return list
+end
+
+local function update_home(form)
+    local new = form.new and json.decode(form.new) or form
+    local mac = new and (new.mac or new.key or form.key)
+    if not mac or not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then return false, "-1" end
+    mac = mac:lower()
+    local out = {}
+    for _, m in ipairs(words(get("lan_allow", ""))) do
+        if m:lower() ~= mac then out[#out + 1] = m:lower() end
+    end
+    if new.allowed == "on" then out[#out + 1] = mac end
+    save({ lan_allow = table.concat(out, " ") })
+    new.key = mac
+    return new
+end
+
 local dispatch_tbl = {
     settings = {
         ["read"]  = { cb = read_settings },
         ["write"] = { cb = write_settings },
+    },
+    homes = {
+        ["load"]   = { cb = homes },
+        ["read"]   = { cb = homes },
+        ["update"] = { cb = update_home },
     },
     clients = {
         ["load"]   = { cb = clients },

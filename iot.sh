@@ -37,6 +37,7 @@
 #                     iot.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
 #                     iot.sh set noinet "aa:bb:cc:dd:ee:02"
 #                     iot.sh set allow_lan "tcp:8899@192.168.50.10"
+#                     iot.sh set lan_mode selected; iot.sh set lan_allow "<phone-mac>"
 #                     iot.sh set enabled 1
 # ============================================================
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -76,6 +77,8 @@ load() {
     NOINET="$(cfg noinet '')"
     STATIC="$(cfg static '')"
     ALLOW_LAN="$(cfg allow_lan '')"
+    LAN_MODE="$(cfg lan_mode all)"      # all | selected
+    LAN_ALLOW="$(cfg lan_allow '')"     # home MACs allowed to reach IoT (mode selected)
 }
 log() { mkdir -p "$RUN"; echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s $*" >> "$LOG"; }
 trim_log() { [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ] && tail -n 200 "$LOG" > "$LOG.1" && mv "$LOG.1" "$LOG"; }
@@ -224,7 +227,12 @@ dhcp_remove() {
 firewall() {
     # filter: chains are flushed and refilled, jumps added once.
     $IPT -N $CH_FWD 2>/dev/null; $IPT -F $CH_FWD
-    $IPT -A $CH_FWD -i br-lan -o $BR -j ACCEPT
+    # Home -> IoT: every home device, or only allowlisted MACs (mode "selected").
+    if [ "$LAN_MODE" = selected ]; then
+        for m in $LAN_ALLOW; do $IPT -A $CH_FWD -i br-lan -o $BR -m mac --mac-source "$m" -j ACCEPT; done
+    else
+        $IPT -A $CH_FWD -i br-lan -o $BR -j ACCEPT
+    fi
     $IPT -A $CH_FWD -o $BR -m state --state ESTABLISHED,RELATED -j ACCEPT
     $IPT -A $CH_FWD -o $BR -j DROP
     $IPT -A $CH_FWD -i $BR -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -257,10 +265,10 @@ firewall() {
 
     # Broadcom flow cache can keep forwarding already-accelerated flows.
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$NOINET|$ALLOW_LAN" > "$RUN/fw.sig"
+    echo "$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" > "$RUN/fw.sig"
 }
 firewall_ok() {
-    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$NOINET|$ALLOW_LAN" ] &&
+    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" ] &&
     $IPT -C FORWARD -i $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C FORWARD -o $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C $CH_FWD -i $BR -j ACCEPT 2>/dev/null &&
@@ -356,7 +364,7 @@ WWW="${WWW:-/www/webpages}"
 LUCI_CTL="${LUCI_CTL:-/usr/lib/lua/luci/controller/admin}"
 UI_SRC="$RUN/ui"
 OV="$RUN/overlay"
-UI_VER=iot1
+UI_VER=iot2
 mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
 overlay() {   # overlay <dir> <name>: bind a writable RAM copy over <dir>, echo the copy's path
     if ! mounted "$1"; then
@@ -391,13 +399,20 @@ ui_install() {
     c="$(overlay "$WWW/config" config)" || return 1
     grep -q '"iotNetwork"' "$c/navigator.json" ||
         sed -i 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"iotNetwork","text":"IOT_NETWORK"}/' "$c/navigator.json"
-    grep -q '"iotNetwork"' "$c/modules.json" ||
+    # (Re)register the module; the ?t= version makes browsers fetch updated files.
+    grep -q "iotNetwork/script.js?t=$UI_VER\"" "$c/modules.json" || {
+        sed -i 's#"iotNetwork":{[^}]*},##' "$c/modules.json"
         sed -i "1s#^{#{\"iotNetwork\":{\"controller\":\"./modules/advanced/wireless/iotNetwork/script.js?t=$UI_VER\",\"view\":\"./modules/advanced/wireless/iotNetwork/view.html?t=$UI_VER\"},#" "$c/modules.json"
+    }
 
     lang="$($UCI -q get locale.sysinfo.locale)"; lang="${lang:-en_US}"
     [ -f "$WWW/locale/$lang/lan.js" ] || lang=en_US
     l="$(overlay "$WWW/locale/$lang" "locale-$lang")" || return 1
-    grep -q "IOT_NETWORK" "$l/lan.js" || cat "$UI_SRC/locale.js" >> "$l/lan.js"
+    # Replace our labels line (it starts with ;$.su.CHAR.MENU_ITEMS_NAME.IOT_NETWORK).
+    if ! grep -qF "$(cat "$UI_SRC/locale.js")" "$l/lan.js"; then
+        grep -v '^;\$\.su\.CHAR\.MENU_ITEMS_NAME\.IOT_NETWORK' "$l/lan.js" > "$l/lan.js.new"
+        { echo; cat "$UI_SRC/locale.js"; } >> "$l/lan.js.new"; cat "$l/lan.js.new" > "$l/lan.js"; rm -f "$l/lan.js.new"
+    fi
     log "web UI page installed (Advanced > Wireless > IoT Network)"
 }
 ui_remove() {
@@ -432,6 +447,7 @@ status() {
     echo "no-inet:   ${NOINET:-none}"
     echo "static:    ${STATIC:-none}"
     echo "allow-lan: ${ALLOW_LAN:-none}"
+    echo "home->iot: $LAN_MODE$([ "$LAN_MODE" = selected ] && echo " (${LAN_ALLOW:-nobody})")"
     firewall_ok && echo "firewall:  ok" || echo "firewall:  MISSING/outdated"
     grep -q "^$MARK_BEGIN\$" "$DNSMASQ_CONF" 2>/dev/null && echo "dhcp:      dnsmasq block present" || echo "dhcp:      MISSING"
     grep -q "$TAG" "$INITTAB" 2>/dev/null && echo "watcher:   registered" || echo "watcher:   not registered"

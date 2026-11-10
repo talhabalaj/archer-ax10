@@ -169,6 +169,22 @@ has "wl -i wl1.4 map 3"
 grep -qE "wl1\.1 (ssid|closed|dwds|map|bss down)|-i wl1\.1 set" "$T/calls" && fail "changed the main Wi-Fi"
 has "brctl delbr br-iot"
 
+# lan_mode=selected: only allowlisted home MACs may reach IoT; no blanket accept.
+cat > "$T/bin/uci2" <<EOF
+#!/bin/sh
+case "\$*" in
+  *iot_lan_mode*) echo "selected" ;;
+  *iot_lan_allow*) echo "aa:bb:cc:00:00:01" ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci2"; : > "$T/calls"
+env UCI="$T/bin/uci2" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" IPT="$T/bin/iptables" \
+    MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
+    NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" PATH="$T/bin:$PATH" sh "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+has "iptables -A AX10_IOT_FWD -i br-lan -o br-iot -m mac --mac-source aa:bb:cc:00:00:01 -j ACCEPT"
+grep -q "AX10_IOT_FWD -i br-lan -o br-iot -j ACCEPT" "$T/calls" && fail "selected mode still has the blanket home->IoT accept"
+
 # A dead SSH lifeline is restarted by the boot/watch path.
 cat > "$T/bin/dropbear" <<EOF
 #!/bin/sh
@@ -183,7 +199,7 @@ env UCI="$T/bin/uci" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/
     NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" PATH="$T/bin:$PATH" \
     LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" \
     sh "$T/iot.sh" boot >/dev/null 2>&1 || true
-has "brctl addif br-iot wl1.4"
+[ "$(readlink "$T/net/wl1.4/brport/bridge")" = "../../br-iot" ] || fail "boot did not put wl1.4 in br-iot"
 grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher"
 sleep 1; has "dropbear -p"
 
