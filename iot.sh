@@ -57,12 +57,18 @@ NET="${NET:-/sys/class/net}"
 RUN="${RUN:-/tmp/ax10-iot}"
 INITTAB="${INITTAB:-/etc/inittab}"
 SELF="${SELF:-/tmp/iot.sh}"
+ARP="${ARP:-/proc/net/arp}"
+LEASES="${LEASES:-/tmp/dhcp.leases}"
+SYS6="${SYS6:-/proc/sys/net/ipv6/conf}"
+# How to make busybox-init re-read inittab; tests set INIT_HUP=true.
+INIT_HUP="${INIT_HUP:-kill -HUP 1}"
 SRC="${SRC:-https://github.com/talhabalaj/archer-ax10/releases/latest/download}"
 SEC=openvpn.archer_boot
 BR=br-iot
 CH_FWD=AX10_IOT_FWD
 CH_IN=AX10_IOT_IN
 CH_NAT=AX10_IOT_NAT
+CH_IOT6=AX10_IOT6
 LOG="$RUN/iot.log"
 
 cfg() { v="$($UCI -q get "$SEC.iot_$1" 2>/dev/null)"; [ -n "$v" ] && echo "$v" || echo "$2"; }
@@ -84,6 +90,36 @@ load() {
 }
 log() { mkdir -p "$RUN"; echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s $*" >> "$LOG"; }
 trim_log() { [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ] && tail -n 200 "$LOG" > "$LOG.1" && mv "$LOG.1" "$LOG"; }
+
+# --------------------------------------------------------------------- lock
+# One iot.sh at a time may change the router. The watcher, `start` from the web
+# page (once per saved switch) and a shell can all overlap; interleaved rebuilds
+# would leave iptables rules in the wrong order. mkdir is atomic on every
+# filesystem here (no flock in this busybox). The holder's pid is stored so a
+# lock left by a killed process (watcher_restart kills the watcher) is taken over.
+LOCK="$RUN/lock"
+LOCK_WAIT="${LOCK_WAIT:-60}"
+lock() {   # lock [seconds to wait, default $LOCK_WAIT]; returns 1 if still held
+    w="${1:-$LOCK_WAIT}"; mkdir -p "$RUN"
+    while :; do
+        if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
+        p="$(cat "$LOCK/pid" 2>/dev/null)"
+        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then
+            # Holder is gone. Remove only if it is still that holder's lock.
+            [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$p" ] && rm -rf "$LOCK"
+            continue
+        fi
+        if [ "$w" -le 0 ]; then
+            # No pid after the whole wait: the holder died between mkdir and
+            # writing its pid. Take the lock over.
+            [ -z "$p" ] && { rm -rf "$LOCK"; continue; }
+            return 1
+        fi
+        w=$((w - 1)); sleep 1
+    done
+}
+unlock() { [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"; return 0; }
+
 bridge_of() { m="$(readlink "$NET/$1/brport/bridge" 2>/dev/null)"; echo "${m##*/}"; }
 
 # ---------------------------------------------------------------- Wi-Fi slot
@@ -226,6 +262,47 @@ dhcp_remove() {
 }
 
 # ------------------------------------------------------------------ firewall
+# IPv6 on the IoT network: off. Everything below is IPv4, and the IoT subnet is
+# IPv4-only by design, so IPv6 must not be a way around it. disable_ipv6 makes
+# the kernel ignore IPv6 arriving on the bridge (to the router or forwarded);
+# the ip6tables chain is a second layer in case something re-enables it.
+v6_off() {
+    f="$SYS6/$BR/disable_ipv6"
+    [ -f "$f" ] || return 0
+    [ "$(cat "$f" 2>/dev/null)" = 1 ] && return 0
+    echo 1 > "$f" 2>/dev/null && log "IPv6 disabled on $BR"
+}
+V6_HOOKS="INPUT:-i FORWARD:-i FORWARD:-o"      # chain:direction for the jumps
+v6_firewall() {
+    $IPT6 -N $CH_IOT6 2>/dev/null; $IPT6 -F $CH_IOT6
+    $IPT6 -A $CH_IOT6 -j DROP
+    for h in $V6_HOOKS; do
+        $IPT6 -C "${h%%:*}" "${h#*:}" $BR -j $CH_IOT6 2>/dev/null ||
+            $IPT6 -I "${h%%:*}" 1 "${h#*:}" $BR -j $CH_IOT6
+    done
+}
+v6_firewall_ok() {
+    # No working ip6tables on this box: nothing to check (v6_off still applies).
+    $IPT6 -L INPUT -n >/dev/null 2>&1 || return 0
+    $IPT6 -C $CH_IOT6 -j DROP 2>/dev/null || return 1
+    for h in $V6_HOOKS; do
+        $IPT6 -C "${h%%:*}" "${h#*:}" $BR -j $CH_IOT6 2>/dev/null || return 1
+    done
+}
+v6_firewall_remove() {
+    for h in $V6_HOOKS; do
+        while $IPT6 -D "${h%%:*}" "${h#*:}" $BR -j $CH_IOT6 2>/dev/null; do :; done
+    done
+    $IPT6 -F $CH_IOT6 2>/dev/null; $IPT6 -X $CH_IOT6 2>/dev/null
+}
+
+# Bump when the rules built by firewall() change, so a running router rebuilds.
+FW_VER=3
+# Our chains exactly as iptables lists them, in order. firewall() saves
+# this after a rebuild and firewall_ok() compares, so a missing, extra or
+# reordered rule triggers a rebuild. If this iptables has no -S, both sides
+# are empty and the -C checks below still apply.
+fw_dump() { $IPT -S $CH_FWD 2>/dev/null; $IPT -S $CH_IN 2>/dev/null; $IPT -t nat -S $CH_NAT 2>/dev/null; $IPT6 -S $CH_IOT6 2>/dev/null; }
 firewall() {
     # filter: chains are flushed and refilled, jumps added once.
     $IPT -N $CH_FWD 2>/dev/null; $IPT -F $CH_FWD
@@ -237,7 +314,10 @@ firewall() {
     fi
     $IPT -A $CH_FWD -o $BR -m state --state ESTABLISHED,RELATED -j ACCEPT
     $IPT -A $CH_FWD -o $BR -j DROP
-    $IPT -A $CH_FWD -i $BR -m state --state ESTABLISHED,RELATED -j ACCEPT
+    # Replies from IoT to home devices only. Internet-bound packets, even of an
+    # open connection, must reach the no-inet drops below, so that switching a
+    # device's Internet off also cuts what it already has open.
+    $IPT -A $CH_FWD -i $BR -o br+ -m state --state ESTABLISHED,RELATED -j ACCEPT
     # Narrow IoT -> LAN exceptions: "proto:port" or "proto:port@iot-ip",
     # e.g. tcp:8899@192.168.50.10 for the inverter-link logger callback.
     for a in $ALLOW_LAN; do
@@ -265,19 +345,24 @@ firewall() {
     $IPT -t nat -A $CH_NAT -s "$PREFIX.0/24" ! -o br+ -j MASQUERADE
     $IPT -t nat -C POSTROUTING -j $CH_NAT 2>/dev/null || $IPT -t nat -I POSTROUTING 1 -j $CH_NAT
 
+    v6_firewall
+
     # Broadcom flow cache can keep forwarding already-accelerated flows.
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" > "$RUN/fw.sig"
+    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" > "$RUN/fw.sig"
+    fw_dump > "$RUN/fw.snap"
 }
 firewall_ok() {
-    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" ] &&
+    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" ] &&
     $IPT -C FORWARD -i $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C FORWARD -o $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C $CH_FWD -i $BR -j ACCEPT 2>/dev/null &&
     $IPT -C INPUT -i $BR -j $CH_IN 2>/dev/null &&
     $IPT -C $CH_IN -j DROP 2>/dev/null &&
     $IPT -t nat -C POSTROUTING -j $CH_NAT 2>/dev/null &&
-    $IPT -t nat -C $CH_NAT -s "$PREFIX.0/24" ! -o br+ -j MASQUERADE 2>/dev/null
+    $IPT -t nat -C $CH_NAT -s "$PREFIX.0/24" ! -o br+ -j MASQUERADE 2>/dev/null &&
+    v6_firewall_ok &&
+    [ "$(fw_dump)" = "$(cat "$RUN/fw.snap" 2>/dev/null)" ]
 }
 firewall_remove() {
     for d in "-i $BR" "-o $BR"; do while $IPT -D FORWARD $d -j $CH_FWD 2>/dev/null; do :; done; done
@@ -286,7 +371,8 @@ firewall_remove() {
     $IPT -F $CH_FWD 2>/dev/null; $IPT -X $CH_FWD 2>/dev/null
     $IPT -F $CH_IN 2>/dev/null; $IPT -X $CH_IN 2>/dev/null
     $IPT -t nat -F $CH_NAT 2>/dev/null; $IPT -t nat -X $CH_NAT 2>/dev/null
-    rm -f "$RUN/fw.sig"
+    v6_firewall_remove
+    rm -f "$RUN/fw.sig" "$RUN/fw.snap"
 }
 
 # --------------------------------------------------------- guest speed limit
@@ -321,8 +407,8 @@ guest_macs() {  # every connected guest MAC
 guest_list() {  # "mac ip ifname" for every connected guest with a known IP
     for i in $(guest_ifs); do
         for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'); do
-            ip="$(awk -v m="$m" 'tolower($4)==m && $3=="0x2" {print $1; exit}' /proc/net/arp 2>/dev/null)"
-            [ -n "$ip" ] || ip="$(awk -v m="$m" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+            ip="$(awk -v m="$m" 'tolower($4)==m && $3=="0x2" {print $1; exit}' "$ARP" 2>/dev/null)"
+            [ -n "$ip" ] || ip="$(awk -v m="$m" 'tolower($2)==m {print $3; exit}' "$LEASES" 2>/dev/null)"
             [ -n "$ip" ] && echo "$m $ip $i"
         done
     done
@@ -413,6 +499,7 @@ apply() {
         $IP addr add "$GW/24" dev $BR && log "address $GW/24 on $BR"
     }
     $IP link set $BR up
+    v6_off
 
     vif_flags_ok || { wifi_patch && radio_rebuild; }
     vif_flags_ok || log "$VIF still has mesh flags (dwds=$($WL -i "$VIF" dwds 2>/dev/null))"
@@ -451,7 +538,7 @@ stop() {
 TAG="ax10-iot-watch"
 inittab_add() {
     { grep -v "$TAG" "$INITTAB" 2>/dev/null; echo "::respawn:/bin/sh $SELF watch # $TAG"; } > "$INITTAB.new"
-    cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"; kill -HUP 1 2>/dev/null
+    cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"; $INIT_HUP 2>/dev/null
 }
 # A running watcher keeps the functions it loaded at start; after iot.sh is
 # replaced on disk, kill it so init respawns it with the new code.
@@ -464,7 +551,7 @@ watcher_restart() {
 inittab_del() {
     grep -q "$TAG" "$INITTAB" 2>/dev/null || return 0
     grep -v "$TAG" "$INITTAB" > "$INITTAB.new"; cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"
-    kill -HUP 1 2>/dev/null
+    $INIT_HUP 2>/dev/null
     for d in /proc/[0-9]*; do
         [ "${d#/proc/}" = "$$" ] && continue
         case "$( { tr '\0' ' ' < "$d/cmdline"; } 2>/dev/null)" in *"$SELF watch"*) kill "${d#/proc/}" 2>/dev/null;; esac
@@ -502,6 +589,8 @@ ui_fetch() {
     fi
     gzip -dc "$RUN/iot-ui.tgz" | tar xf - -C "$UI_SRC" && rm -f "$RUN/iot-ui.tgz"*
 }
+# In-place sed without sed's -i flag (its syntax differs between busybox/GNU and BSD).
+sed_in() { sed "$1" "$2" > "$2.new" && cat "$2.new" > "$2"; rm -f "$2.new"; }   # sed_in <script> <file>
 ui_install() {
     ui_fetch || { log "could not fetch iot-ui"; return 1; }
     ctl="$(overlay "$LUCI_CTL" luci-ctl)" || return 1
@@ -515,14 +604,14 @@ ui_install() {
 
     c="$(overlay "$WWW/config" config)" || return 1
     grep -q '"iotNetwork"' "$c/navigator.json" ||
-        sed -i 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"iotNetwork","text":"IOT_NETWORK"}/' "$c/navigator.json"
+        sed_in 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"iotNetwork","text":"IOT_NETWORK"}/' "$c/navigator.json"
     grep -q '"guestSpeed"' "$c/navigator.json" ||
-        sed -i 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"guestSpeed","text":"GUEST_SPEED"}/' "$c/navigator.json"
+        sed_in 's/{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}/&,{"name":"guestSpeed","text":"GUEST_SPEED"}/' "$c/navigator.json"
     # (Re)register the module; the ?t= version makes browsers fetch updated files.
     for m in iotNetwork guestSpeed; do
         grep -q "$m/script.js?t=$UI_VER\"" "$c/modules.json" && continue
-        sed -i "s#\"$m\":{[^}]*},##" "$c/modules.json"
-        sed -i "1s#^{#{\"$m\":{\"controller\":\"./modules/advanced/wireless/$m/script.js?t=$UI_VER\",\"view\":\"./modules/advanced/wireless/$m/view.html?t=$UI_VER\"},#" "$c/modules.json"
+        sed_in "s#\"$m\":{[^}]*},##" "$c/modules.json"
+        sed_in "1s#^{#{\"$m\":{\"controller\":\"./modules/advanced/wireless/$m/script.js?t=$UI_VER\",\"view\":\"./modules/advanced/wireless/$m/view.html?t=$UI_VER\"},#" "$c/modules.json"
     done
 
     lang="$($UCI -q get locale.sysinfo.locale)"; lang="${lang:-en_US}"
@@ -572,16 +661,27 @@ status() {
     grep -q "^$MARK_BEGIN\$" "$DNSMASQ_CONF" 2>/dev/null && echo "dhcp:      dnsmasq block present" || echo "dhcp:      MISSING"
     grep -q "$TAG" "$INITTAB" 2>/dev/null && echo "watcher:   registered" || echo "watcher:   not registered"
     mounted "$LUCI_CTL" && echo "web page:  installed" || echo "web page:  not installed"
-    echo "--- IoT leases"; grep " $PREFIX\." /tmp/dhcp.leases 2>/dev/null | awk '{print $2, $3, $4}'
+    echo "--- IoT leases"; grep " $PREFIX\." "$LEASES" 2>/dev/null | awk '{print $2, $3, $4}'
     [ -f "$LOG" ] && { echo "--- last log lines"; tail -n 8 "$LOG"; }
 }
+
+# Commands that change the router take the lock for their whole run.
+case "$1" in
+    apply|start|stop|guest|ui|ui-remove|boot)
+        lock || { log "$1: another iot.sh run still holds the lock; gave up after ${LOCK_WAIT}s"
+                  echo "iot.sh: another run is in progress; try again" >&2; exit 1; }
+        trap unlock EXIT ;;
+esac
 
 case "$1" in
     apply) apply ;;
     watch)
         while :; do
-            apply >/dev/null 2>&1
-            guest_sync >/dev/null 2>&1
+            if lock 5; then
+                apply >/dev/null 2>&1
+                guest_sync >/dev/null 2>&1
+                unlock
+            fi
             lifeline_guard
             trim_log
             sleep "${INTERVAL:-15}"

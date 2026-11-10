@@ -21,7 +21,8 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
 | Home LAN → IoT | allowed (apps, inverter-link) |
 | IoT → home LAN | blocked, except replies and `iot_allow_lan` exceptions |
 | IoT → router | DHCP, DNS and ping only (no web UI, no SSH) |
-| IoT → internet | allowed, except MACs in `iot_noinet` |
+| IoT → internet | allowed, except MACs in `iot_noinet` (switching a device off also cuts its open connections) |
+| IoT, IPv6 | off: disabled on `br-iot` and dropped by `ip6tables` (`AX10_IOT6`); the IoT network is IPv4-only |
 
 - **Wi-Fi:** the spare 2.4 GHz slot `wl1.4` becomes the IoT SSID (name,
   password and hidden flag set through hostapd and `wl`).
@@ -198,8 +199,10 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   1000-packet queue. Measured: a fixed 30 packets gave +80 ms loaded latency at
   5 Mbps (vs ~1 ms on the unshaped main Wi-Fi). Shorter queues trade a little
   throughput on long-RTT paths for lower latency.
-- Live updates: stop the running watcher before rebuilding by hand, or two
-  rebuilds race (`RTNETLINK answers: Invalid argument`).
+- Live updates: `iot.sh` runs take turns through a lock (`/tmp/ax10-iot/lock`),
+  so a rebuild by hand, the watcher and the web page cannot interleave. A
+  command that cannot get the lock within 60 s exits with an error; the
+  watcher skips that pass and tries again 15 s later.
 
 ### Device lists on the pages
 - Rows show where a device is now (Wi-Fi SSID and band from `wl assoclist`,

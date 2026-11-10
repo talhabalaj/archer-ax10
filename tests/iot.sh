@@ -4,9 +4,11 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/net/wl1.1/brport" "$T/net/wl1.4/brport" "$T/net/br-lan" "$T/run"
+mkdir -p "$T/sys6/br-iot"; echo 0 > "$T/sys6/br-iot/disable_ipv6"
 ln -s ../../br-lan "$T/net/wl1.4/brport/bridge"
 ln -s ../../br-lan "$T/net/wl1.1/brport/bridge"
 : > "$T/inittab"; : > "$T/calls"
+: > "$T/arp"; : > "$T/leases"
 
 cat > "$T/bin/uci" <<EOF
 #!/bin/sh
@@ -30,6 +32,7 @@ case "\$1" in
   ssid) if [ -n "\$2" ]; then echo "\$2" > "$T/run/ssid.\$i"; else echo "Current SSID: \"\$(cat "$T/run/ssid.\$i" 2>/dev/null)\""; fi ;;
   bss) if [ -n "\$2" ]; then echo "\$2" > "$T/run/bss.\$i"; else cat "$T/run/bss.\$i" 2>/dev/null || echo down; fi ;;
   dwds) if [ -n "\$2" ]; then echo "\$2" > "$T/dwds"; else cat "$T/dwds" 2>/dev/null || echo 0; fi ;;
+  assoclist) if [ "\$i" = wl1.3 ]; then echo "assoclist AA:BB:CC:00:00:08"; echo "assoclist AA:BB:CC:00:00:09"; fi ;;
   map) if [ -n "\$2" ]; then [ "\$2" = 0 ] && echo "0x0:" > "$T/map" || echo "0x\$2:" > "$T/map"; else cat "$T/map" 2>/dev/null || echo "0x0:"; fi ;;
 esac
 EOF
@@ -65,6 +68,7 @@ case "\$op" in
   -D) grep -qxF "\$tbl \$*" "$T/rules" 2>/dev/null || exit 1
       grep -vxF "\$tbl \$*" "$T/rules" > "$T/r2"; mv "$T/r2" "$T/rules" ;;
   -F) [ -f "$T/rules" ] && grep -v "^\$tbl \$1 " "$T/rules" > "$T/r2"; mv "$T/r2" "$T/rules" 2>/dev/null || true ;;
+  -S) grep "^\$tbl \$1 " "$T/rules" 2>/dev/null || true ;;
 esac
 EOF
 # dnsmasq init stub + a copy of the stock include file.
@@ -83,19 +87,54 @@ cat > "$T/bin/mount" <<EOF
 echo "mount \$*" >> "$T/calls"
 EOF
 printf '%s\n' 'nvram set ${CONFIG_WIFI}_map="3" # BH BSS + FH BSS' 'nvram set ${RTORCFG_WIFI}_dwds="1"' > "$T/tplink_brcm.sh"
+cat > "$T/bin/tc" <<EOF
+#!/bin/sh
+echo "tc \$*" >> "$T/calls"
+EOF
+# ip6tables: same rule memory as iptables, in its own files.
+cat > "$T/bin/ip6tables" <<EOF
+#!/bin/sh
+echo "ip6tables \$*" >> "$T/calls"
+args="\$*"; tbl=filter
+case "\$1" in -t) tbl=\$2; shift 2; args="\$*";; esac
+op=\$1; shift
+case "\$op" in
+  -C) grep -qxF "\$tbl \$*" "$T/rules6" 2>/dev/null ;;
+  -A) echo "\$tbl \$*" >> "$T/rules6" ;;
+  -I) ch=\$1; shift; [ "\$1" -eq "\$1" ] 2>/dev/null && shift; echo "\$tbl \$ch \$*" >> "$T/rules6" ;;
+  -D) grep -qxF "\$tbl \$*" "$T/rules6" 2>/dev/null || exit 1
+      grep -vxF "\$tbl \$*" "$T/rules6" > "$T/r6"; mv "$T/r6" "$T/rules6" ;;
+  -F) [ -f "$T/rules6" ] && grep -v "^\$tbl \$1 " "$T/rules6" > "$T/r6"; mv "$T/r6" "$T/rules6" 2>/dev/null || true ;;
+  -S) grep "^\$tbl \$1 " "$T/rules6" 2>/dev/null || true ;;
+esac
+EOF
 chmod +x "$T/bin/"*
 
-run() {
-  env UCI="$T/bin/uci" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" IPT="$T/bin/iptables" \
-      MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" PATH="$T/bin:$PATH" \
-      sh "$ROOT/iot.sh" "$@"
+# iot <uci stub> <script> <args...>: run iot.sh with every host touch-point stubbed.
+iot() {
+  u="$1"; s="$2"; shift 2
+  env UCI="$u" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
+      IPT="$T/bin/iptables" IPT6="$T/bin/ip6tables" TC="$T/bin/tc" \
+      MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" \
+      WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
+      NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" \
+      ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true \
+      LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" PATH="$T/bin:$PATH" \
+      sh "$s" "$@"
 }
+run() { iot "$T/bin/uci" "$ROOT/iot.sh" "$@"; }
 
 fail() { echo "FAIL: $1"; echo "--- calls"; cat "$T/calls"; exit 1; }
 has() { grep -qF -- "$1" "$T/calls" || fail "expected call: $1"; }
 
 run apply || true
 has "brctl addbr br-iot"
+# IPv6 is switched off on the IoT bridge and dropped as a second layer.
+[ "$(cat "$T/sys6/br-iot/disable_ipv6")" = 1 ] || fail "IPv6 not disabled on br-iot"
+has "ip6tables -A AX10_IOT6 -j DROP"
+has "ip6tables -I INPUT 1 -i br-iot -j AX10_IOT6"
+has "ip6tables -I FORWARD 1 -i br-iot -j AX10_IOT6"
+has "ip6tables -I FORWARD 1 -o br-iot -j AX10_IOT6"
 has "brctl delif br-lan wl1.4"
 has "brctl addif br-iot wl1.4"
 has "hostapd_cli -i wl1.4 set ssid wifi iot"
@@ -106,7 +145,7 @@ has "wl -i wl1.4 closed 0"
 has "wl -i wl1.4 bss up"
 has "ip addr add 192.168.50.1/24 dev br-iot"
 has "iptables -A AX10_IOT_FWD -i br-lan -o br-iot -j ACCEPT"
-has "iptables -A AX10_IOT_FWD -i br-iot -m state --state ESTABLISHED,RELATED -j ACCEPT"
+has "iptables -A AX10_IOT_FWD -i br-iot -o br+ -m state --state ESTABLISHED,RELATED -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br+ -j DROP"
 has "iptables -A AX10_IOT_FWD -i br-iot -m mac --mac-source aa:bb:cc:dd:ee:02 -j DROP"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.10 -p tcp --dport 8899 -j ACCEPT"
@@ -125,11 +164,38 @@ grep -qx "dhcp-host=aa:bb:cc:dd:ee:01,192.168.50.10" "$T/dnsmasq.conf" || fail "
 order="$(grep -n 'AX10_IOT_FWD -i br-iot' "$T/rules" | cut -d: -f1 | tr '\n' ' ')"
 last="$(grep -n 'AX10_IOT_FWD -i br-iot -j ACCEPT' "$T/rules" | cut -d: -f1)"
 for n in $order; do [ "$n" -le "$last" ] || fail "rule after final accept"; done
+# "Internet off" must also cut connections that are already open: no rule may
+# accept established traffic from IoT without limiting it to the home side, and
+# the no-inet drop must come before anything that could accept Internet traffic.
+grep -q 'AX10_IOT_FWD -i br-iot -m state' "$T/rules" && fail "established IoT traffic is accepted before the no-inet drop"
+noinet_ln="$(grep -n 'AX10_IOT_FWD -i br-iot -m mac --mac-source aa:bb:cc:dd:ee:02 -j DROP' "$T/rules" | cut -d: -f1)"
+[ -n "$noinet_ln" ] || fail "no-inet drop missing"
+grep -n 'AX10_IOT_FWD -i br-iot' "$T/rules" | grep -v -- '-o br' | while IFS=: read n rule; do
+  case "$rule" in *"-j ACCEPT"*) [ "$n" -gt "$noinet_ln" ] || { echo "FAIL: accept without -o before the no-inet drop: $rule"; exit 1; } ;; esac
+done || exit 1
 
 # Second pass is a no-op: nothing moved, firewall not rebuilt.
 : > "$T/calls"
 run apply || true
 grep -q "brctl\|-F AX10\|dnsmasq\|hostapd_cli" "$T/calls" && fail "second apply was not idempotent"
+
+# Something re-enables IPv6 on the bridge: the next pass turns it off again.
+echo 0 > "$T/sys6/br-iot/disable_ipv6"
+run apply || true
+[ "$(cat "$T/sys6/br-iot/disable_ipv6")" = 1 ] || fail "IPv6 on br-iot not switched off again"
+
+# Same rules in the wrong order (final accept first) must be noticed and rebuilt.
+{ echo "filter AX10_IOT_FWD -i br-iot -j ACCEPT"
+  grep -vxF "filter AX10_IOT_FWD -i br-iot -j ACCEPT" "$T/rules"; } > "$T/r3"
+mv "$T/r3" "$T/rules"
+: > "$T/calls"; run apply || true
+has "iptables -F AX10_IOT_FWD"
+drop_ln="$(grep -nxF 'filter AX10_IOT_FWD -i br-iot -o br+ -j DROP' "$T/rules" | head -n1 | cut -d: -f1)"
+acc_ln="$(grep -nxF 'filter AX10_IOT_FWD -i br-iot -j ACCEPT' "$T/rules" | head -n1 | cut -d: -f1)"
+[ -n "$drop_ln" ] && [ -n "$acc_ln" ] && [ "$drop_ln" -lt "$acc_ln" ] || fail "rule order not repaired"
+[ "$(grep -cxF 'filter AX10_IOT_FWD -i br-iot -j ACCEPT' "$T/rules")" -eq 1 ] || fail "final accept not exactly once"
+: > "$T/calls"; run apply || true
+grep -q -- "-F AX10" "$T/calls" && fail "apply not stable after order repair"
 
 # TP-Link Wi-Fi restart puts its own SSID back: the next pass re-applies ours.
 echo "e2b6520c958f5e14820332d7ee1a39" > "$T/run/ssid.wl1.4"; : > "$T/calls"
@@ -168,6 +234,8 @@ has "wl -i wl1.4 dwds 1"
 has "wl -i wl1.4 map 3"
 grep -qE "wl1\.1 (ssid|closed|dwds|map|bss down)|-i wl1\.1 set" "$T/calls" && fail "changed the main Wi-Fi"
 has "brctl delbr br-iot"
+has "ip6tables -X AX10_IOT6"
+grep -q "AX10_IOT6" "$T/rules6" && fail "IPv6 drop rules left behind after stop"
 
 # lan_mode=selected: only allowlisted home MACs may reach IoT; no blanket accept.
 cat > "$T/bin/uci2" <<EOF
@@ -179,9 +247,7 @@ case "\$*" in
 esac
 EOF
 chmod +x "$T/bin/uci2"; : > "$T/calls"
-env UCI="$T/bin/uci2" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" IPT="$T/bin/iptables" \
-    MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
-    NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" PATH="$T/bin:$PATH" sh "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+iot "$T/bin/uci2" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
 has "iptables -A AX10_IOT_FWD -i br-lan -o br-iot -m mac --mac-source aa:bb:cc:00:00:01 -j ACCEPT"
 grep -q "AX10_IOT_FWD -i br-lan -o br-iot -j ACCEPT" "$T/calls" && fail "selected mode still has the blanket home->IoT accept"
 
@@ -194,13 +260,106 @@ chmod +x "$T/bin/dropbear"
 # boot (as boot.sh runs it: a non-executable copy via sh) starts the network.
 mkdir -p "$T/run/ui/iotNetwork"; : > "$T/run/ui/iot_net.lua"; : > "$T/inittab"; : > "$T/calls"
 cp "$ROOT/iot.sh" "$T/iot.sh"; chmod 600 "$T/iot.sh"
-env UCI="$T/bin/uci" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" IPT="$T/bin/iptables" \
-    MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
-    NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" PATH="$T/bin:$PATH" \
-    LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" \
-    sh "$T/iot.sh" boot >/dev/null 2>&1 || true
+iot "$T/bin/uci" "$T/iot.sh" boot >/dev/null 2>&1 || true
 [ "$(readlink "$T/net/wl1.4/brport/bridge")" = "../../br-iot" ] || fail "boot did not put wl1.4 in br-iot"
 grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher"
 sleep 1; has "dropbear -p"
+
+# --- guest speed limit: shape limited guests, leave the full-speed one alone.
+mkdir -p "$T/net/wl1.3"
+echo "192.168.0.50 0x1 0x2 aa:bb:cc:00:00:08 * br-lan" > "$T/arp"
+echo 1 > "$T/guest_on"
+cat > "$T/bin/uci3" <<EOF
+#!/bin/sh
+case "\$*" in
+  "show wireless") echo "wireless.guest2g.guest='on'" ;;
+  *wireless.guest2g.ifname*) echo "wl1.3" ;;
+  *iot_guest_limit*) cat "$T/guest_on" ;;
+  *iot_guest_down*) echo "5" ;;
+  *iot_guest_up*) echo "2" ;;
+  *iot_guest_fast*) echo "aa:bb:cc:00:00:09" ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci3"
+: > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
+has "ip6tables -A AX10_GUEST6 -m mac --mac-source aa:bb:cc:00:00:08 -j REJECT --reject-with icmp6-adm-prohibited"
+grep -q "aa:bb:cc:00:00:09" "$T/calls" && fail "full-speed guest was shaped"
+has "iptables -t mangle -A AX10_GUEST -s 192.168.0.50 -j BLOGSKIP"
+has "iptables -t mangle -A AX10_GUEST -d 192.168.0.50 -j BLOGSKIP"
+has "tc class add dev wl1.3 parent 1: classid 1:10 htb rate 5mbit ceil 5mbit"
+has "tc qdisc add dev wl1.3 parent 1:10 handle 10: pfifo limit 10"
+has "tc class add dev ifb0 parent 1: classid 1:10 htb rate 2mbit ceil 2mbit"
+has "tc qdisc add dev ifb0 parent 1:10 handle 10: pfifo limit 5"
+[ -f "$T/run/guest.sig" ] || fail "guest.sig not written"
+# Nothing changed: no rebuild.
+: > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
+grep -q "tc qdisc add" "$T/calls" && fail "second guest sync rebuilt tc"
+grep -q -- "-A AX10_GUEST" "$T/calls" && fail "second guest sync re-added rules"
+# Limit switched off: everything cleared.
+echo 0 > "$T/guest_on"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
+has "tc qdisc del dev wl1.3 root"
+[ ! -f "$T/run/guest.sig" ] || fail "guest.sig left behind after limit off"
+
+# --- web-page installer: files copied, JSON edited once even when run twice.
+rm -rf "$T/run/ui" "$T/www" "$T/ctl"
+mkdir -p "$T/run/ui" "$T/www/config" "$T/www/locale/en_US" "$T/www/modules/advanced/wireless" "$T/ctl"
+cp -R "$ROOT/iot-ui/." "$T/run/ui/"
+printf '%s\n' '{"advanced":[{"name":"wireless","children":[{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}]}]}' > "$T/www/config/navigator.json"
+printf '%s\n' '{"guestNetworkAdv":{"controller":"./modules/x/script.js","view":"./modules/x/view.html"}}' > "$T/www/config/modules.json"
+printf '%s\n' '$.su.CHAR.MENU_ITEMS_NAME = {};' > "$T/www/locale/en_US/lan.js"
+: > "$T/calls"
+run ui >/dev/null 2>&1 || true
+run ui >/dev/null 2>&1 || true
+[ -f "$T/ctl/iot_net.lua" ] || fail "iot_net.lua not installed"
+[ -f "$T/www/modules/advanced/wireless/iotNetwork/script.js" ] || fail "iotNetwork page not installed"
+[ -f "$T/www/modules/advanced/wireless/guestSpeed/script.js" ] || fail "guestSpeed page not installed"
+for f in navigator.json modules.json; do
+  node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/www/config/$f" || fail "$f is not valid JSON"
+done
+[ "$(grep -o '"iotNetwork"' "$T/www/config/navigator.json" | wc -l)" -eq 1 ] || fail "navigator.json: iotNetwork not exactly once"
+[ "$(grep -o '"guestSpeed"' "$T/www/config/navigator.json" | wc -l)" -eq 1 ] || fail "navigator.json: guestSpeed not exactly once"
+[ "$(grep -o '"iotNetwork":{' "$T/www/config/modules.json" | wc -l)" -eq 1 ] || fail "modules.json: iotNetwork not exactly once"
+[ "$(grep -o '"guestSpeed":{' "$T/www/config/modules.json" | wc -l)" -eq 1 ] || fail "modules.json: guestSpeed not exactly once"
+loc="$(head -c 40 "$ROOT/iot-ui/locale.js")"
+[ "$(grep -cF -- "$loc" "$T/www/locale/en_US/lan.js")" -eq 1 ] || fail "lan.js: locale line not exactly once"
+grep -qF 'MENU_ITEMS_NAME = {};' "$T/www/locale/en_US/lan.js" || fail "lan.js lost its original line"
+
+# Lock 1: held by a live process -> the run gives up and changes nothing.
+mkdir -p "$T/run/lock"; echo $$ > "$T/run/lock/pid"
+: > "$T/calls"
+set +e; LOCK_WAIT=1 run apply >/dev/null 2>&1; st=$?; set -e
+[ "$st" -ne 0 ] || fail "apply succeeded while the lock was held"
+[ ! -s "$T/calls" ] || fail "apply touched the router while the lock was held"
+[ "$(cat "$T/run/lock/pid" 2>/dev/null)" = "$$" ] || fail "live lock was disturbed"
+rm -rf "$T/run/lock"
+
+# Lock 2: a lock left by a dead process is taken over.
+sh -c 'exit 0' & dead=$!; wait "$dead" 2>/dev/null || true
+mkdir -p "$T/run/lock"; echo "$dead" > "$T/run/lock/pid"
+rm -f "$T/run/fw.sig"; : > "$T/calls"
+run apply >/dev/null 2>&1 || true
+[ -s "$T/calls" ] || fail "stale lock was not taken over"
+[ ! -e "$T/run/lock" ] || fail "lock left behind after taking over a stale one"
+
+# Lock 3: released after normal runs.
+run status >/dev/null 2>&1 || true
+run apply >/dev/null 2>&1 || true
+[ ! -e "$T/run/lock" ] || fail "lock not released after a normal run"
+
+# Lock 4: concurrent runs take turns, so the rules end up in order.
+rm -f "$T/run/fw.sig"
+run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & wait
+acc='filter AX10_IOT_FWD -i br-iot -j ACCEPT'
+[ "$(grep -cxF "$acc" "$T/rules")" -eq 1 ] || fail "concurrent runs: final accept not exactly once"
+drop_ln="$(grep -nxF 'filter AX10_IOT_FWD -i br-iot -o br+ -j DROP' "$T/rules" | head -n1 | cut -d: -f1)"
+acc_ln="$(grep -nxF "$acc" "$T/rules" | head -n1 | cut -d: -f1)"
+last_ln="$(grep -n '^filter AX10_IOT_FWD ' "$T/rules" | tail -n1 | cut -d: -f1)"
+[ -n "$drop_ln" ] && [ "$drop_ln" -lt "$acc_ln" ] || fail "concurrent runs: drop not before accept"
+[ "$acc_ln" -eq "$last_ln" ] || fail "concurrent runs: final accept is not last"
+[ ! -e "$T/run/lock" ] || fail "lock left behind after concurrent runs"
 
 echo "iot.sh tests passed"

@@ -63,6 +63,26 @@ run_fetch "$T/run-sign.pub" && fail "fetch accepted a tampered asset"
 [ ! -e "$T/out" ] || fail "tampered asset left on disk"
 run_fetch "$T/nokey" || fail "fetch without a key (old hook) should still work"
 
+# 3b. install.sh fetch(): same rules for the binaries install.sh runs as root.
+ifuncs="$(awk '/^SIGN_PUB=/{p=1} p{print} p&&/^fetch\(\)/{f=1} f&&/^}$/{exit}' "$ROOT/install.sh")"
+[ -n "$ifuncs" ] || fail "install.sh has no SIGN_PUB/fetch block"
+run_ifetch() { sh -c "SRC=file://$T/rel; GET='curl -fsS'; $ifuncs
+  SIGN_PUB=$1; fetch asset $T/iout" 2>"$T/ierr" >/dev/null; }
+rm -f "$T/iout" "$T/iout.sig"
+printf 'payload\n' > "$T/rel/asset"; sign "$T/rel/asset"
+run_ifetch "$T/run-sign.pub" || fail "install fetch rejected a signed asset"
+[ "$(cat "$T/iout")" = payload ] || fail "install fetch did not keep the verified file"
+[ ! -e "$T/iout.sig" ] || fail "install fetch left the .sig file behind"
+printf 'tampered\n' > "$T/rel/asset"
+run_ifetch "$T/run-sign.pub" && fail "install fetch accepted a tampered asset"
+[ ! -e "$T/iout" ] || fail "install fetch left a tampered asset on disk"
+grep -q "SIGNATURE CHECK FAILED" "$T/ierr" || fail "install fetch did not report the bad signature"
+printf 'payload\n' > "$T/rel/asset"; rm -f "$T/rel/asset.sig"
+run_ifetch "$T/run-sign.pub" && fail "install fetch accepted an asset with no signature file"
+[ ! -e "$T/iout" ] || fail "install fetch kept an unsigned asset although a key is present"
+run_ifetch "$T/nokey" || fail "install fetch without a key (old hook) should still work"
+grep -q "NOT verified" "$T/ierr" || fail "install fetch did not warn about the unverified download"
+
 # 4. revert restores the previous hook.
 UCI="$T/bin/uci" COMMIT=/nonexistent sh "$ROOT/scripts/signed-hook.sh" revert >/dev/null
 [ "$($U get openvpn.archer_boot.up)" = '"old unsigned hook"' ] || fail "revert did not restore the old hook"

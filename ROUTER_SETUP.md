@@ -27,6 +27,18 @@ Install the package manager separately on the rooted router:
 curl -4Lk https://github.com/talhabalaj/archer-ax10/releases/latest/download/install.sh | sh
 ```
 
+`install.sh` checks the release signature of the files it downloads whenever
+the boot hook has left the release key at `/tmp/archer-sign.pub`. To check
+`install.sh` itself as well, download it with its signature and verify before
+running:
+
+```sh
+B=https://github.com/talhabalaj/archer-ax10/releases/latest/download
+curl -4Lk -o /tmp/install.sh "$B/install.sh" && curl -4Lk -o /tmp/install.sh.sig "$B/install.sh.sig" &&
+openssl dgst -sha256 -verify /tmp/archer-sign.pub -signature /tmp/install.sh.sig /tmp/install.sh &&
+sh /tmp/install.sh
+```
+
 LuCI and debloat remain separate package choices, as on the upstream site.
 
 The personal feed patches LuCI's Wi-Fi client tables for the stock AX10

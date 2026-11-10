@@ -19,6 +19,7 @@
 #   SRC        where opt.tar.gz + busybox-armv7l are fetched from
 #   FEED       the opkg `ax10` package feed base (Packages.gz + *.ipk)
 #   GET        the download command (default: curl -4 -L -k -fsS)
+#   SIGN_PUB   release public key (default /tmp/archer-sign.pub, written by the boot hook)
 #   NO_UPDATE  set to 1 to skip the trailing `opkg update`
 #   NO_PROFILE set to 1 to skip writing PATH/env into /etc/profile
 
@@ -28,12 +29,29 @@ GET="${GET:-curl -4 -L -k -fsS}"
 
 fail() { echo "ax10-opkg: $1" >&2; exit 1; }
 
+# Signed downloads, same rule as boot.sh: the boot hook leaves the release public
+# key at /tmp/archer-sign.pub, and every file fetched here must then carry a valid
+# signature (<asset>.sig, made by the release workflow). Without a key (router
+# still on the older unsigned hook) files are used unverified, with a warning.
+SIGN_PUB="${SIGN_PUB:-/tmp/archer-sign.pub}"
+fetch() {        # fetch <release asset> <local path>
+    $GET "$SRC/$1" -o "$2" || { echo "ax10-opkg: $1: download failed" >&2; return 1; }
+    if [ ! -s "$SIGN_PUB" ]; then
+        echo "ax10-opkg: no release key at $SIGN_PUB; $1 is NOT verified" >&2
+        return 0
+    fi
+    $GET "$SRC/$1.sig" -o "$2.sig" &&
+        openssl dgst -sha256 -verify "$SIGN_PUB" -signature "$2.sig" "$2" >/dev/null 2>&1 ||
+        { echo "ax10-opkg: $1: SIGNATURE CHECK FAILED, not using it" >&2; rm -f "$2" "$2.sig"; return 1; }
+    rm -f "$2.sig"
+}
+
 # 1) HTTPS-capable busybox. opkg shells out to `wget` for downloads, and the stock
 #    busybox 1.19 wget has NO SSL. This busybox 1.31 does (its ssl_client applet —
 #    no CA bundle or synced clock required). Idempotent: keep an existing one.
 if [ ! -x /tmp/vanilla/busybox ]; then
     mkdir -p /tmp/vanilla/bin
-    $GET "$SRC/busybox-armv7l" -o /tmp/vanilla/busybox || fail "could not fetch busybox from $SRC"
+    fetch busybox-armv7l /tmp/vanilla/busybox || fail "could not fetch a verified busybox from $SRC"
     chmod +x /tmp/vanilla/busybox
 fi
 mkdir -p /tmp/wgetssl
@@ -41,7 +59,7 @@ ln -sf /tmp/vanilla/busybox /tmp/wgetssl/wget
 ln -sf /tmp/vanilla/busybox /tmp/wgetssl/ssl_client
 
 # 2) Fetch + unpack the opkg tree into tmpfs at /tmp/opt.
-$GET "$SRC/opt.tar.gz" -o /tmp/opt.tgz || fail "could not fetch opt.tar.gz from $SRC"
+fetch opt.tar.gz /tmp/opt.tgz || fail "could not fetch a verified opt.tar.gz from $SRC"
 rm -rf /tmp/opt
 /bin/gzip -dc /tmp/opt.tgz | /bin/tar xf - -C /tmp || fail "could not unpack opt.tar.gz"
 rm -f /tmp/opt.tgz
