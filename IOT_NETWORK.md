@@ -5,7 +5,9 @@ Wi-Fi logger, cameras) to the stock TP-Link firmware, with a settings page in th
 stock web UI. It needs no reflash and no opkg: `boot.sh` fetches it each boot.
 
 Status (2026-11-10): tested live with an iPhone, an Apple Watch and the inverter
-logger. A reboot test through the published release has not been run yet.
+logger. Reboot test with release `v21-personal` passed: after a reboot the
+network, the web page and the SSH lifeline all came back without manual steps
+(about 10 s after the boot hook started).
 
 ## What it does
 
@@ -164,6 +166,17 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   ```
 
   Delete `/tmp/luci-indexcache` after adding a controller.
+
+### SSH lifeline at boot
+- Twice, after a reboot with the IoT network enabled (v20), the dropbear
+  lifeline on :2222 was not running even though `boot.sh` starts it before the
+  IoT step; the cause was not visible without a shell. On the v21 reboot the
+  original process survived. As a safeguard, `boot.sh` re-checks the lifeline
+  after the IoT step and the watcher restarts it within 15 s, logging
+  `SSH lifeline was not running; restarted it` to `/tmp/ax10-iot/iot.log`.
+- Only the RSA host key persists (`openvpn.archer_boot.host_key`); dropbear's
+  ECDSA key is regenerated each boot (`-R`). Pin the RSA key in known_hosts
+  and connect with `-o HostKeyAlgorithms=ssh-rsa` to avoid host-key warnings.
 
 ### Known trade-offs
 - While the IoT network runs, OneMesh onboarding of a **new** satellite over
