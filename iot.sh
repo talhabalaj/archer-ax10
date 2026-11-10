@@ -436,7 +436,8 @@ case "$1" in
     boot)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
-        [ "$(cfg enabled 0)" = 1 ] && "$0" start ;;
+        # In-process, not "$0 start": the fetched file is not executable.
+        [ "$(cfg enabled 0)" = 1 ] && { apply; inittab_add; log "watcher registered"; } ;;
     status) status ;;
     set)
         [ -n "$2" ] || { echo "usage: iot.sh set <key> <value>" >&2; exit 1; }

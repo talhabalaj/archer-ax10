@@ -13,6 +13,7 @@ cat > "$T/bin/uci" <<EOF
 case "\$*" in
   *iot_ssid*) echo "wifi iot" ;;
   *iot_key*) echo "password123" ;;
+  *iot_enabled*) echo "1" ;;
   *iot_noinet*) echo "aa:bb:cc:dd:ee:02" ;;
   *iot_static*) echo "aa:bb:cc:dd:ee:01,192.168.50.10" ;;
   *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353" ;;
@@ -166,5 +167,15 @@ has "wl -i wl1.4 dwds 1"
 has "wl -i wl1.4 map 3"
 grep -qE "wl1\.1 (ssid|closed|dwds|map|bss down)|-i wl1\.1 set" "$T/calls" && fail "changed the main Wi-Fi"
 has "brctl delbr br-iot"
+
+# boot (as boot.sh runs it: a non-executable copy via sh) starts the network.
+mkdir -p "$T/run/ui/iotNetwork"; : > "$T/run/ui/iot_net.lua"; : > "$T/inittab"; : > "$T/calls"
+cp "$ROOT/iot.sh" "$T/iot.sh"; chmod 600 "$T/iot.sh"
+env UCI="$T/bin/uci" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" IPT="$T/bin/iptables" \
+    MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
+    NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" PATH="$T/bin:$PATH" \
+    sh "$T/iot.sh" boot >/dev/null 2>&1 || true
+has "brctl addif br-iot wl1.4"
+grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher"
 
 echo "iot.sh tests passed"
