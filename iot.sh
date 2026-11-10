@@ -365,11 +365,19 @@ overlay() {   # overlay <dir> <name>: bind a writable RAM copy over <dir>, echo 
     fi
     echo "$1"
 }
+# The boot hook leaves the release public key here; when present, downloads must
+# carry a valid signature (see boot.sh).
+SIGN_PUB="${SIGN_PUB:-/tmp/archer-sign.pub}"
 ui_fetch() {
     [ -f "$UI_SRC/iot_net.lua" ] && return 0
     mkdir -p "$UI_SRC"
-    curl -4 -L -k -fs -m 60 "$SRC/iot-ui.tar.gz" -o "$RUN/iot-ui.tgz" &&
-        gzip -dc "$RUN/iot-ui.tgz" | tar xf - -C "$UI_SRC" && rm -f "$RUN/iot-ui.tgz"
+    curl -4 -L -k -fs -m 60 "$SRC/iot-ui.tar.gz" -o "$RUN/iot-ui.tgz" || return 1
+    if [ -s "$SIGN_PUB" ]; then
+        curl -4 -L -k -fs -m 30 "$SRC/iot-ui.tar.gz.sig" -o "$RUN/iot-ui.tgz.sig" &&
+            openssl dgst -sha256 -verify "$SIGN_PUB" -signature "$RUN/iot-ui.tgz.sig" "$RUN/iot-ui.tgz" >/dev/null 2>&1 ||
+            { log "iot-ui.tar.gz: signature check failed, not installing"; rm -f "$RUN/iot-ui.tgz"*; return 1; }
+    fi
+    gzip -dc "$RUN/iot-ui.tgz" | tar xf - -C "$UI_SRC" && rm -f "$RUN/iot-ui.tgz"*
 }
 ui_install() {
     ui_fetch || { log "could not fetch iot-ui"; return 1; }

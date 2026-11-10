@@ -78,11 +78,28 @@ jobs:
             --pattern 'opt.tar.gz' --pattern 'busybox-armv7l' --dir dist
           cp bootstrap/dropbear_vanilla dist/
           sh tests/iot.sh
+          sh tests/signing.sh
           node --check iot-ui/iotNetwork/script.js && node --check iot-ui/locale.js
           tar --owner=0 --group=0 -czf dist/iot-ui.tar.gz -C iot-ui .
           cp boot.sh install.sh iot.sh dist/
           (cd dist && sha256sum * > manifest.sha256)
           ls -l dist
+
+      # The router only runs files whose signature verifies against the public key
+      # saved in its flash (openvpn.archer_boot.sign_pub). Each signature is checked
+      # against the committed signing.pub.pem, so a wrong or missing secret fails
+      # here instead of publishing a release the router would refuse.
+      - name: Sign boot assets
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          umask 077; printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/sign.pem"
+          for f in boot.sh install.sh iot.sh iot-ui.tar.gz dropbear_vanilla busybox-armv7l opt.tar.gz; do
+            openssl dgst -sha256 -sign "$RUNNER_TEMP/sign.pem" -out "dist/$f.sig" "dist/$f"
+            openssl dgst -sha256 -verify signing.pub.pem -signature "dist/$f.sig" "dist/$f"
+          done
+          rm -f "$RUNNER_TEMP/sign.pem"
 
       - name: Publish feed release
         env:

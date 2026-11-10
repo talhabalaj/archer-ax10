@@ -29,6 +29,22 @@ unset HOSTKEY_B64
 SRC="${SRC:-https://github.com/talhabalaj/archer-ax10/releases/latest/download}"
 GET="/usr/bin/curl -4 -L -k -fs"
 
+# Signed downloads. The boot hook (openvpn.archer_boot.boot_cmd, in flash) writes
+# the release public key here and only runs boot.sh after verifying its signature.
+# Everything boot.sh downloads is checked the same way. Without a key (older hook)
+# files are used unverified, so switching hooks cannot lock the router out.
+SIGN_PUB=/tmp/archer-sign.pub
+verify_sig() {   # verify_sig <file> <file.sig>
+    [ -s "$SIGN_PUB" ] || return 0
+    /usr/bin/openssl dgst -sha256 -verify "$SIGN_PUB" -signature "$2" "$1" >/dev/null 2>&1
+}
+fetch() {        # fetch <release asset> <local path>
+    $GET -m 60 "$SRC/$1" -o "$2" || { echo "$1: download failed"; return 1; }
+    [ -s "$SIGN_PUB" ] || return 0
+    $GET -m 30 "$SRC/$1.sig" -o "$2.sig" && verify_sig "$2" "$2.sig" ||
+        { echo "$1: SIGNATURE CHECK FAILED, not using it"; rm -f "$2"; return 1; }
+}
+
 # ----------------------------------------------------------------
 # Root password = the router's OWN web-GUI admin password, so :2222 SSH login
 # mirrors the TP-Link web UI. The stock squashfs ships NO /etc/shadow (root
@@ -51,7 +67,7 @@ fi
 unset _wpw _h
 
 # SSH LIFELINE on :2222 — direct fetch + launch, the always-available way in.
-$GET -m 30 "$SRC/dropbear_vanilla" -o /tmp/dropbear_vanilla && chmod +x /tmp/dropbear_vanilla
+fetch dropbear_vanilla /tmp/dropbear_vanilla && chmod +x /tmp/dropbear_vanilla
 SSH_PID="/tmp/archer-boot-ssh-$SSH_PORT.pid"
 lifeline_up() { p="$(cat "$SSH_PID" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 start_lifeline() {
@@ -64,7 +80,7 @@ start_lifeline
 # saved), install its web UI page every boot; iot.sh starts the network if enabled.
 if [ -n "$(/sbin/uci -q get openvpn.archer_boot.iot_enabled)" ]; then
     echo "Starting IoT network..."
-    $GET -m 30 "$SRC/iot.sh" -o /tmp/iot.sh && SRC="$SRC" /bin/sh /tmp/iot.sh boot
+    fetch iot.sh /tmp/iot.sh && SRC="$SRC" SIGN_PUB="$SIGN_PUB" /bin/sh /tmp/iot.sh boot
 fi
 
 # The IoT step reconfigures Wi-Fi/dnsmasq at boot; make sure SSH survived it.
