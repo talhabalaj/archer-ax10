@@ -55,4 +55,11 @@ $GET -m 30 "$SRC/dropbear_vanilla" -o /tmp/dropbear_vanilla && chmod +x /tmp/dro
 echo "Starting dropbear SSH lifeline on :2222..."
 (/tmp/dropbear_vanilla -p "$LAN_IP:$SSH_PORT" -P "/tmp/archer-boot-ssh-$SSH_PORT.pid" $HOSTKEY_ARGS -R -E </dev/null >/dev/null 2>&1) &
 
+# Optional isolated IoT Wi-Fi (see iot.sh). Once set up (any iot_enabled value is
+# saved), install its web UI page every boot; iot.sh starts the network if enabled.
+if [ -n "$(/sbin/uci -q get openvpn.archer_boot.iot_enabled)" ]; then
+    echo "Starting IoT network..."
+    $GET -m 30 "$SRC/iot.sh" -o /tmp/iot.sh && SRC="$SRC" /bin/sh /tmp/iot.sh boot
+fi
+
 echo "lifeline-only boot done."
