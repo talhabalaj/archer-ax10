@@ -400,6 +400,19 @@ ui_remove() {
     log "web UI page removed"
 }
 
+# Keep boot.sh's SSH lifeline alive: if it is gone, start it again the same way
+# boot.sh does, and log it (the log tells us what killed it).
+LIFELINE_BIN="${LIFELINE_BIN:-/tmp/dropbear_vanilla}"
+LIFELINE_PID="${LIFELINE_PID:-/tmp/archer-boot-ssh-2222.pid}"
+lifeline_guard() {
+    [ -x "$LIFELINE_BIN" ] || return 0
+    p="$(cat "$LIFELINE_PID" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
+    lan="$($UCI -q get network.lan.ipaddr)"; [ -n "$lan" ] || return 0
+    k=""; [ -s /tmp/archer-boot-host.key ] && k="-r /tmp/archer-boot-host.key"
+    "$LIFELINE_BIN" -p "$lan:2222" -P "$LIFELINE_PID" $k -R -E </dev/null >/dev/null 2>&1 &
+    log "SSH lifeline was not running; restarted it"
+}
+
 status() {
     load
     echo "enabled:   $(cfg enabled 0)"
@@ -424,6 +437,7 @@ case "$1" in
     watch)
         while :; do
             apply >/dev/null 2>&1
+            lifeline_guard
             trim_log
             sleep "${INTERVAL:-15}"
         done ;;
@@ -437,7 +451,8 @@ case "$1" in
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
         # In-process, not "$0 start": the fetched file is not executable.
-        [ "$(cfg enabled 0)" = 1 ] && { apply; inittab_add; log "watcher registered"; } ;;
+        [ "$(cfg enabled 0)" = 1 ] && { apply; inittab_add; log "watcher registered"; }
+        lifeline_guard ;;
     status) status ;;
     set)
         [ -n "$2" ] || { echo "usage: iot.sh set <key> <value>" >&2; exit 1; }

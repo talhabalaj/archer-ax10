@@ -52,8 +52,13 @@ unset _wpw _h
 
 # SSH LIFELINE on :2222 — direct fetch + launch, the always-available way in.
 $GET -m 30 "$SRC/dropbear_vanilla" -o /tmp/dropbear_vanilla && chmod +x /tmp/dropbear_vanilla
-echo "Starting dropbear SSH lifeline on :2222..."
-(/tmp/dropbear_vanilla -p "$LAN_IP:$SSH_PORT" -P "/tmp/archer-boot-ssh-$SSH_PORT.pid" $HOSTKEY_ARGS -R -E </dev/null >/dev/null 2>&1) &
+SSH_PID="/tmp/archer-boot-ssh-$SSH_PORT.pid"
+lifeline_up() { p="$(cat "$SSH_PID" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+start_lifeline() {
+    echo "Starting dropbear SSH lifeline on :2222..."
+    (/tmp/dropbear_vanilla -p "$LAN_IP:$SSH_PORT" -P "$SSH_PID" $HOSTKEY_ARGS -R -E </dev/null >/dev/null 2>&1) &
+}
+start_lifeline
 
 # Optional isolated IoT Wi-Fi (see iot.sh). Once set up (any iot_enabled value is
 # saved), install its web UI page every boot; iot.sh starts the network if enabled.
@@ -61,5 +66,9 @@ if [ -n "$(/sbin/uci -q get openvpn.archer_boot.iot_enabled)" ]; then
     echo "Starting IoT network..."
     $GET -m 30 "$SRC/iot.sh" -o /tmp/iot.sh && SRC="$SRC" /bin/sh /tmp/iot.sh boot
 fi
+
+# The IoT step reconfigures Wi-Fi/dnsmasq at boot; make sure SSH survived it.
+sleep 2
+lifeline_up || { echo "SSH lifeline not running after IoT step; restarting it"; start_lifeline; }
 
 echo "lifeline-only boot done."
