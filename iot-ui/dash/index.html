@@ -445,7 +445,7 @@ async function loadDevices() {
   // The router's JSON encoder turns an empty list into {}.
   if (home) { if (!Array.isArray(home.list)) home.list = []; if (!Array.isArray(home.dropped)) home.dropped = []; }
   r.home = home; S.homeAt = Date.now();
-  r.white = home ? home.list.map(x => ({ mac: x.mac.toUpperCase(), seen: x.seen, keep: x.keep })) : null;
+  r.white = home ? home.list.map(x => ({ mac: x.mac.toUpperCase(), seen: x.seen, keep: x.keep, name: x.name || "" })) : null;
   r.allowOn = !!home && home.lock === "on";
   const wl = new Set((r.white || []).map(x => x.mac));
   r.list.forEach(d => { d.onWhite = wl.has(d.mac); });
@@ -976,7 +976,7 @@ function accessCard() {
   const open = on && left > 0, mmss = x => `${Math.floor(x / 60)}:${String(x % 60).padStart(2, "0")}`;
   const allowed = D.white.map(x => {
     const d = byMac[x.mac], mesh = meshMacs.has(x.mac), live = d && d.online || mesh;
-    const nm = d ? devName(d) : x.mac;
+    const nm = d ? devName(d) : x.name || x.mac;
     const meta = [x.mac, mesh ? "Mesh unit (the satellite itself)" : d && d.online ? whereText(d) : ago(now, x.seen)].join(" · ");
     const right = (x.keep ? '<span class="tag" title="Never removed for being away">Always</span>' : "")
       + (d && d.this ? '<span class="tag you">This device</span>'

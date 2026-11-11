@@ -509,6 +509,7 @@ h1{font-size:24px;margin:0 0 6px}p{color:var(--muted);margin:0 0 18px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
 .k{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .v{display:flex;align-items:center;gap:10px;font:600 20px/1.3 ui-monospace,Menlo,monospace;word-break:break-all;margin-top:2px}
+.btn{display:block;text-align:center;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;padding:13px;border-radius:11px}
 button{margin-left:auto;flex:none;border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:9px;padding:6px 12px;font:600 14px system-ui}
 #qr{display:flex;justify-content:center;padding:8px 0}#qr canvas{background:#fff;padding:10px;border-radius:10px}
 ol{color:var(--muted);padding-left:20px;margin:0}
@@ -517,12 +518,15 @@ ol{color:var(--muted);padding-left:20px;margin:0}
 <p>This device can now use the home network, so the guest Wi-Fi no longer gives it internet. Switch networks:</p>
 <div class="card"><div class="k">Network</div><div class="v"><span id="s">$es</span></div></div>
 <div class="card"><div class="k">Password</div><div class="v"><span id="p">$ek</span><button id="c" type="button">Copy</button></div></div>
+<div class="card" id="apple" hidden><a class="btn" href="/home.mobileconfig">Join automatically</a>
+<p style="margin:10px 0 0;font-size:14px">Downloads a Wi-Fi profile. Then open Settings, tap <b>Profile Downloaded</b>, and Install: the device joins <b>$es</b> by itself. If nothing downloads here, open Safari, visit any http:// site and tap this again.</p></div>
 <div class="card"><ol><li>Copy the password.</li><li>Open Settings, then Wi-Fi.</li><li>Choose <b>$es</b> and paste the password.</li></ol></div>
 <div class="card"><div class="k">Or scan from another phone</div><div id="qr"></div></div>
 </main>
 <script src="/jquery.min.js"></script><script src="/jquery.qrcode.min.js"></script>
 <script>
 var s=document.getElementById("s").textContent,p=document.getElementById("p").textContent;
+if(/iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent))document.getElementById("apple").hidden=false;
 var q=function(x){return x.replace(/([\\\;,:"])/g,"\\\\\$1")};
 try{jQuery("#qr").qrcode({width:200,height:200,text:unescape(encodeURIComponent("WIFI:T:WPA;S:"+q(s)+";P:"+q(p)+";;"))})}catch(e){document.getElementById("qr").textContent="QR code unavailable."}
 document.getElementById("c").onclick=function(){var b=this;var done=function(){b.textContent="Copied"};
@@ -531,6 +535,27 @@ function sel(){var r=document.createRange();r.selectNodeContents(document.getEle
 </script></body></html>
 EOF
     mv "$PORTAL/index.html.new" "$PORTAL/index.html"
+    # Apple Wi-Fi profile: installing it joins the home network with the password saved.
+    u1="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo 7d1c4e2a-0b5f-4c4e-9a51-2f6d8e1b3a01)"
+    u2="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo 3e9b0f6c-8d2a-4f17-b6c4-5a0e7d9c1b02)"
+    cat > "$PORTAL/home.mobileconfig" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>PayloadContent</key><array><dict>
+<key>PayloadType</key><string>com.apple.wifi.managed</string><key>PayloadVersion</key><integer>1</integer>
+<key>PayloadIdentifier</key><string>ax10.home.wifi.$u2</string><key>PayloadUUID</key><string>$u2</string>
+<key>PayloadDisplayName</key><string>Home Wi-Fi ($es)</string>
+<key>SSID_STR</key><string>$es</string><key>Password</key><string>$ek</string>
+<key>EncryptionType</key><string>WPA3</string><key>AutoJoin</key><true/><key>HIDDEN_NETWORK</key><false/>
+</dict></array>
+<key>PayloadType</key><string>Configuration</string><key>PayloadVersion</key><integer>1</integer>
+<key>PayloadIdentifier</key><string>ax10.home.$u1</string><key>PayloadUUID</key><string>$u1</string>
+<key>PayloadDisplayName</key><string>Home Wi-Fi</string>
+<key>PayloadDescription</key><string>Joins the home Wi-Fi ($es).</string>
+<key>PayloadRemovalDisallowed</key><false/>
+</dict></plist>
+EOF
     cat > "$PORTAL/server.lua" <<'EOF'
 -- server.lua <root> <addr> <http port> <dns port>: captive-portal DNS + HTTP.
 local socket = require "socket"
@@ -562,7 +587,10 @@ local function serve(c)
     local ours = host == addr .. ":" .. hport
     local js = ours and path:match("^/(jquery[%w.]*%.js)$")
     local body, head
-    if js then body = read(root .. "/" .. js) or ""; head = "200 OK\r\nContent-Type: application/javascript"
+    if ours and path == "/home.mobileconfig" then
+        body = read(root .. "/home.mobileconfig") or ""
+        head = "200 OK\r\nContent-Type: application/x-apple-aspen-config\r\nContent-Disposition: attachment; filename=home.mobileconfig"
+    elseif js then body = read(root .. "/" .. js) or ""; head = "200 OK\r\nContent-Type: application/javascript"
     elseif ours then body = read(root .. "/index.html") or ""; head = "200 OK\r\nContent-Type: text/html; charset=utf-8"
     else body = '<a href="' .. home .. '">Join the home Wi-Fi</a>'; head = "302 Found\r\nLocation: " .. home .. "\r\nContent-Type: text/html" end
     c:send("HTTP/1.0 " .. head .. "\r\nCache-Control: no-store\r\nContent-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
@@ -598,15 +626,34 @@ portal_clear() {
     portal_running && kill "$(cat "$RUN/portal.pid")" 2>/dev/null
     rm -f "$RUN/portal.pid"
 }
+# A phone checks for a captive portal only right after it joins. The watcher sees a
+# new guest up to 15 s later, by when the check has passed and the phone thinks the
+# network works. So a device newly given the page is disconnected from the guest
+# Wi-Fi once: it rejoins at once, with the rules in place, and its check finds the
+# page. A device that was on the page in the last PORTAL_GRACE seconds keeps it
+# while it rejoins.
+PORTAL_GRACE="${PORTAL_GRACE:-60}"
 portal_sync() {
-    pm=""
+    pm=""; now="$(now_s)"
     if [ "$H_LOCK" = 1 ]; then
         g=" $(guest_macs | sort -u | tr '\n' ' ') "
         for m in $H_ALLOW $H_KEEP; do
             case "$g" in *" $m "*) case " $pm " in *" $m "*) ;; *) pm="$pm $m" ;; esac ;; esac
         done
+        # Grace: listed devices seen on the page recently (they may be rejoining).
+        if [ -f "$RUN/portal_seen" ]; then
+            while read -r m t; do
+                [ $((now - t)) -le "$PORTAL_GRACE" ] 2>/dev/null || continue
+                home_listed "$m" || continue
+                case " $pm " in *" $m "*) ;; *) pm="$pm $m" ;; esac
+            done < "$RUN/portal_seen"
+        fi
+        { for m in $pm; do case "$g" in *" $m "*) echo "$m $now" ;; esac; done
+          [ -f "$RUN/portal_seen" ] && cat "$RUN/portal_seen"; } | awk '!s[$1]++' > "$RUN/portal_seen.new"
+        mv "$RUN/portal_seen.new" "$RUN/portal_seen"
     fi
     pm="$(echo $pm)"
+    prev=" $(cat "$RUN/portal_macs" 2>/dev/null) "
     if [ -z "$pm" ]; then
         [ -s "$RUN/portal_macs" ] && log "join-home page off"
         [ -e "$RUN/portal_macs" ] && { portal_clear; rm -f "$RUN/portal_macs"; }
@@ -643,6 +690,13 @@ portal_sync() {
     echo "$pm" > "$RUN/portal_macs"
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
     log "guest Wi-Fi: showing the join-home page to $pm"
+    # Newly added: make them rejoin so their captive-portal check sees the page.
+    for m in $pm; do
+        case "$prev" in *" $m "*) continue ;; esac
+        for i in $(guest_ifs); do
+            $WL -i "$i" assoclist 2>/dev/null | grep -qi "$m" && $WL -i "$i" deauthenticate "$(echo "$m" | tr a-f A-F)" 2>/dev/null
+        done
+    done
 }
 watcher_wanted() { [ "$(cfg enabled 0)" = 1 ] || [ "$(cfg home_lock 0)" = 1 ]; }
 

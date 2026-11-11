@@ -632,10 +632,14 @@ has "ip6tables -A AX10_PORTAL_IN6 -m mac --mac-source aa:bb:cc:00:00:08 -p udp -
 has "iptables -A AX10_PORTAL_IN -m mac --mac-source aa:bb:cc:00:00:08 -p tcp --dport 443 -j REJECT --reject-with tcp-reset"
 grep -q "mac-source aa:bb:cc:00:00:20 .*REJECT\|mac-source aa:bb:cc:00:00:09 .*REJECT" "$T/calls" && fail "join page for a device not on the guest Wi-Fi or not listed"
 grep -q 'pa&lt;ss&amp;&quot;w0rd' "$T/run/portal/index.html" || fail "join page lacks the escaped home password"
+has "wl -i wl1.3 deauthenticate AA:BB:CC:00:00:08"
 grep -q "home net" "$T/run/portal/index.html" || fail "join page lacks the home SSID"
+grep -q "<string>pa&lt;ss&amp;&quot;w0rd</string>" "$T/run/portal/home.mobileconfig" || fail "Wi-Fi profile lacks the escaped password"
+grep -q "<key>SSID_STR</key><string>home net</string>" "$T/run/portal/home.mobileconfig" || fail "Wi-Fi profile lacks the SSID"
 # Unchanged on the next run; gone once it is off the list.
 : > "$T/calls"; h home
 grep -q "server.lua" "$T/calls" && fail "join page server restarted with no change"
+grep -q "deauthenticate AA:BB:CC:00:00:08" "$T/calls" && fail "device on the join page disconnected again"
 echo "aa:bb:cc:00:00:20" > "$T/u/iot_home_allow"; : > "$T/calls"; h home
 has "iptables -t nat -D PREROUTING -i br-lan -j AX10_PORTAL_NAT"
 [ -e "$T/run/portal.pid" ] && fail "join page server left running"

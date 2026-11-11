@@ -452,6 +452,21 @@ end
 -- Every device in the DHCP leases (MACs seen only on the air or in ARP are the mesh
 -- satellite's own radios, not clients), plus offline devices that still have a setting
 -- (blocked, full speed, allowed to reach IoT, Internet off) so it can be undone.
+-- TP-Link's client list (/tmp/client_list.json): mac -> { name, ip, connected }.
+local function stock_clients()
+    local t = {}
+    local f = io.open("/tmp/client_list.json"); if not f then return t end
+    local s = f:read("*a") or ""; f:close()
+    for obj in s:gmatch("{[^{}]*}") do
+        local m = obj:match('"mac":"([^"]+)"')
+        if m then
+            t[normmac(m)] = { name = obj:match('"name":"([^"]*)"') or "", ip = obj:match('"ip":"([^"]*)"'),
+                              on = obj:match('"connect_status":1') ~= nil }
+        end
+    end
+    return t
+end
+
 local function devices()
     local at, atif, st, t = presence()
     local tf = tfstats()
@@ -496,6 +511,17 @@ local function devices()
     -- Pinned IoT devices first: their reserved address marks them as IoT even when
     -- they have no lease right now and also appear in a setting list below.
     for m, ip in pairs(pins) do add(m, ip, nil) end
+    -- Online devices without a lease (e.g. kept their address through a router
+    -- reboot): the neighbour table, then TP-Link's client list (satellite clients).
+    local af = io.open("/proc/net/arp")
+    if af then
+        for line in af:lines() do
+            local ip, flags, m, dev = line:match("^(%d+%.%d+%.%d+%.%d+)%s+%S+%s+(%S+)%s+(%S+)%s+%S+%s+(%S+)")
+            if ip and flags ~= "0x0" and dev == "br-lan" then add(m, ip, nil) end
+        end
+        af:close()
+    end
+    for m, c in pairs(stock_clients()) do if c.on then add(m, c.ip, c.name) end end
     for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
     for m in pairs(blocked) do add(m, nil, nil) end
     for m in pairs(cp) do add(m, nil, nil) end
@@ -793,12 +819,24 @@ local function read_home()
         for line in f:lines() do local m, t = line:match("^(%S+) (%d+)"); if m then seen[m] = tonumber(t) end end
         f:close()
     end
+    -- A name for every entry, even devices not around: custom name, lease
+    -- hostname, or TP-Link's client history.
+    local nm, sc, hosts = names(), stock_clients(), {}
+    local lf = io.open("/tmp/dhcp.leases")
+    if lf then
+        for line in lf:lines() do
+            local m, h = line:match("^%S+%s+(%S+)%s+%S+%s+(%S+)")
+            if m and h ~= "*" then hosts[normmac(m)] = h end
+        end
+        lf:close()
+    end
+    local function name_of(m) return nm[m] or hosts[m] or (sc[m] and sc[m].name ~= "" and sc[m].name) or "" end
     local keep, list = words(get("home_keep", ""):lower()), {}
     for _, m in ipairs(words(get("home_allow", ""):lower())) do
-        list[#list + 1] = { mac = m, seen = seen[m], keep = has(keep, m) }
+        list[#list + 1] = { mac = m, seen = seen[m], keep = has(keep, m), name = name_of(m) }
     end
     for _, m in ipairs(keep) do
-        if not has(words(get("home_allow", ""):lower()), m) then list[#list + 1] = { mac = m, seen = seen[m], keep = true } end
+        if not has(words(get("home_allow", ""):lower()), m) then list[#list + 1] = { mac = m, seen = seen[m], keep = true, name = name_of(m) } end
     end
     local open_left = 0
     local of = io.open("/tmp/ax10-iot/home_open_until")
