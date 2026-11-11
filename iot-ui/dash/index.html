@@ -143,6 +143,34 @@ h2 .count { color: var(--faint); font-weight: 600; }
 .detail .togg { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-right: 10px; }
 .rename { display: flex; gap: 8px; margin-bottom: 12px; }
 .rename .input { flex: 1; height: 36px; }
+.rate { font-size: 12.5px; color: var(--muted); text-align: right; line-height: 1.35; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rate b { color: var(--text); font-weight: 600; }
+.panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-bottom: 14px; }
+.pane.wide { grid-column: 1 / -1; }
+.pane { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.pane h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; align-items: baseline; }
+.kv.two { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 18px; }
+.kv > span { color: var(--muted); white-space: nowrap; }
+.kv b .nw { white-space: nowrap; }
+.kv b { font-weight: 550; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; min-width: 0; }
+.kv b .mono { word-break: break-all; font-size: 12px; }
+.live { display: flex; gap: 22px; align-items: baseline; margin-bottom: 6px; }
+.live div span { display: block; font-size: 11.5px; color: var(--faint); }
+.live div b { font-size: 20px; font-weight: 680; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.spark { width: 100%; height: 54px; display: block; }
+.bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; margin-left: 6px; vertical-align: -1px; }
+.bars i { width: 3px; background: var(--line-2); border-radius: 1px; }
+.bars i.on { background: var(--accent); }
+.ctable { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.ctable th { text-align: left; font-weight: 600; color: var(--faint); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 0 8px 6px 0; white-space: nowrap; }
+.ctable td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+.ctable td.num, .ctable th.num { text-align: right; white-space: nowrap; }
+.ctable td .mono { word-break: break-all; font-size: 11.5px; }
+.ctable .svc { font-weight: 600; }
+.ctable .sub { color: var(--faint); font-size: 11.5px; }
+.cwrap { max-height: 420px; overflow: auto; }
+.pane h4 .btn { float: right; margin-top: -6px; text-transform: none; letter-spacing: 0; }
 .empty { padding: 34px 16px; text-align: center; color: var(--muted); font-size: 14px; }
 .sk { height: 62px; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
 .sk:first-child { border-top: 0; }
@@ -199,6 +227,8 @@ h2 .count { color: var(--faint); font-weight: 600; }
   .field .help { grid-column: 1; }
   .input { max-width: none; }
   .detail { padding-left: 16px; }
+  .panes { grid-template-columns: minmax(0, 1fr); }
+  .kv.two { grid-template-columns: auto minmax(0, 1fr); }
   .toasts { bottom: calc(84px + env(safe-area-inset-bottom)); }
   main.wrap { padding-bottom: 110px; }
   header.top { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--bg); }   /* a filter here would trap the fixed tab bar inside the header */
@@ -342,6 +372,19 @@ function confirmBox(title, text, ok, danger) {
 const dur = s => { s = +s || 0; const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
 const devName = d => d.name || d.host || "Unknown device";
+const fmtRate = bps => bps >= 1e6 ? (bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1) + " Mbps" : bps >= 1e3 ? Math.round(bps / 1e3) + " kbps" : Math.round(bps) + " bps";
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : b >= 1e3 ? Math.round(b / 1e3) + " KB" : (b || 0) + " B";
+const sigWord = r => r >= -60 ? "Excellent" : r >= -67 ? "Good" : r >= -75 ? "Fair" : "Weak";
+const sigBars = r => { const n = r >= -60 ? 4 : r >= -67 ? 3 : r >= -75 ? 2 : 1;
+  return `<span class="bars" aria-hidden="true">${[5, 8, 11, 14].map((h, i) => `<i class="${i < n ? "on" : ""}" style="height:${h - 2}px"></i>`).join("")}</span>`; };
+// Speed from two byte-counter readings; null if there is no earlier reading or the
+// counter went backwards (the device reconnected).
+function rates(prev, cur, t0, t1) {
+  if (!prev || prev.down == null || cur.down == null || !(t1 > t0)) return null;
+  const dd = cur.down - prev.down, du = cur.up - prev.up;
+  if (dd < 0 || du < 0) return null;
+  return { down: dd * 8 / (t1 - t0), up: du * 8 / (t1 - t0) };
+}
 const isPrivateMac = mac => /^.[26AE]/i.test(mac);
 // Icon: how the device is connected. (The stock device-type guesses are often wrong.)
 function connIcon(d) {
@@ -390,6 +433,13 @@ async function loadDevices() {
   // A device on the block list is only blocked while Access Control is on, in block-list mode.
   const live = r.block.enable === "on" && r.block.mode === "black";
   r.list.forEach(d => { d.listed = d.blocked; d.blocked = d.blocked && live; });
+  const prev = S.devices && S.devices.byMac, now = {};
+  r.list.forEach(d => {
+    now[d.mac] = { down: d.down, up: d.up };
+    const p = prev && prev[d.mac];
+    d.live = p ? rates(p, d, S.devices.t, r.t) : null;
+  });
+  r.byMac = now;
   S.devices = r;
 }
 async function loadSummary() {
@@ -417,7 +467,7 @@ function startPolling() {
   timer = setInterval(() => {
     if (document.hidden || !API.has() || S.editing || S.capEdit || S.tab === "wifi" || Object.keys(S.dirty).length) return;
     refresh(true);
-  }, 10000);
+  }, 5000);
 }
 window.addEventListener("hashchange", () => { const t = location.hash.slice(1); if (API.has() && TABS.some(x => x[0] === t)) go(t); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && API.has()) refresh(true); });
@@ -478,7 +528,7 @@ function shell() {
 }
 function go(tab) {
   if (S.tab === tab) return;
-  S.tab = tab; S.open = null; S.editing = null; S.qr = null;
+  S.tab = tab; S.open = null; S.editing = null; S.qr = null; S.conns = null; watchConns(); watchDetail();
   if (location.hash !== "#" + tab) history.pushState(null, "", "#" + tab);
   render(); refresh(true);
   window.scrollTo(0, 0);
@@ -550,11 +600,13 @@ function deviceRow(d) {
   const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
     d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
     d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>', d.cap && `<span class="tag cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
-  const meta = [d.ip, whereText(d)].filter(Boolean).join(" · ");
+  const meta = [d.ip, whereText(d), d.online && d.rssi ? `${d.rssi} dBm` : ""].filter(Boolean).join(" · ");
+  const live = d.online && d.live && (d.live.down >= 1000 || d.live.up >= 1000)
+    ? `<div class="rate"><b>↓ ${fmtRate(d.live.down)}</b><br>↑ ${fmtRate(d.live.up)}</div>` : "";
   return `<div class="row click ${d.online ? "" : "offline"} ${open ? "open" : ""}" data-mac="${d.mac}" tabindex="0" role="button" aria-expanded="${open}">
       <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
       <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${tags}</div><div class="meta">${esc(meta)}</div></div>
-      <div class="right">${ic("chev", "chev")}</div>
+      <div class="right">${live}${ic("chev", "chev")}</div>
     </div>${open ? deviceDetail(d) : ""}`;
 }
 
@@ -583,13 +635,7 @@ function deviceDetail(d) {
   return `<div class="detail">
     ${S.editing === d.mac ? `<form class="rename" data-rename="${d.mac}"><div class="input"><input id="rn" value="${esc(d.name || d.host)}" maxlength="40" placeholder="Name"></div>
       <button class="btn sm primary">Save</button><button type="button" class="btn sm" data-act="cancel">Cancel</button></form>` : ""}
-    <div class="grid">
-      <div><span>IP address</span><b class="mono">${esc(d.ip || "—")}</b></div>
-      <div><span>MAC address</span><b class="mono">${esc(d.mac)}</b>${isPrivateMac(d.mac) ? ' <span class="muted" title="The device picked a random address for this network">· private</span>' : ""}</div>
-      <div><span>Connection</span><b>${esc(whereText(d))}</b></div>
-      ${d.host && d.name && d.host !== d.name ? `<div><span>Reported name</span><b>${esc(d.host)}</b></div>` : ""}
-      ${d.net !== "iot" ? `<div><span>Speed</span><b>${(e => e ? esc(e.text) + ` <span class="muted" style="font-weight:400">· ${esc(e.why)}</span>` : "No cap")(effectiveCap(d))}</b></div>` : ""}
-    </div>
+    ${detailPanes(d)}
     ${S.capEdit === d.mac ? capEditor(d) : ""}
     <div class="acts">${toggles.join("")}
       ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
@@ -598,6 +644,166 @@ function deviceDetail(d) {
       ${canBlock ? `<button class="btn sm ${d.blocked ? "" : "danger"}" data-act="${d.blocked ? "unblock" : "block"}" data-mac="${d.mac}" ${busy ? "disabled" : ""}>${d.blocked ? "Unblock" : "Block"}</button>` : ""}
       ${busy ? '<span class="spin"></span>' : ""}
     </div></div>`;
+}
+// The nerdy part: polled every 2 s while a device is open (iot_net form "client").
+function sparkline(hist) {
+  if (hist.length < 2) return '<svg class="spark"></svg>';
+  const W = 300, H = 54, max = Math.max(1e5, ...hist.map(h => Math.max(h.down, h.up)));
+  const pts = k => hist.map((h, i) => `${(i / (hist.length - 1) * W).toFixed(1)},${(H - 3 - h[k] / max * (H - 8)).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="Speed over the last minute">
+    <polyline points="${pts("up")}" fill="none" stroke="#93c5fd" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+    <polyline points="${pts("down")}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function modulation(n) {
+  if (!n) return "";
+  let m = /he mcs (\d+) Nss (\d+).*?bw(\d+).*?GI ([\d.]+us)/.exec(n);
+  if (m) return `HE-MCS ${m[1]} · ${m[2]}SS · ${m[3]} MHz · ${m[4].replace("us", " µs")} GI`;
+  m = /vht mcs (\d+) Nss (\d+).*?bw(\d+)/.exec(n);
+  if (m) return `VHT-MCS ${m[1]} · ${m[2]}SS · ${m[3]} MHz`;
+  m = /mcs index (\d+)/.exec(n);
+  if (m) return `HT-MCS ${m[1]}`;
+  return n.replace(/ auto$/, "");
+}
+// conntrack prints IPv6 zero-padded; show the usual short form.
+function shortIp(a) {
+  if (!a || a.indexOf(":") < 0) return a;
+  const g = a.split(":").map(x => x.replace(/^0+(?=.)/, ""));
+  let best = -1, len = 0;
+  for (let i = 0; i < g.length; i++) { let j = i; while (j < g.length && g[j] === "0") j++; if (j - i > len && j - i > 1) { best = i; len = j - i; } i = Math.max(i, j - 1); }
+  if (best < 0) return g.join(":");
+  return (g.slice(0, best).join(":") + "::" + g.slice(best + len).join(":")).replace(/^:::/, "::");
+}
+// What a port usually is. Only a guess: apps can use any port.
+function service(c) {
+  const p = c.rport, u = c.p === "udp", in_ = (a, b) => p >= a && p <= b;
+  if (c.p === "icmp" || c.p === "ipv6-icmp" || c.icmp != null) return "Ping (ICMP)";
+  if (p === 443) return u ? "QUIC (HTTP/3)" : "HTTPS";
+  if (p === 80) return "HTTP";
+  if (p === 53) return "DNS";
+  if (p === 853) return "DNS over TLS";
+  if (p === 123) return "Time (NTP)";
+  if (in_(19302, 19309)) return "Google Meet";
+  if (in_(8801, 8810)) return "Zoom";
+  if (in_(3478, 3481)) return "Call relay (STUN/TURN)";
+  if (in_(50000, 50059) && u) return "Microsoft Teams";
+  if (p === 5228) return "Google push";
+  if (p === 5223) return "Apple push";
+  if (p === 3074 || p === 3075) return "Xbox Live";
+  if (in_(27000, 27050)) return "Steam";
+  if (p === 7844) return "Cloudflare Tunnel";
+  if (p === 22) return "SSH";
+  if (p === 993 || p === 143) return "Email (IMAP)";
+  if (p === 465 || p === 587 || p === 25) return "Email (SMTP)";
+  if (p === 1900) return "SSDP";
+  if (p === 5353) return "mDNS";
+  if (c.dir === "in") return "Incoming";
+  return u ? "UDP" : "TCP";
+}
+// Rough match of the priority-lane rules: call ports, ping, small UDP packets.
+function laneOf(c) {
+  const p = c.rport, u = c.p === "udp";
+  if (c.p === "icmp" || c.p === "ipv6-icmp" || c.icmp != null) return true;
+  if (!u) return false;
+  if ((p >= 8800 && p <= 8815) || (p >= 3476 && p <= 3483) || (p >= 19296 && p <= 19311) || (p >= 49984 && p <= 50111)) return true;
+  const avg = (c.up + c.down) / Math.max(1, c.upk + c.downk);
+  return avg < 512;
+}
+function connPane(d) {
+  const x = S.conns && S.conns.mac === d.mac ? S.conns : null;
+  if (!d.online) return "";
+  const head = `<h4>Connections${x && x.data ? ` · ${x.data.total}` : ""}<button class="btn sm" data-act="${x ? "conns-off" : "conns-on"}" data-mac="${d.mac}">${x ? "Hide" : "Show"}</button></h4>`;
+  if (!x) return `<div class="pane wide">${head}<div class="muted" style="font-size:13px">What this device is talking to right now.</div></div>`;
+  if (!x.data) return `<div class="pane wide">${head}<span class="spin"></span></div>`;
+  const rows = x.data.list.map(c => {
+    const key = [c.p, c.rip, c.rport, c.lport].join("|"), r = x.rates && x.rates[key];
+    const now = r && (r.down + r.up) >= 1000 ? `${fmtRate(r.down)}<div class="sub">↑ ${fmtRate(r.up)}</div>` : "";
+    const lane = laneOf(c) ? ' <span class="tag cap">Priority</span>' : "";
+    return `<tr><td><span class="svc">${esc(service(c))}</span>${lane}<div class="sub">${esc(c.p.toUpperCase())}${c.state ? " · " + esc(c.state.toLowerCase().replace(/_/g, " ")) : ""}${c.dir === "in" ? " · incoming" : ""}</div></td>
+      <td><span class="mono">${esc(shortIp(c.rip))}</span>${c.rport != null ? `<div class="sub">port ${c.rport}${c.lport != null ? ` · local ${c.lport}` : ""}</div>` : ""}</td>
+      <td class="num">${fmtBytes(c.down)}<div class="sub">↑ ${fmtBytes(c.up)}</div></td>
+      <td class="num">${now}</td></tr>`;
+  }).join("");
+  return `<div class="pane wide">${head}<div class="cwrap"><table class="ctable"><thead><tr><th>Service</th><th>Remote</th><th class="num">Total ↓/↑</th><th class="num">Now</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="4" class="muted">No open connections.</td></tr>'}</tbody></table></div>
+    ${x.data.total > x.data.list.length ? `<div class="sub" style="margin-top:8px">Showing the ${x.data.list.length} busiest of ${x.data.total}.</div>` : ""}</div>`;
+}
+async function pollConns() {
+  const x = S.conns; if (!x || S.open !== x.mac || S.tab !== "devices" || document.hidden) return;
+  try {
+    const c = await iot("connections", { mac: x.mac });
+    if (S.conns !== x) return;
+    const prev = {}, rates_ = {};
+    if (x.data) x.data.list.forEach(o => { prev[[o.p, o.rip, o.rport, o.lport].join("|")] = o; });
+    c.list.forEach(o => { const k = [o.p, o.rip, o.rport, o.lport].join("|"); const r = prev[k] && rates(prev[k], o, x.data.t, c.t); if (r) rates_[k] = r; });
+    x.data = c; x.rates = rates_;
+    // Busiest right now first, then by total.
+    c.list.sort((a, b) => { const ka = [a.p, a.rip, a.rport, a.lport].join("|"), kb = [b.p, b.rip, b.rport, b.lport].join("|");
+      const ra = rates_[ka] ? rates_[ka].down + rates_[ka].up : 0, rb = rates_[kb] ? rates_[kb].down + rates_[kb].up : 0;
+      return (rb - ra) || ((b.up + b.down) - (a.up + a.down)); });
+    if (!S.editing && !S.capEdit) render();
+  } catch (e) { if (e instanceof AuthError) fail(e); }
+}
+let connTimer = null;
+function watchConns() { clearInterval(connTimer); connTimer = null; if (S.conns) { pollConns(); connTimer = setInterval(pollConns, 3000); } }
+const kv = (rows, two) => `<div class="kv${two ? " two" : ""}">${rows.filter(Boolean).map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join("")}</div>`;
+function detailPanes(d) {
+  const nw = v => `<span class="nw">${v}</span>`;
+  const x = S.detail && S.detail.mac === d.mac ? S.detail : null, c = x && x.data, w = c && c.wifi;
+  const cap = d.net !== "iot" ? (e => e ? esc(e.text) + ` <span class="muted" style="font-weight:400">· ${esc(e.why)}</span>` : "No cap")(effectiveCap(d)) : "";
+  const live = x && x.live;
+  const livePane = `<div class="pane"><h4>Live${c && c.approx ? " · approximate" : ""}</h4>
+    ${!d.online ? '<div class="muted" style="font-size:13px">Offline</div>'
+      : c && c.down == null ? `<div class="muted" style="font-size:13px;margin-bottom:8px">${/^Mesh/.test(d.where) ? "Live speed isn't available for devices connected through the mesh satellite: their traffic is counted there, not here." : "No traffic counters for this device."}</div>`
+      : `<div class="live"><div><span>Download</span><b>${live ? fmtRate(live.down) : "…"}</b></div><div><span>Upload</span><b>${live ? fmtRate(live.up) : "…"}</b></div></div>
+    ${sparkline((x && x.hist) || [])}`}
+    ${kv([
+      c && c.down != null && ["Used since connecting", nw(`↓ ${fmtBytes(c.down)} · ↑ ${fmtBytes(c.up)}`)],
+      w && w.conn != null && ["Connected for", dur(w.conn)],
+      d.net !== "iot" && ["Speed cap", cap],
+    ])}</div>`;
+  const wifiPane = w ? `<div class="pane wide"><h4>Wi-Fi</h4>${kv([
+      ["Network", `${esc(w.ssid || "")} · ${w.iface && w.iface.startsWith("wl0") ? "5 GHz" : "2.4 GHz"} · ch ${esc(String(w.chanspec || "").split("/")[0])}`],
+      ["Signal", nw(`${w.rssi} dBm · ${sigWord(w.rssi)}${sigBars(w.rssi)}`)],
+      w.antennas && w.antennas.length > 1 && ["Per antenna", w.antennas.map(a => a + " dBm").join(" / ")],
+      w.noise != null && ["Noise · SNR", `${w.noise} dBm · ${w.rssi - w.noise} dB`],
+      ["Standard", esc(w.standard)],
+      ["Channel width", (w.width || String(w.chanspec || "").split("/")[1] || "20") + " MHz"],
+      w.streams && ["Streams", `${w.streams}×${w.streams} MIMO`],
+      ["Link rate", nw(`↓ ${w.tx_rate} · ↑ ${w.rx_rate} Mbps`)],
+      w.tx_nrate && ["Down modulation", esc(modulation(w.tx_nrate))],
+      w.rx_nrate && ["Up modulation", esc(modulation(w.rx_nrate))],
+      ["Security", nw(`${esc(w.auth || "?")} · ${esc((w.crypto || "").replace("AES_CCM", "AES-CCMP"))}`)],
+      w.tx_pkts && ["Retries", nw(`${(100 * (w.tx_retries || 0) / w.tx_pkts).toFixed(1)}% sent · ${w.rx_pkts ? (100 * (w.rx_retried || 0) / w.rx_pkts).toFixed(1) : 0}% received`)],
+    ], true)}</div>` : "";
+  const v6 = c && c.ipv6 ? c.ipv6.slice().sort((a, b) => (a.startsWith("fe80") ? 1 : 0) - (b.startsWith("fe80") ? 1 : 0)) : [];
+  const netPane = `<div class="pane"><h4>Network</h4>${kv([
+      ["IPv4", `<span class="mono">${esc(d.ip || (c && c.ip) || "—")}</span>`],
+      v6.length && ["IPv6", v6.map(a => `<span class="mono">${esc(a)}</span>`).join("<br>")],
+      ["MAC", `<span class="mono">${esc(d.mac)}</span>${isPrivateMac(d.mac) ? ' <span class="muted" title="The device picked a random address for this network">· private</span>' : ""}`],
+      ["Connection", esc(whereText(d))],
+      d.host && d.name && d.host !== d.name && ["Reported name", esc(d.host)],
+      c && c.lease_left > 0 && ["DHCP lease", dur(c.lease_left) + " left"],
+      c && c.connections != null && ["Open connections", c.connections],
+      c && c.iface && ["Interface", `<span class="mono">${esc(c.iface)}</span>`],
+    ])}</div>`;
+  return `<div class="panes">${livePane}${netPane}${wifiPane}${connPane(d)}</div>`;
+}
+let detailTimer = null;
+async function pollDetail() {
+  const mac = S.open; if (!mac || S.tab !== "devices" || document.hidden) return;
+  try {
+    const c = await iot("client", { mac });
+    if (S.open !== mac) return;
+    let x = S.detail && S.detail.mac === mac ? S.detail : { mac, hist: [] };
+    const r = x.data ? rates(x.data, c, x.data.t, c.t) : null;
+    if (r) { x.live = r; x.hist = x.hist.concat([r]).slice(-30); }
+    x.data = c; S.detail = x;
+    if (!S.editing && !S.capEdit) render();
+  } catch (e) { if (e instanceof AuthError) fail(e); }
+}
+function watchDetail() {
+  clearInterval(detailTimer); detailTimer = null;
+  if (S.open) { pollDetail(); detailTimer = setInterval(pollDetail, 2000); } else S.detail = null;
 }
 const toggle = (field, d, on, label) => `<label class="togg"><span class="sw"><input type="checkbox" data-field="${field}" data-mac="${d.mac}" ${on ? "checked" : ""}><span></span></span>${esc(label)}</label>`;
 
@@ -663,6 +869,10 @@ function viewSpeed() {
     <div class="card-b">
       <div class="field"><label for="w-down">Download</label><div class="input short"><input id="w-down" inputmode="numeric" value="${esc(wf.down)}" placeholder="e.g. 18"><span class="unit">Mbps</span></div></div>
       <div class="field"><label for="w-up">Upload</label><div class="input short"><input id="w-up" inputmode="numeric" value="${esc(wf.up)}" placeholder="e.g. 60"><span class="unit">Mbps</span></div></div>
+      <div class="field"><label for="w-prio">Calls and games first</label><label class="sw"><input type="checkbox" id="w-prio" ${wf.prio === "on" ? "checked" : ""}><span></span></label>
+        <div class="help">Zoom, Meet, Teams and FaceTime calls, game traffic and ping skip ahead of downloads and uploads. Works while the connection limit above is on.</div></div>
+      <div class="field"><label for="w-glow">Guests go last</label><label class="sw"><input type="checkbox" id="w-glow" ${wf.guest_low === "on" ? "checked" : ""}><span></span></label>
+        <div class="help">When the line is busy, home devices come first and guests share what is left (at least 10%). When it is quiet, guests still get full speed, up to their own limit.</div></div>
     </div>
     <div class="note">While this is on, all traffic runs through the router's processor instead of its hardware fast path.</div>
     ${wDirty ? `<div class="card-f"><button class="btn" data-act="w-reset">Discard</button><button class="btn primary" data-act="w-save">Save changes</button></div>` : ""}
@@ -789,10 +999,12 @@ document.addEventListener("click", async ev => {
     if (act === "w-save") return saveWan();
     if (act === "cap") { S.capEdit = mac; render(); const i = $id("cap-d"); if (i) i.focus(); return; }
     if (act === "cap-cancel") { S.capEdit = null; render(); return; }
+    if (act === "conns-on") { S.conns = { mac }; render(); watchConns(); return; }
+    if (act === "conns-off") { S.conns = null; watchConns(); render(); return; }
     if (act === "cap-remove") return setCap(mac, "");
   }
   if (t.closest(".detail") || t.closest("input,label,button,a")) return;
-  const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; S.capEdit = null; render(); }
+  const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; S.capEdit = null; S.detail = null; S.conns = null; watchConns(); render(); watchDetail(); }
 });
 document.addEventListener("keydown", ev => {
   const row = ev.target.closest && ev.target.closest(".row.click");
@@ -865,9 +1077,9 @@ async function setCap(mac, cap) {
     await loadDevices(); render();
   } catch (e) { fail(e); }
 }
-function readWanForm() { return { enable: $id("w-enable").checked ? "on" : "off", down: $id("w-down").value.trim(), up: $id("w-up").value.trim() }; }
+function readWanForm() { return { enable: $id("w-enable").checked ? "on" : "off", down: $id("w-down").value.trim(), up: $id("w-up").value.trim(), prio: $id("w-prio").checked ? "on" : "off", guest_low: $id("w-glow").checked ? "on" : "off" }; }
 function markWan() {
-  const f = readWanForm(), w = S.shaping, same = ["enable", "down", "up"].every(k => String(f[k]) === String(w[k] || ""));
+  const f = readWanForm(), w = S.shaping, same = ["enable", "down", "up", "prio", "guest_low"].every(k => String(f[k]) === String(w[k] || (k === "prio" || k === "guest_low" ? "off" : "")));
   const was = !!S.dirty.wan;
   if (same) delete S.dirty.wan; else S.dirty.wan = f;
   if (was !== !same) render();
@@ -876,7 +1088,7 @@ async function saveWan() {
   const f = S.dirty.wan; if (!f) return;
   const d = +f.down, u = +f.up;
   if (f.enable === "on" && !(d >= 1 && d <= 1000 && u >= 1 && u <= 1000)) return toast("Speeds must be between 1 and 1000 Mbps.", true);
-  try { S.shaping = await iot("shaping", Object.assign({ operation: "write" }, f)); delete S.dirty.wan; render(); toast(f.enable === "on" ? `Whole connection capped at ${d}↓ ${u}↑ Mbps` : "Whole-connection limit off"); }
+  try { S.shaping = await iot("shaping", Object.assign({ operation: "write" }, f)); delete S.dirty.wan; render(); toast(f.enable === "on" ? `Whole connection capped at ${d}↓ ${u}↑ Mbps${f.prio === "on" ? ", calls and games first" : ""}${f.guest_low === "on" ? ", guests last" : ""}` : "Whole-connection limit off"); }
   catch (e) { fail(e); }
 }
 async function saveGuest() {

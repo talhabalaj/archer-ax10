@@ -382,7 +382,12 @@ firewall_remove() {
 #   - guests: each connected guest gets iot_guest_down/up (iot_guest_limit=1)
 #     unless its MAC is in iot_guest_fast; a per-device cap wins;
 #   - the whole connection: iot_wan_shape=1 caps all internet traffic at
-#     iot_wan_down/up, a little under the line speed, so queues stay short.
+#     iot_wan_down/up, a little under the line speed, so queues stay short;
+#   - a priority lane (iot_prio=1, needs the whole-connection cap): calls and
+#     games go first, guaranteed 40% of the line and allowed all of it;
+#   - guests last (iot_guest_low=1, needs the whole-connection cap): every guest's
+#     traffic goes in a bottom lane guaranteed 10%, so home devices win when the
+#     line is busy. Guests' own caps still apply inside it.
 # Devices are matched by MAC, so a cap covers IPv4 and IPv6 and survives a new IP.
 # Download: htb on br-lan's egress (routed traffic into the home bridge; traffic
 # between home devices is bridged and never passes there), one class per capped
@@ -408,6 +413,7 @@ shape_load() {
     GL_FAST="$(cfg guest_fast '' | tr 'A-F-' 'a-f:')"
     CAPS="$(cfg caps '' | tr 'A-F-' 'a-f:')"
     WS_ON="$(cfg wan_shape 0)"; WS_DOWN="$(cfg wan_down 0)"; WS_UP="$(cfg wan_up 0)"
+    PRIO="$(cfg prio 0)"; GLOW="$(cfg guest_low 0)"
 }
 guest_ifs() {   # guest Wi-Fi interfaces from TP-Link's own config (wifi-iface guest=on)
     for sec in $($UCI show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.guest='\{0,1\}on'\{0,1\}$/\1/p"); do
@@ -459,8 +465,33 @@ shape_ok() {   # everything the last build added is still there
     $TC qdisc show dev "$IFB" 2>/dev/null | grep -q "htb 1:" &&
     $IPT -t mangle -C FORWARD -j $CH_SHAPE 2>/dev/null && $IPT6 -t mangle -C FORWARD -j $CH_SHAPE 2>/dev/null
 }
-shape_class() {   # shape_class <dev> <minor> <Mbps>: capped class with an sfq leaf
-    $TC class add dev "$1" parent 1:1 classid "1:$2" htb rate "${3}mbit" ceil "${3}mbit" $(htb_burst "$3")
+# Priority lane: what goes in class 1:2. <sel> is sport for downloads (packets from
+# the internet) and dport for uploads. Port blocks are mask-aligned, so they cover a
+# few neighbouring ports too.
+#   calls: Zoom media 8801-8810, STUN/TURN 3478-3481 (Zoom, Teams, WhatsApp, FaceTime),
+#          Google Meet 19302-19309, Teams 50000-50059;
+#   games: UDP packets under 512 bytes (game state, voice; bulk UDP such as QUIC
+#          downloads and torrents uses full-size packets and stays in the normal lane);
+#   also ICMP and traffic marked real-time (DSCP EF, AF41).
+PRIO_PORTS="8800/0xfff8 8808/0xfff8 3476/0xfff8 19296/0xfff0 49984/0xffc0 50048/0xffc0"
+prio_filters() {   # prio_filters <dev> <sport|dport>
+    # Filters sharing a prio number must share a protocol: IPv4 at 2, IPv6 at 3.
+    pf() { [ "$2" = ip ] && fp=2 || fp=3; $TC filter add dev "$1" parent 1: protocol "$2" prio $fp u32 $3 flowid 1:2; }
+    pf "$1" ip "match ip protocol 1 0xff"
+    pf "$1" ipv6 "match ip6 protocol 58 0xff"
+    pf "$1" ip "match ip protocol 17 0xff match u16 0x0000 0xfe00 at 2"
+    pf "$1" ipv6 "match ip6 protocol 17 0xff match u16 0x0000 0xfe00 at 4"
+    for p in $PRIO_PORTS; do
+        pf "$1" ip "match ip protocol 17 0xff match ip $2 ${p%/*} ${p#*/}"
+        pf "$1" ipv6 "match ip6 protocol 17 0xff match ip6 $2 ${p%/*} ${p#*/}"
+    done
+    for t in 0xb8 0x88; do
+        pf "$1" ip "match ip tos $t 0xfc"
+        pf "$1" ipv6 "match ip6 priority $t 0xfc"
+    done
+}
+shape_class() {   # shape_class <dev> <minor> <Mbps> [parent]: capped class with an sfq leaf
+    $TC class add dev "$1" parent "${4:-1:1}" classid "1:$2" htb rate "${3}mbit" ceil "${3}mbit" $(htb_burst "$3") prio 1
     $TC qdisc add dev "$1" parent "1:$2" handle "$2:" sfq perturb 10 limit "$(sfq_limit "$3")"
 }
 shape_sync() {
@@ -468,13 +499,15 @@ shape_sync() {
     list="$(shape_list | awk 'NF == 3 && $1 ~ /^[0-9a-f:]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && ($2 > 0 || $3 > 0)' | sort -u)"
     wan=0
     [ "$WS_ON" = 1 ] && [ "$WS_DOWN" -gt 0 ] 2>/dev/null && [ "$WS_UP" -gt 0 ] 2>/dev/null && wan=1
+    prio=0; [ "$wan" = 1 ] && [ "$PRIO" = 1 ] && prio=1
+    low=0; gl=""; [ "$wan" = 1 ] && [ "$GLOW" = 1 ] && { low=1; gl="$(guest_macs | sort -u | tr '\n' ' ')"; }
     if [ -z "$list" ] && [ "$wan" = 0 ]; then
         if [ -f "$RUN/shape.sig" ] || [ -f "$RUN/guest.sig" ]; then
             shape_clear; rm -f "$RUN/shape.sig"; log "speed limits off"
         fi
         return 0
     fi
-    sig="$wan|$WS_DOWN|$WS_UP|$(echo $list)"
+    sig="$wan|$WS_DOWN|$WS_UP|$prio|$low|$gl|$(echo $list)"
     [ "$(cat "$RUN/shape.sig" 2>/dev/null)" = "$sig" ] && shape_ok && return 0
     shape_clear
     lsmod 2>/dev/null | grep -q '^xt_BLOGSKIP' || insmod /lib/modules/iplatform/xt_BLOGSKIP.ko 2>/dev/null
@@ -500,26 +533,54 @@ shape_sync() {
         else t=1000; r=1000mbit; q=127; fi
         $TC qdisc add dev "$dev" root handle 1: htb default 10
         $TC class add dev "$dev" parent 1: classid 1:1 htb rate "$r" ceil "$r" $(htb_burst "$t")
-        $TC class add dev "$dev" parent 1:1 classid 1:10 htb rate "$r" ceil "$r" $(htb_burst "$t")
+        if [ "$prio" = 1 ] || [ "$low" = 1 ]; then
+            hi=0; gs=0
+            [ "$prio" = 1 ] && { hi=$((t * 40 / 100)); [ "$hi" -ge 1 ] || hi=1; }
+            [ "$low" = 1 ] && { gs=$((t / 10)); [ "$gs" -ge 1 ] || gs=1; }
+            lo=$((t - hi - gs)); [ "$lo" -ge 1 ] || lo=1
+            if [ "$prio" = 1 ]; then
+                $TC class add dev "$dev" parent 1:1 classid 1:2 htb rate "${hi}mbit" ceil "$r" $(htb_burst "$t") prio 0
+                $TC qdisc add dev "$dev" parent 1:2 handle 2: sfq perturb 10 limit "$q"
+            fi
+            $TC class add dev "$dev" parent 1:1 classid 1:10 htb rate "${lo}mbit" ceil "$r" $(htb_burst "$t") prio 1
+            if [ "$low" = 1 ]; then
+                # 1:3 holds the guest lane: guests' own caps nest inside it, and 1:4
+                # takes the rest of their traffic (a class with children holds no packets).
+                $TC class add dev "$dev" parent 1:1 classid 1:3 htb rate "${gs}mbit" ceil "$r" $(htb_burst "$t") prio 2
+                $TC class add dev "$dev" parent 1:3 classid 1:4 htb rate "${gs}mbit" ceil "$r" $(htb_burst "$t") prio 2
+                $TC qdisc add dev "$dev" parent 1:4 handle 4: sfq perturb 10 limit "$q"
+            fi
+        else
+            $TC class add dev "$dev" parent 1:1 classid 1:10 htb rate "$r" ceil "$r" $(htb_burst "$t")
+        fi
         $TC qdisc add dev "$dev" parent 1:10 handle 10: sfq perturb 10 limit "$q"
     done
+    # Device caps match first (prio 1), so a capped device stays within its cap.
+    [ "$prio" = 1 ] && { prio_filters "$LANBR" sport; prio_filters "$IFB" dport; }
     $TC qdisc add dev "$LANBR" ingress
     $TC filter add dev "$LANBR" parent ffff: protocol all prio 10 u32 match u32 0 0 action mirred egress redirect dev "$IFB"
     n=11
     echo "$list" | while read m d u; do
+        par=1:1; [ "$low" = 1 ] && case " $gl " in *" $m "*) par=1:3 ;; esac
         if [ "$d" -gt 0 ]; then
-            shape_class "$LANBR" "$n" "$d"
+            shape_class "$LANBR" "$n" "$d" "$par"
             $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid "1:$n"
         fi
         if [ "$u" -gt 0 ]; then
-            shape_class "$IFB" "$n" "$u"
+            shape_class "$IFB" "$n" "$u" "$par"
             $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid "1:$n"
         fi
         n=$((n + 1))
     done
+    # Guests last: whatever a guest's own cap does not catch lands in the bottom lane.
+    # Added after the cap filters, so within prio 1 those match first.
+    for m in $gl; do
+        $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid 1:4
+        $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid 1:4
+    done
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
     echo "$sig" > "$RUN/shape.sig"
-    log "speed limits: $(echo "$list" | grep -c .) device(s) capped$([ "$wan" = 1 ] && echo ", whole connection at ${WS_DOWN}/${WS_UP} Mbps")"
+    log "speed limits: $(echo "$list" | grep -c .) device(s) capped$([ "$wan" = 1 ] && echo ", whole connection at ${WS_DOWN}/${WS_UP} Mbps")$([ "$prio" = 1 ] && echo ", calls and games first")$([ "$low" = 1 ] && echo ", guests last")"
 }
 guest_sync() { shape_sync; }   # older callers
 
@@ -755,6 +816,8 @@ case "$1" in
     guest|shape)
         shape_sync; shape_load
         echo "whole connection: $([ "$WS_ON" = 1 ] && echo "${WS_DOWN}/${WS_UP} Mbps" || echo off)"
+        echo "priority lane: $([ "$PRIO" = 1 ] && { [ "$WS_ON" = 1 ] && echo on || echo "on, but needs the whole-connection cap"; } || echo off)"
+        echo "guests last: $([ "$GLOW" = 1 ] && { [ "$WS_ON" = 1 ] && echo on || echo "on, but needs the whole-connection cap"; } || echo off)"
         echo "guest limit: $GL_ON  ${GL_DOWN}/${GL_UP} Mbps  full-speed: ${GL_FAST:-none}"
         echo "capped (mac down up):"; shape_list | sort -u ;;
     ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_restart ;;

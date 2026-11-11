@@ -208,6 +208,26 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   under full download or upload load), so the cap is off by default. With it at
   18/60, one device got 8–17 Mbps, depending on what the rest of the house was
   using.
+- **Lanes** (need the whole-connection cap). Priority (`iot_prio=1`, class 1:2,
+  htb prio 0, 40% guaranteed): Zoom 8801–8810, STUN/TURN 3478–3481, Meet
+  19302–19309, Teams 50000–50059 (u32 port blocks are mask-aligned, so a few
+  neighbours ride along), UDP packets under 512 bytes (games, voice; bulk QUIC
+  and torrents use full-size packets), ICMP, DSCP EF/AF41. IPv4 filters use u32
+  prio 2 and IPv6 prio 3 (filters sharing a prio must share a protocol). Guests
+  last (`iot_guest_low=1`): class 1:3 (prio 2, 10%) holds guests' own cap classes
+  and leaf 1:4 for the rest of their traffic, matched by MAC at prio 1 after the
+  cap filters. Normal traffic is 1:10 (prio 1). Measured: with the line saturated,
+  ping and DNS stayed at idle levels with or without the priority lane (sfq already
+  keeps sparse flows ahead); the lane's value is bandwidth for calls when many bulk
+  flows compete. A Meet call was seen on UDP 19305 over IPv6, in the lane.
+- **Per-device stats** (dashboard device details): byte counters, signal per
+  antenna, noise, link rate, MCS/streams/width, security and retries from
+  `wl sta_info` (exact, Wi-Fi clients of this router; read in the cached probe);
+  live speed is the difference between two readings. Wired devices fall back to
+  `ubus call tfstats get` (marked approximate: it misses most accelerated
+  traffic); devices behind the mesh satellite have no counters here. Connections
+  come from `/proc/net/nf_conntrack` (the device as original source or
+  destination; IPv6 is printed zero-padded there).
 - htb's default burst (a few KB) under-delivers here, so classes get ~20 ms of
   traffic at their rate (at least 15 KB). Queue limits: `sfq limit` = 3 packets
   per Mbps, 20–127.

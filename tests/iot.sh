@@ -295,6 +295,8 @@ case "\$*" in
   *iot_wan_shape*) cat "$T/wan_on" ;;
   *iot_wan_down*) echo "90" ;;
   *iot_wan_up*) echo "40" ;;
+  *iot_prio*) [ -f "$T/prio_on" ] && echo 1 || echo 0 ;;
+  *iot_guest_low*) [ -f "$T/glow_on" ] && echo 1 || echo 0 ;;
   *) exec "$T/bin/uci" "\$@" ;;
 esac
 EOF
@@ -337,6 +339,29 @@ has "ip6tables -t mangle -A AX10_SHAPE -j BLOGSKIP"
 has "tc class add dev br-lan parent 1: classid 1:1 htb rate 90mbit ceil 90mbit"
 has "tc class add dev ifb0 parent 1: classid 1:1 htb rate 40mbit ceil 40mbit"
 grep -q -- "-A AX10_SHAPE_IN" "$T/calls" && fail "per-device marks added with the whole connection capped"
+grep -q "classid 1:2 " "$T/calls" && fail "priority lane built while it is off"
+# Priority lane: class 1:2 first in line, guaranteed 40%, with the call and game filters.
+: > "$T/prio_on"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+has "tc class add dev br-lan parent 1:1 classid 1:2 htb rate 36mbit ceil 90mbit"
+has "tc class add dev ifb0 parent 1:1 classid 1:2 htb rate 16mbit ceil 40mbit"
+has "tc class add dev br-lan parent 1:1 classid 1:10 htb rate 54mbit ceil 90mbit"
+has "tc filter add dev br-lan parent 1: protocol ip prio 2 u32 match ip protocol 17 0xff match ip sport 8800 0xfff8 flowid 1:2"
+has "tc filter add dev ifb0 parent 1: protocol ip prio 2 u32 match ip protocol 17 0xff match ip dport 8800 0xfff8 flowid 1:2"
+has "tc filter add dev ifb0 parent 1: protocol ipv6 prio 3 u32 match ip6 protocol 17 0xff match u16 0x0000 0xfe00 at 4 flowid 1:2"
+has "tc filter add dev br-lan parent 1: protocol ip prio 2 u32 match ip tos 0xb8 0xfc flowid 1:2"
+rm -f "$T/prio_on"
+# Guests last: a bottom lane at 10%, guest caps nested in it, uncapped directions caught by it.
+: > "$T/glow_on"; : > "$T/prio_on"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+has "tc class add dev br-lan parent 1:1 classid 1:3 htb rate 9mbit ceil 90mbit"
+has "tc class add dev br-lan parent 1:1 classid 1:10 htb rate 45mbit ceil 90mbit"
+has "tc class add dev br-lan parent 1:3 classid"
+has "tc filter add dev br-lan parent 1: protocol all prio 1 u32 match ether dst aa:bb:cc:00:00:08 flowid 1:4"
+has "tc filter add dev ifb0 parent 1: protocol all prio 1 u32 match ether src aa:bb:cc:00:00:06 flowid 1:4"
+has "tc class add dev br-lan parent 1:3 classid 1:4 htb rate 9mbit ceil 90mbit"
+grep -q "match ether dst aa:bb:cc:00:00:07 flowid 1:4" "$T/calls" && fail "home device put in the guest lane"
+rm -f "$T/glow_on" "$T/prio_on"
 # Everything off: cleared, including the old guest-only limit's leftovers.
 echo 0 > "$T/wan_on"; echo 0 > "$T/guest_on"; rm -f "$T/caps"
 echo "mangle PREROUTING -j AX10_GUEST" >> "$T/rules"; : > "$T/run/guest.sig"; : > "$T/calls"
