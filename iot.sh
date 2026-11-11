@@ -114,8 +114,17 @@ lock() {   # lock [seconds to wait, default $LOCK_WAIT]; returns 1 if still held
         if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
         p="$(cat "$LOCK/pid" 2>/dev/null)"
         if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then
-            # Holder is gone. Remove only if it is still that holder's lock.
-            [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$p" ] && rm -rf "$LOCK"
+            # Holder is gone. Take its lock over, one waiter at a time ($LOCK.gc):
+            # two waiters that both saw the dead holder must not both remove a
+            # lock, or the second removes the one the first has just taken.
+            if mkdir "$LOCK.gc" 2>/dev/null; then
+                [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$p" ] && rm -rf "$LOCK"
+                rmdir "$LOCK.gc"
+            else
+                # Another waiter is taking it over; a .gc left by a dead waiter goes at the end of the wait.
+                [ "$w" -le 0 ] && rmdir "$LOCK.gc" 2>/dev/null
+                w=$((w - 1)); sleep 1
+            fi
             continue
         fi
         if [ "$w" -le 0 ]; then
