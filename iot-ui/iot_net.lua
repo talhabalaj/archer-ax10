@@ -70,34 +70,74 @@ end
 
 -- Where each MAC is connected right now: Wi-Fi network (SSID and band), a wired
 -- LAN port, the mesh satellite, or "Online" from the ARP table.
-local function presence()
-    local at = {}
-    for ifn in sh("ls /sys/class/net"):gmatch("%S+") do
-        if ifn:match("^wl%d%.%d$") then
-            local ssid = sh("/usr/sbin/wl -i " .. ifn .. " ssid"):match('"(.*)"') or ifn
-            local band = ifn:match("^wl0") and "5 GHz" or "2.4 GHz"
-            for mac in sh("/usr/sbin/wl -i " .. ifn .. " assoclist"):gmatch("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)") do
-                at[mac:lower()] = ssid .. " (" .. band .. ")"
+-- One shell run gathers everything (each popen costs two process starts on this
+-- CPU); the SSID is only looked up for networks that have clients.
+local PROBE = [[
+cd /sys/class/net || exit 0
+for i in wl[0-9].[0-9]; do
+    [ -d "$i" ] || continue
+    m="$(/usr/sbin/wl -i $i assoclist)"; [ -n "$m" ] || continue
+    echo "W $i $(/usr/sbin/wl -i $i ssid)"; echo "$m"
+done
+for p in br-lan/brif/*; do [ -f "$p/port_no" ] && echo "P ${p##*/} $(cat $p/port_no)"; done
+echo F; brctl showmacs br-lan
+echo A; cat /proc/net/arp
+]]
+local function probe()
+    local at, atif, ports, mode, where, ifn = {}, {}, {}, "", nil, nil
+    for line in sh(PROBE):gmatch("[^\n]+") do
+        local wif, rest = line:match("^W (%S+) (.*)$")
+        local pif, pno = line:match("^P (%S+) (%S+)$")
+        if wif then
+            ifn = wif
+            where = (rest:match('"(.*)"') or ifn) .. " (" .. (ifn:match("^wl0") and "5 GHz" or "2.4 GHz") .. ")"
+            mode = "W"
+        elseif pif then ports[tonumber(pno, 16) or -1] = pif
+        elseif line == "F" or line == "A" then mode = line
+        elseif mode == "W" then
+            local mac = line:match("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)")
+            if mac then at[mac:lower()] = where; atif[mac:lower()] = ifn end
+        elseif mode == "F" then
+            local no, mac, islocal = line:match("^%s*(%d+)%s+(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)%s+(%a+)")
+            if mac and islocal == "no" and not at[mac:lower()] then
+                local pn = ports[tonumber(no)] or ""
+                if pn:match("^eth") then at[mac:lower()] = "Wired"; atif[mac:lower()] = pn
+                elseif pn:match("^wds") then at[mac:lower()] = "Mesh satellite"; atif[mac:lower()] = pn end
             end
+        elseif mode == "A" then
+            local flags, mac = line:match("^%S+%s+%S+%s+(%S+)%s+(%S+)")
+            if flags == "0x2" and mac and not at[mac:lower()] then at[mac:lower()] = "Online" end
         end
     end
-    local ports = {}
-    for path in sh("ls -d /sys/class/net/br-lan/brif/*"):gmatch("%S+") do
-        local n = tonumber(sh("cat " .. path .. "/port_no"), 16)
-        if n then ports[n] = path:match("([^/]+)$") end
-    end
-    for no, mac, islocal in sh("brctl showmacs br-lan"):gmatch("\n%s*(%d+)%s+(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)%s+(%a+)") do
-        mac = mac:lower()
-        local ifn = ports[tonumber(no)] or ""
-        if islocal == "no" and not at[mac] then
-            if ifn:match("^eth") then at[mac] = "Wired"
-            elseif ifn:match("^wds") then at[mac] = "Mesh satellite" end
+    return at, atif
+end
+
+-- A page asks for two or three device lists at once; they share one probe through
+-- a short-lived cache file ("<unix time>" then "mac<TAB>ifname<TAB>where" lines).
+-- Returns mac -> where, and mac -> interface ("" when only seen in ARP).
+local PRESENCE_CACHE, PRESENCE_TTL = "/tmp/ax10-iot/presence", 3
+local function presence()
+    local f = io.open(PRESENCE_CACHE)
+    if f then
+        local at, atif, stamp = {}, {}, tonumber(f:read("*l") or "")
+        if stamp and os.time() - stamp >= 0 and os.time() - stamp < PRESENCE_TTL then
+            for line in f:lines() do
+                local mac, ifn, where = line:match("^(%S+)\t(%S*)\t(.+)$")
+                if mac then at[mac] = where; atif[mac] = ifn end
+            end
+            f:close(); return at, atif
         end
+        f:close()
     end
-    for _, flags, mac in sh("cat /proc/net/arp"):gmatch("\n(%S+)%s+%S+%s+(%S+)%s+(%S+)") do
-        if flags == "0x2" and not at[mac:lower()] then at[mac:lower()] = "Online" end
+    local at, atif = probe()
+    local tmp = PRESENCE_CACHE .. "." .. os.time() .. math.random(1000, 9999)
+    f = io.open(tmp, "w")
+    if f then
+        f:write(os.time(), "\n")
+        for mac, where in pairs(at) do f:write(mac, "\t", atif[mac] or "", "\t", where, "\n") end
+        f:close(); os.rename(tmp, PRESENCE_CACHE)
     end
-    return at
+    return at, atif
 end
 
 -- Rows for one side (IoT subnet or home), named and sorted: the device viewing
@@ -106,7 +146,7 @@ local function device_rows(want_iot, extra)
     local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
-    local at, nm = presence(), names()
+    local at, nm = (presence()), names()
     local rows, seen = {}, {}
     local f = io.open("/tmp/dhcp.leases")
     if f then
@@ -314,7 +354,122 @@ local function update_guest(form)
     return new
 end
 
+---------------------------------------------------------------- dashboard
+-- The dashboard at / (iot-ui/dash) asks for everything in one call.
+local MAC_PAT = "^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$"
+local function normmac(m) return ((m or ""):lower():gsub("-", ":")) end
+
+-- The stock Access Control block list (macs stored as "AA-BB-..."), and its state.
+local function blocklist()
+    local c, out = uci.cursor(), {}
+    c:foreach("access_control", "black_list", function(sct)
+        if sct.mac then out[normmac(sct.mac)] = true end
+    end)
+    return out, c:get("access_control", "settings", "enable") or "off",
+           c:get("access_control", "settings", "access_mode") or "black"
+end
+
+local function guest_ifaces()
+    local g = {}
+    uci.cursor():foreach("wireless", "wifi-iface", function(sct)
+        if sct.guest == "on" and sct.ifname then g[sct.ifname] = true end
+    end)
+    return g
+end
+
+-- Every device in the DHCP leases (MACs seen only on the air or in ARP are the mesh
+-- satellite's own radios, not clients), plus offline devices that still have a setting
+-- (blocked, full speed, allowed to reach IoT, Internet off) so it can be undone.
+local function devices()
+    local at, atif = presence()
+    local nm, gif = names(), guest_ifaces()
+    local blocked, ac_enable, ac_mode = blocklist()
+    local noinet, fast, allow = words(get("noinet", "")), words(get("guest_fast", "")), words(get("lan_allow", ""))
+    local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
+    local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
+    local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
+    local rows, seen = {}, {}
+    local function add(mac, ip, host)
+        mac = normmac(mac)
+        if seen[mac] or not mac:match(MAC_PAT) then return end
+        seen[mac] = true
+        local iot = (ip and prefix and ip:sub(1, #prefix + 1) == prefix .. ".") or false
+        local net = iot and "iot" or (gif[atif[mac] or ""] and "guest") or "home"
+        rows[#rows + 1] = {
+            mac = mac:upper(), ip = ip or "", host = (host ~= "*" and host) or "",
+            name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
+            net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
+            internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac),
+        }
+    end
+    local f = io.open("/tmp/dhcp.leases")
+    if f then
+        for line in f:lines() do
+            local _, mac, ip, host = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+            if mac then add(mac, ip, host) end
+        end
+        f:close()
+    end
+    for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
+    for m in pairs(blocked) do add(m, nil, nil) end
+    return { list = rows, lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
+             guest_limit = get("guest_limit", "0") == "1",
+             block = { enable = ac_enable, mode = ac_mode } }
+end
+
+-- Remove or add one mac in a space-separated list setting.
+local function list_with(key, mac, on)
+    local out = {}
+    for _, m in ipairs(words(get(key, ""))) do
+        if normmac(m) ~= mac then out[#out + 1] = normmac(m) end
+    end
+    if on then out[#out + 1] = mac end
+    return table.concat(out, " ")
+end
+
+-- Change one device: any of name, internet (IoT), allowed (home -> IoT), fast (guest).
+local function write_device(form)
+    local mac = normmac(form.mac)
+    if not mac:match(MAC_PAT) then return false, "-1" end
+    if form.name ~= nil then set_name(mac, form.name) end
+    local opts = {}
+    if form.internet == "on" or form.internet == "off" then opts.noinet = list_with("noinet", mac, form.internet == "off") end
+    if form.allowed == "on" or form.allowed == "off" then opts.lan_allow = list_with("lan_allow", mac, form.allowed == "on") end
+    if next(opts) then save(opts) end
+    if form.fast == "on" or form.fast == "off" then
+        local c = uci.cursor()
+        c:set("openvpn", SEC, "iot_guest_fast", list_with("guest_fast", mac, form.fast == "on"))
+        c:commit("openvpn")
+        guest_apply()
+    end
+    return { mac = mac:upper() }
+end
+
+-- Router uptime and the Internet connection (PPPoE shows up as "internet").
+local function summary()
+    local f, up = io.open("/proc/uptime"), 0
+    if f then up = tonumber((f:read("*l") or ""):match("^(%d+)")) or 0; f:close() end
+    local wan
+    for _, i in ipairs({ "internet", "wan" }) do
+        local okj, st = pcall(json.decode, sh("ubus call network.interface." .. i .. " status"))
+        if okj and type(st) == "table" and st["ipv4-address"] and st["ipv4-address"][1] then wan = st; break end
+    end
+    wan = wan or {}
+    return { uptime = up, wan_up = wan.up and true or false, wan_uptime = wan.uptime or 0,
+             wan_ip = (wan["ipv4-address"] and wan["ipv4-address"][1] and wan["ipv4-address"][1].address) or "",
+             proto = wan.proto or "" }
+end
+
 local dispatch_tbl = {
+    devices = {
+        ["read"]  = { cb = devices },
+    },
+    device = {
+        ["write"] = { cb = write_device },
+    },
+    summary = {
+        ["read"]  = { cb = summary },
+    },
     settings = {
         ["read"]  = { cb = read_settings },
         ["write"] = { cb = write_settings },

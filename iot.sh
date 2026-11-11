@@ -563,10 +563,11 @@ inittab_del() {
 # RAM, add our files, and bind-mount the copies over the originals. Gone on reboot;
 # `iot.sh boot` puts them back.
 WWW="${WWW:-/www/webpages}"
+WWW_ROOT="${WWW_ROOT:-${WWW%/*}}"
 LUCI_CTL="${LUCI_CTL:-/usr/lib/lua/luci/controller/admin}"
 UI_SRC="$RUN/ui"
 OV="$RUN/overlay"
-UI_VER=iot4
+UI_VER=iot6
 mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
 overlay() {   # overlay <dir> <name>: bind a writable RAM copy over <dir>, echo the copy's path
     if ! mounted "$1"; then
@@ -574,6 +575,11 @@ overlay() {   # overlay <dir> <name>: bind a writable RAM copy over <dir>, echo 
         cp -a "$1" "$OV/$2" && $MOUNT --bind "$OV/$2" "$1" || return 1
     fi
     echo "$1"
+}
+bind_file() {   # bind_file <src> <dst>: show <src> at existing file <dst> (re-bound, so updates show)
+    [ -f "$1" ] && [ -f "$2" ] || return 0
+    mounted "$2" && $UMOUNT "$2"
+    $MOUNT --bind "$1" "$2"
 }
 # The boot hook leaves the release public key here; when present, downloads must
 # carry a valid signature (see boot.sh).
@@ -622,10 +628,23 @@ ui_install() {
         grep -v '^;\$\.su\.CHAR\.MENU_ITEMS_NAME\.IOT_NETWORK' "$l/lan.js" > "$l/lan.js.new"
         { echo; cat "$UI_SRC/locale.js"; } >> "$l/lan.js.new"; cat "$l/lan.js.new" > "$l/lan.js"; rm -f "$l/lan.js.new"
     fi
-    log "web UI pages installed (Advanced > Wireless > IoT Network, Guest Speed)"
+    # Theme: the per-language stylesheet loads after the stock ones, so our rules go at
+    # its end (from the marker to end of file is ours; replaced on every install).
+    if [ -f "$UI_SRC/theme.css" ]; then
+        touch "$l/lan.css"
+        sed '/ax10-theme-begin/,$d' "$l/lan.css" > "$l/lan.css.new"
+        { echo '/* ax10-theme-begin */'; cat "$UI_SRC/theme.css"; } >> "$l/lan.css.new"
+        cat "$l/lan.css.new" > "$l/lan.css"; rm -f "$l/lan.css.new"
+    fi
+    # Dashboard at /: our page over the stock root redirect, and over /webpages/login.html,
+    # where plain-HTTP visits are sent. The stock UI stays at /webpages/index.html.
+    chmod -R a+rX "$UI_SRC/dash" 2>/dev/null
+    bind_file "$UI_SRC/dash/index.html" "$WWW_ROOT/index.html"
+    bind_file "$UI_SRC/dash/login.html" "$WWW/login.html"
+    log "web UI installed: dashboard at /, stock pages and theme (Advanced > Wireless > IoT Network, Guest Speed)"
 }
 ui_remove() {
-    for d in "$LUCI_CTL" "$WWW/modules/advanced/wireless" "$WWW/config" "$WWW"/locale/*; do
+    for d in "$WWW_ROOT/index.html" "$WWW/login.html" "$LUCI_CTL" "$WWW/modules/advanced/wireless" "$WWW/config" "$WWW"/locale/*; do
         mounted "$d" && $UMOUNT "$d"
     done
     rm -rf "$OV" /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null

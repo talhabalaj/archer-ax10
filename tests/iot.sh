@@ -263,7 +263,9 @@ cp "$ROOT/iot.sh" "$T/iot.sh"; chmod 600 "$T/iot.sh"
 iot "$T/bin/uci" "$T/iot.sh" boot >/dev/null 2>&1 || true
 [ "$(readlink "$T/net/wl1.4/brport/bridge")" = "../../br-iot" ] || fail "boot did not put wl1.4 in br-iot"
 grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher"
-sleep 1; has "dropbear -p"
+# The lifeline starts in the background; give it up to 5 s.
+i=0; while [ $i -lt 50 ] && ! grep -qF "dropbear -p" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "dropbear -p"
 
 # --- guest speed limit: shape limited guests, leave the full-speed one alone.
 mkdir -p "$T/net/wl1.3"
@@ -311,6 +313,9 @@ cp -R "$ROOT/iot-ui/." "$T/run/ui/"
 printf '%s\n' '{"advanced":[{"name":"wireless","children":[{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}]}]}' > "$T/www/config/navigator.json"
 printf '%s\n' '{"guestNetworkAdv":{"controller":"./modules/x/script.js","view":"./modules/x/view.html"}}' > "$T/www/config/modules.json"
 printf '%s\n' '$.su.CHAR.MENU_ITEMS_NAME = {};' > "$T/www/locale/en_US/lan.js"
+printf '%s\n' '.stock-rule { color: red }' > "$T/www/locale/en_US/lan.css"
+printf '%s\n' 'stock root redirect' > "$T/index.html"
+printf '%s\n' 'stock login redirect' > "$T/www/login.html"
 : > "$T/calls"
 run ui >/dev/null 2>&1 || true
 run ui >/dev/null 2>&1 || true
@@ -327,6 +332,11 @@ done
 loc="$(head -c 40 "$ROOT/iot-ui/locale.js")"
 [ "$(grep -cF -- "$loc" "$T/www/locale/en_US/lan.js")" -eq 1 ] || fail "lan.js: locale line not exactly once"
 grep -qF 'MENU_ITEMS_NAME = {};' "$T/www/locale/en_US/lan.js" || fail "lan.js lost its original line"
+[ "$(grep -c 'ax10-theme-begin' "$T/www/locale/en_US/lan.css")" -eq 1 ] || fail "lan.css: theme not exactly once"
+grep -qF 'stock-rule' "$T/www/locale/en_US/lan.css" || fail "lan.css lost its original rule"
+[ "$(tail -n 1 "$T/www/locale/en_US/lan.css")" = "$(tail -n 1 "$ROOT/iot-ui/theme.css")" ] || fail "lan.css: theme not at the end"
+has "mount --bind $T/run/ui/dash/index.html $T/index.html"
+has "mount --bind $T/run/ui/dash/login.html $T/www/login.html"
 
 # Lock 1: held by a live process -> the run gives up and changes nothing.
 mkdir -p "$T/run/lock"; echo $$ > "$T/run/lock/pid"

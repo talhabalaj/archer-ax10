@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f12">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2312181c'/%3E%3Cpath d='M8 21.5a11 11 0 0 1 16 0M11 17.8a6.5 6.5 0 0 1 10 0' stroke='%232dd4bf' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='24' r='1.9' fill='%232dd4bf'/%3E%3C/svg%3E">
+<title>Talha · Network</title>
+<!-- Dashboard for the Archer AX10, served at / by `iot.sh ui` (bind mount over /www/index.html).
+     Talks to the same encrypted LuCI API as the stock UI, with the stock encryption scripts,
+     and shares its login (token + keys in localStorage), so "Full settings" opens logged in. -->
+<style>
+:root {
+  --bg: #0b0f12; --surface: #12181c; --surface-2: #171f24; --surface-3: #1e272d;
+  --line: #222c33; --line-2: #2c3840;
+  --text: #e7eef1; --muted: #8c9ba3; --faint: #5f6d74;
+  --accent: #2dd4bf; --accent-ink: #04201c; --accent-soft: rgba(45, 212, 191, .12);
+  --ok: #34d399; --warn: #fbbf24; --bad: #f87171; --bad-soft: rgba(248, 113, 113, .12);
+  --r: 14px; --r-sm: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+body { min-height: 100vh; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--accent); text-decoration: none; }
+svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.hidden { display: none !important; }
+.mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: -.01em; }
+.muted { color: var(--muted); }
+
+/* ---- shell ---- */
+.wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+header.top { position: sticky; top: 0; z-index: 20; background: rgba(11, 15, 18, .86); backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid var(--line); }
+.bar { display: flex; align-items: center; gap: 16px; height: 60px; }
+.brand { font-weight: 760; font-size: 20px; letter-spacing: -.03em; }
+.brand small { font-weight: 500; font-size: 13px; color: var(--muted); letter-spacing: 0; margin-left: 6px; }
+nav.tabs { display: flex; gap: 2px; margin-left: 12px; }
+nav.tabs button { display: flex; align-items: center; gap: 7px; border: 0; background: none; color: var(--muted); padding: 8px 12px; border-radius: 9px; font-weight: 550; font-size: 14px; }
+nav.tabs button:hover { color: var(--text); background: var(--surface-2); }
+nav.tabs button[aria-current="page"] { color: var(--text); background: var(--surface-3); }
+.spacer { flex: 1; }
+.iconbtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; border: 0; background: none; color: var(--muted); }
+.iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.menu { position: relative; }
+.menu-pop { position: absolute; right: 0; top: 44px; min-width: 210px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; padding: 6px; box-shadow: 0 16px 40px rgba(0, 0, 0, .45); }
+.menu-pop button, .menu-pop a { display: flex; width: 100%; align-items: center; gap: 10px; padding: 9px 10px; border: 0; background: none; color: var(--text); border-radius: 8px; font-size: 14px; text-align: left; }
+.menu-pop button:hover, .menu-pop a:hover { background: var(--surface-3); }
+.menu-pop .danger { color: var(--bad); }
+main.wrap { padding-top: 22px; padding-bottom: 120px; }
+
+/* ---- status strip ---- */
+.status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; min-width: 0; }
+.stat .k { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.stat .v { font-size: 20px; font-weight: 680; letter-spacing: -.02em; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat .s { font-size: 12.5px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); display: inline-block; flex: none; }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(52, 211, 153, .15); }
+.dot.bad { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+
+/* ---- sections and cards ---- */
+h2 { font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; display: flex; align-items: center; gap: 10px; }
+h2 .count { color: var(--faint); font-weight: 600; }
+#view > h2:first-child { margin-top: 4px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+.card + .card { margin-top: 12px; }
+.card-h { display: flex; align-items: center; gap: 12px; padding: 16px 18px; }
+.card-h h3 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+.card-h p { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
+.card-b { padding: 4px 18px 18px; }
+.card-f { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--line); }
+.note { font-size: 13px; color: var(--muted); padding: 12px 18px; border-top: 1px solid var(--line); }
+
+/* ---- forms ---- */
+.field { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 6px 18px; align-items: center; padding: 10px 0; }
+.field + .field { border-top: 1px solid var(--line); }
+.field > label { color: var(--muted); font-size: 14px; }
+.field .help { grid-column: 2; font-size: 12.5px; color: var(--faint); }
+.input { display: flex; align-items: center; background: var(--bg); border: 1px solid var(--line-2); border-radius: var(--r-sm); height: 40px; padding: 0 4px 0 12px; min-width: 0; max-width: 420px; transition: border-color .12s, box-shadow .12s; }
+.input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input input { flex: 1; min-width: 0; border: 0; background: none; outline: none; height: 100%; }
+.input .unit { color: var(--muted); font-size: 13px; padding: 0 8px; }
+.input .iconbtn { width: 32px; height: 32px; }
+.input.short { max-width: 160px; }
+.seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line-2); border-radius: 11px; padding: 3px; gap: 2px; flex-wrap: wrap; }
+.seg button { border: 0; background: none; color: var(--muted); padding: 6px 12px; border-radius: 8px; font-size: 13.5px; font-weight: 550; }
+.seg button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); }
+.seg button .n { color: var(--faint); margin-left: 5px; font-weight: 500; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 14px; }
+.btn:hover { background: var(--surface-3); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { background: var(--bad-soft); border-color: rgba(248, 113, 113, .35); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
+
+/* ---- switch ---- */
+.sw { position: relative; display: inline-block; width: 42px; height: 24px; flex: none; }
+.sw input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
+.sw span { position: absolute; inset: 0; background: var(--surface-3); border: 1px solid var(--line-2); border-radius: 99px; transition: background .15s, border-color .15s; }
+.sw span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #c3ced3; transition: transform .15s, background .15s; }
+.sw input:checked + span { background: var(--accent); border-color: var(--accent); }
+.sw input:checked + span::after { transform: translateX(18px); background: #fff; }
+.sw input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+.sw input:disabled + span { opacity: .45; }
+
+/* ---- device list ---- */
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.search { flex: 1 1 220px; max-width: none; }
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line); }
+.row:first-child { border-top: 0; }
+.row.click { cursor: pointer; }
+.row.click:hover { background: var(--surface-2); }
+.row.open { background: var(--surface-2); }
+.av { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: var(--surface-3); color: var(--muted); position: relative; }
+.av .dot { position: absolute; right: -2px; bottom: -2px; border: 2px solid var(--surface); width: 11px; height: 11px; box-shadow: none; }
+.row.open .av .dot, .row.click:hover .av .dot { border-color: var(--surface-2); }
+.nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.nm > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.meta { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.tag { font-size: 11px; font-weight: 650; letter-spacing: .02em; padding: 2px 7px; border-radius: 6px; background: var(--surface-3); color: var(--muted); flex: none; }
+.tag.iot { color: #a5b4fc; background: rgba(129, 140, 248, .14); }
+.tag.guest { color: #fcd34d; background: rgba(251, 191, 36, .12); }
+.tag.blocked { color: var(--bad); background: var(--bad-soft); }
+.tag.you { color: var(--accent); background: var(--accent-soft); }
+.offline .nm, .offline .av { opacity: .55; }
+.right { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+.chev { color: var(--faint); transition: transform .15s; }
+.row.open .chev { transform: rotate(90deg); }
+.detail { padding: 4px 16px 16px 68px; background: var(--surface-2); }
+.detail .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 20px; font-size: 13px; margin-bottom: 14px; }
+.detail .grid div span { display: block; color: var(--faint); font-size: 12px; }
+.detail .acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.detail .togg { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-right: 10px; }
+.rename { display: flex; gap: 8px; margin-bottom: 12px; }
+.rename .input { flex: 1; height: 36px; }
+.empty { padding: 34px 16px; text-align: center; color: var(--muted); font-size: 14px; }
+.sk { height: 62px; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
+.sk:first-child { border-top: 0; }
+.sk::after { content: ""; position: absolute; left: 16px; top: 12px; width: 38px; height: 38px; border-radius: 11px; background: var(--surface-2); box-shadow: 52px 4px 0 -2px var(--surface-2); }
+.sk::before { content: ""; position: absolute; left: 68px; top: 18px; height: 11px; width: 34%; border-radius: 6px; background: var(--surface-2); box-shadow: 0 16px 0 0 var(--surface-2); }
+
+/* ---- wifi cards ---- */
+.nets { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; align-items: start; }
+.nets .card + .card { margin-top: 0; }
+.net { padding: 16px 18px; }
+.net .t { display: flex; align-items: center; gap: 10px; }
+.net .t b { font-size: 16px; font-weight: 650; }
+.net .band { font-size: 12.5px; color: var(--muted); margin: 2px 0 12px; }
+.pw { display: flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 4px 4px 12px; }
+.pw code { flex: 1; font-family: var(--mono); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qr { display: grid; place-items: center; margin-top: 12px; padding: 14px; background: #fff; border-radius: var(--r-sm); }
+.off-net { opacity: .55; }
+
+/* ---- login ---- */
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login form { width: 100%; max-width: 360px; }
+.login .brand { font-size: 34px; display: block; margin-bottom: 4px; }
+.login p { color: var(--muted); margin: 0 0 26px; }
+.login .input { max-width: none; height: 46px; }
+.login .btn { width: 100%; height: 46px; margin-top: 12px; }
+.login .err { color: var(--bad); font-size: 13.5px; min-height: 20px; margin-top: 10px; }
+.login .alt { margin-top: 28px; font-size: 13.5px; color: var(--muted); }
+
+/* ---- toast, dialog, overlay ---- */
+.toasts { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; display: grid; gap: 8px; width: max-content; max-width: calc(100vw - 32px); }
+.toast { background: var(--surface-3); border: 1px solid var(--line-2); padding: 10px 14px; border-radius: 11px; font-size: 14px; box-shadow: 0 12px 30px rgba(0, 0, 0, .4); animation: in .16s ease-out; }
+.toast.bad { border-color: rgba(248, 113, 113, .4); }
+@keyframes in { from { opacity: 0; transform: translateY(6px); } }
+.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .55); display: grid; place-items: center; padding: 20px; animation: fade .12s ease-out; }
+@keyframes fade { from { opacity: 0; } }
+.dialog { width: 100%; max-width: 400px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 22px; }
+.dialog h3 { margin: 0 0 6px; font-size: 18px; }
+.dialog p { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+.dialog .acts { display: flex; justify-content: flex-end; gap: 10px; }
+.spin { width: 18px; height: 18px; border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: rot .7s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.busy { display: flex; align-items: center; gap: 12px; }
+
+/* ---- phones ---- */
+@media (max-width: 720px) {
+  .wrap { padding: 0 16px; }
+  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; z-index: 30; justify-content: space-around; background: rgba(18, 24, 28, .94); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); }
+  nav.tabs button { flex-direction: column; gap: 3px; font-size: 11.5px; padding: 6px 10px; flex: 1; }
+  nav.tabs button svg { width: 22px; height: 22px; }
+  nav.tabs button[aria-current="page"] { background: none; color: var(--accent); }
+  .status { grid-template-columns: 1fr 1fr; }
+  .status .stat:first-child { grid-column: 1 / -1; }
+  .field { grid-template-columns: 1fr; gap: 6px; }
+  .field .help { grid-column: 1; }
+  .input { max-width: none; }
+  .detail { padding-left: 16px; }
+  .toasts { bottom: calc(84px + env(safe-area-inset-bottom)); }
+  main.wrap { padding-bottom: 110px; }
+  header.top { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--bg); }   /* a filter here would trap the fixed tab bar inside the header */
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="app"><div class="login"><div class="spin"></div></div></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/webpages/js/libs/jquery.min.js"></script>
+<script src="/webpages/js/libs/cryptoJS.min.js"></script>
+<script src="/webpages/js/libs/encrypt.js"></script>
+<script src="/webpages/js/libs/tpEncrypt.js"></script>
+<script>
+"use strict";
+const OWNER = "Talha";
+const FULL = "/webpages/index.html";
+
+/* ------------------------------------------------------------------ icons */
+const ICON = {
+  devices: '<rect x="2" y="4" width="14" height="10" rx="2"/><path d="M6 18h6M9 14v4"/><rect x="17" y="8" width="5" height="12" rx="1.5"/>',
+  iot: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  guest: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M21.5 20a6.5 6.5 0 0 0-4-6"/>',
+  wifi: '<path d="M2 8.8a15 15 0 0 1 20 0"/><path d="M5 12.4a10.5 10.5 0 0 1 14 0"/><path d="M8.5 15.9a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19.2" r=".9"/>',
+  wired: '<rect x="4" y="3" width="16" height="12" rx="2"/><path d="M8 15v3h8v-3M10 18v3h4v-3M8 7v3M12 7v3M16 7v3"/>',
+  mesh: '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.8 7.2 6.3 15.8M13.2 7.2l4.5 8.6M7.5 18h9"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 21v-5h-5"/>',
+  power: '<path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>',
+  out: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 16l-4-4 4-4M5 12h11"/>',
+  ext: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4h-4"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+  chev: '<path d="M9 6l6 6-6 6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+};
+const ic = (n, cls) => `<svg viewBox="0 0 24 24"${cls ? ` class="${cls}"` : ""} aria-hidden="true">${ICON[n]}</svg>`;
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const $id = id => document.getElementById(id);
+
+/* ------------------------------------------------------------------ API */
+class AuthError extends Error {}
+class ApiError extends Error { constructor(code, data) { super("Router said: " + code); this.code = code; this.data = data; } }
+const API = (() => {
+  const L = "/cgi-bin/luci/;stok=";
+  let enc = null, stok = "";
+  const qs = o => Object.entries(o).flatMap(([k, v]) => [].concat(v).map(x => encodeURIComponent(k) + "=" + encodeURIComponent(x))).join("&");
+  async function raw(url, body) {
+    const r = await fetch(url, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    if (r.status === 401 || r.status === 403) throw new AuthError("session");
+    return r.text();
+  }
+  function seal(e, params, login) { const d = e.dataEncrypt(qs(params), login); return "sign=" + encodeURIComponent(d.sign) + "&data=" + encodeURIComponent(d.data); }
+  function open(e, text) {
+    let outer; try { outer = JSON.parse(text); } catch (x) { throw new AuthError("garbled"); }
+    if (outer && outer.data === undefined && outer.success === false) return outer;          // plain error reply
+    try { return JSON.parse(e.dataDecrypt(outer.data)); } catch (x) { throw new AuthError("keys"); }
+  }
+  // Reuse a login made here or in the stock UI (same localStorage keys as its encryptManager).
+  function restore() {
+    try {
+      const t = localStorage.getItem("token"), a = localStorage.getItem("encryptorAES"), r = localStorage.getItem("encryptorRsa"),
+            h = localStorage.getItem("encryptorHash"), q = localStorage.getItem("encryptorSeq");
+      if (!t || !a || !r || !h || !q) return false;
+      const e = new jQuery.encrypt.encryptor();
+      e.setAESStringKey(a); e.setRSAStringKey(r); e.setHash(h); e.setSeq(q);
+      enc = e; stok = t; return true;
+    } catch (x) { return false; }
+  }
+  function forget() { enc = null; stok = ""; try { localStorage.setItem("token", ""); } catch (x) {} }
+  async function login(pw) {
+    const keys = JSON.parse(await raw(L + "/login?form=keys", "operation=read")).data.password;
+    const auth = JSON.parse(await raw(L + "/login?form=auth", "operation=read")).data;
+    const e = new jQuery.encrypt.encryptor();
+    e.setRSAKey(auth.key[0], auth.key[1]); e.setSeq(auth.seq); e.genAESKey();
+    e.setHash("admin", pw);           // MD5; the stock UI uses SHA-256 only for Singapore units
+    const res = open(e, await raw(L + "/login?form=login", seal(e, { password: jQuery.su.encrypt(pw, keys), operation: "login", confirm: "true" }, true)));
+    if (!res.success || !res.data || !res.data.stok) throw new ApiError(res.errorcode || (res.data && res.data.errorcode) || "login", res.data);
+    enc = e; stok = res.data.stok;
+    try {
+      localStorage.setItem("token", stok);
+      localStorage.setItem("encryptorAES", e.getAESKey()); localStorage.setItem("encryptorSeq", e.getSeq());
+      localStorage.setItem("encryptorHash", e.getHash()); localStorage.setItem("encryptorRsa", e.getRSAKey());
+    } catch (x) {}
+  }
+  async function call(path, params) {
+    if (!enc || !stok) throw new AuthError("none");
+    const res = open(enc, await raw(L + stok + path, seal(enc, Object.assign({ operation: "read" }, params))));
+    const code = res.errorcode || res.errorCode || res.error_code;
+    if (!res.success) {
+      if (/timeout|conflict|permission|login/i.test(String(code))) throw new AuthError(code);
+      throw new ApiError(code || "error", res.data);
+    }
+    return res;
+  }
+  return { restore, login, call, forget, has: () => !!(enc && stok) };
+})();
+const iot = (form, params) => API.call("/admin/iot_net?form=" + form, params).then(r => r.data);
+
+/* ------------------------------------------------------------------ state */
+const S = {
+  tab: (location.hash || "#devices").slice(1),
+  devices: null, summary: null, iot: null, guest: null, wifi: null,
+  filter: "all", q: "", open: null, editing: null, reveal: {}, qr: null,
+  menu: false, busy: {}, dirty: {},
+};
+const TABS = [["devices", "Devices", "devices"], ["iot", "IoT", "iot"], ["guests", "Guests", "guest"], ["wifi", "Wi-Fi", "wifi"]];
+if (!TABS.some(t => t[0] === S.tab)) S.tab = "devices";
+
+function toast(msg, bad) {
+  const t = document.createElement("div"); t.className = "toast" + (bad ? " bad" : ""); t.textContent = msg;
+  $id("toasts").appendChild(t); setTimeout(() => t.remove(), bad ? 5200 : 2600);
+}
+function fail(e) {
+  if (e instanceof AuthError) {
+    API.forget();
+    // A reply we can't decrypt means another login replaced ours: the router allows one admin at a time.
+    showLogin(e.message === "keys" ? "Signed out: the router was opened on another device or tab (it allows one admin at a time)." : "Your session ended. Log in again.");
+    return;
+  }
+  if (e instanceof TypeError) { toast("Can't reach the router.", true); return; }
+  toast(e && e.message ? e.message : "Something went wrong.", true);
+}
+function confirmBox(title, text, ok, danger) {
+  return new Promise(res => {
+    const d = document.createElement("div"); d.className = "scrim";
+    d.innerHTML = `<div class="dialog" role="dialog" aria-modal="true"><h3>${esc(title)}</h3><p>${esc(text)}</p>
+      <div class="acts"><button class="btn" data-v="0">Cancel</button><button class="btn ${danger ? "danger" : "primary"}" data-v="1">${esc(ok)}</button></div></div>`;
+    d.addEventListener("click", ev => { const b = ev.target.closest("[data-v]"); if (b || ev.target === d) { d.remove(); res(!!(b && b.dataset.v === "1")); } });
+    document.body.appendChild(d); d.querySelector('[data-v="1"]').focus();
+  });
+}
+
+/* ------------------------------------------------------------------ formatting */
+const dur = s => { s = +s || 0; const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
+const devName = d => d.name || d.host || "Unknown device";
+const isPrivateMac = mac => /^.[26AE]/i.test(mac);
+// Icon: how the device is connected. (The stock device-type guesses are often wrong.)
+function connIcon(d) {
+  if (d.net === "iot") return "iot";
+  if (/^Wired/.test(d.where)) return "wired";
+  if (/^Mesh/.test(d.where)) return "mesh";
+  return d.net === "guest" ? "guest" : "wifi";
+}
+function whereText(d) {
+  if (!d.online) return "Offline";
+  if (d.where === "Online") return "Connected";
+  // Mesh backhaul networks have long random names; don't show those.
+  const m = /^([A-Za-z0-9]{20,}) \((.+)\)$/.exec(d.where);
+  return m ? `Mesh link (${m[2]})` : d.where;
+}
+
+/* ------------------------------------------------------------------ data */
+// Our list, checked against the stock client list (the same one as the TP-Link
+// network map). For home and guest devices the stock list decides who is online: it
+// knows clients behind the mesh satellite, and leaves out the satellite itself.
+// IoT devices are ours only; TP-Link doesn't see that network.
+const BAND = { "2.4G": "2.4 GHz", "5G": "5 GHz", "5G_2": "5 GHz" };
+async function loadDevices() {
+  const [r, stock] = await Promise.all([iot("devices"),
+    API.call("/admin/access_control?form=black_devices", { operation: "load" }).then(x => x.data).catch(() => null)]);
+  if (Array.isArray(stock)) {
+    const by = {};
+    stock.forEach(x => { if (x.mac) by[x.mac.toUpperCase().replace(/-/g, ":")] = x; });
+    const keep = d => d.name || d.blocked || d.fast || d.allowed || !d.internet;   // has a setting
+    r.list = r.list.filter(d => {
+      if (d.net === "iot") return true;
+      const x = by[d.mac];
+      if (!x) {
+        if (d.online && !keep(d)) return false;                 // mesh equipment, not a client
+        d.online = false; d.where = ""; return true;
+      }
+      if (!d.host && x.name) d.host = x.name;
+      if (x.guest === "GUEST") d.net = "guest";
+      if (!d.ip && x.ipaddr) d.ip = x.ipaddr;
+      if (!d.online || !d.where || d.where === "Online") {
+        d.where = x.conn_type === "wired" ? "Wired" : `Wi-Fi (${BAND[x.raw_conn_type] || x.raw_conn_type || "?"})`;
+      }
+      d.online = true; return true;
+    });
+  }
+  // A device on the block list is only blocked while Access Control is on, in block-list mode.
+  const live = r.block.enable === "on" && r.block.mode === "black";
+  r.list.forEach(d => { d.listed = d.blocked; d.blocked = d.blocked && live; });
+  S.devices = r;
+}
+async function loadSummary() {
+  const [s, inet] = await Promise.all([iot("summary"), API.call("/admin/status?form=internet").then(r => r.data).catch(() => null)]);
+  S.summary = Object.assign({}, s, { internet: inet ? inet.internet_status : (s.wan_up ? "connected" : "disconnected") });
+}
+async function loadIot() { S.iot = await iot("settings"); }
+async function loadGuest() { S.guest = await iot("guest_settings"); }
+async function loadWifi() {
+  const get = f => API.call("/admin/wireless?form=" + f).then(r => r.data).catch(() => null);
+  const [w2, w5, g2, g5, sc] = await Promise.all([get("wireless_2g"), get("wireless_5g"), get("guest_2g"), get("guest_5g"), get("smart_connect")]);
+  if (!S.iot) await loadIot();
+  S.wifi = { w2, w5, g2, g5, smart: sc && sc.smart_enable === "on" };
+}
+const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], guests: [loadDevices, loadGuest], wifi: [loadWifi] };
+async function refresh(quiet) {
+  const tab = S.tab;
+  try { await Promise.all(NEEDS[tab].map(f => f())); if (tab === S.tab) render(); }
+  catch (e) { if (!quiet || e instanceof AuthError) fail(e); }
+}
+let timer = null;
+function startPolling() {
+  clearInterval(timer);
+  timer = setInterval(() => {
+    if (document.hidden || !API.has() || S.editing || S.tab === "wifi" || Object.keys(S.dirty).length) return;
+    refresh(true);
+  }, 10000);
+}
+window.addEventListener("hashchange", () => { const t = location.hash.slice(1); if (API.has() && TABS.some(x => x[0] === t)) go(t); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && API.has()) refresh(true); });
+
+/* ------------------------------------------------------------------ login */
+function showLogin(msg) {
+  clearInterval(timer);
+  $id("app").innerHTML = `<div class="login"><form id="lf" autocomplete="on">
+    <span class="brand">${esc(OWNER)}</span><p>Sign in to manage your network.</p>
+    <input type="text" name="username" value="admin" autocomplete="username" hidden>
+    <div class="input"><input id="pw" type="password" placeholder="Router password" autocomplete="current-password" required>
+      <button type="button" class="iconbtn" id="pwv" aria-label="Show password">${ic("eye")}</button></div>
+    <button class="btn primary" id="lb">Log in</button>
+    <div class="err" id="le">${esc(msg || "")}</div>
+    <div class="alt">Need everything? <a href="${FULL}">Open the TP-Link settings</a></div>
+  </form></div>`;
+  const pw = $id("pw"); pw.focus();
+  $id("pwv").onclick = () => { pw.type = pw.type === "password" ? "text" : "password"; };
+  $id("lf").onsubmit = async ev => {
+    ev.preventDefault();
+    const b = $id("lb"); b.disabled = true; b.innerHTML = '<span class="spin"></span>'; $id("le").textContent = "";
+    try { await API.login(pw.value); boot(); }
+    catch (e) {
+      b.disabled = false; b.textContent = "Log in";
+      if (e instanceof ApiError) {
+        const d = e.data || {}, left = d.attemptsAllowed != null && d.failureCount != null ? d.attemptsAllowed - d.failureCount : null;
+        $id("le").textContent = "Wrong password." + (left != null && left >= 0 ? ` ${left} attempt${left === 1 ? "" : "s"} left.` : "");
+      } else if (e instanceof TypeError) $id("le").textContent = "Can't reach the router.";
+      else $id("le").textContent = "Login failed. Try again.";
+      pw.select();
+    }
+  };
+}
+
+/* ------------------------------------------------------------------ shell */
+function shell() {
+  $id("app").innerHTML = `
+  <header class="top"><div class="wrap bar">
+    <div class="brand">${esc(OWNER)}<small>network</small></div>
+    <nav class="tabs" id="tabs">${TABS.map(([id, label, icon]) => `<button data-tab="${id}">${ic(icon)}<span>${label}</span></button>`).join("")}</nav>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="rf" aria-label="Refresh" title="Refresh">${ic("refresh")}</button>
+    <div class="menu"><button class="iconbtn" id="mb" aria-label="More" aria-expanded="false">${ic("more")}</button>
+      <div class="menu-pop hidden" id="mp">
+        <a href="${FULL}">${ic("ext")}Full TP-Link settings</a>
+        <button id="mr">${ic("power")}Reboot router</button>
+        <button id="mo" class="danger">${ic("out")}Log out</button>
+      </div></div>
+  </div></header>
+  <main class="wrap" id="view"></main>`;
+  $id("tabs").onclick = ev => { const b = ev.target.closest("[data-tab]"); if (b) go(b.dataset.tab); };
+  $id("rf").onclick = async () => { const b = $id("rf"); b.firstChild.style.animation = "rot .7s linear infinite"; await refresh(); b.firstChild.style.animation = ""; };
+  const mp = $id("mp");
+  $id("mb").onclick = ev => { ev.stopPropagation(); mp.classList.toggle("hidden"); $id("mb").setAttribute("aria-expanded", !mp.classList.contains("hidden")); };
+  document.addEventListener("click", ev => { if (!ev.target.closest(".menu")) mp.classList.add("hidden"); });
+  $id("mr").onclick = reboot;
+  $id("mo").onclick = logout;
+}
+function go(tab) {
+  if (S.tab === tab) return;
+  S.tab = tab; S.open = null; S.editing = null; S.qr = null;
+  if (location.hash !== "#" + tab) history.pushState(null, "", "#" + tab);
+  render(); refresh(true);
+  window.scrollTo(0, 0);
+}
+async function reboot() {
+  if (!await confirmBox("Reboot the router?", "Everything goes offline for about two minutes, then reconnects by itself.", "Reboot", true)) return;
+  try { await API.call("/admin/system?form=reboot", { operation: "write" }); } catch (e) { if (!(e instanceof AuthError)) return fail(e); }
+  clearInterval(timer);
+  $id("app").innerHTML = `<div class="login"><div><div class="busy"><span class="spin"></span><b>Rebooting…</b></div>
+    <p class="muted" style="margin-top:10px">This page reloads when the router is back.</p></div></div>`;
+  const t0 = Date.now();
+  const ping = async () => {
+    try { const r = await fetch("/?" + Date.now(), { cache: "no-store" }); if (r.ok && Date.now() - t0 > 40000) return location.reload(); } catch (x) {}
+    setTimeout(ping, 4000);
+  };
+  setTimeout(ping, 20000);
+}
+async function logout() {
+  try { await API.call("/admin/system?form=logout", { operation: "write" }); } catch (e) {}
+  API.forget(); showLogin("Logged out.");
+}
+
+/* ------------------------------------------------------------------ views */
+function render() {
+  document.querySelectorAll("#tabs [data-tab]").forEach(b => b.dataset.tab === S.tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  const v = $id("view"); if (!v) return;
+  const focus = document.activeElement && document.activeElement.id;
+  const caret = focus && document.activeElement.selectionStart;
+  v.innerHTML = ({ devices: viewDevices, iot: viewIot, guests: viewGuests, wifi: viewWifi })[S.tab]();
+  if (focus && $id(focus)) { const el = $id(focus); el.focus(); try { if (caret != null) el.setSelectionRange(caret, caret); } catch (x) {} }
+  if (S.qr) drawQr();
+}
+const skel = n => `<div class="list">${'<div class="sk"></div>'.repeat(n)}</div>`;
+function sortDevices(list) {
+  return list.slice().sort((a, b) => (b.this - a.this) || (b.online - a.online) || devName(a).localeCompare(devName(b), undefined, { sensitivity: "base" }));
+}
+
+function viewDevices() {
+  const D = S.devices, sm = S.summary;
+  const online = D ? D.list.filter(d => d.online) : [];
+  const status = `<div class="status">
+    <div class="stat"><div class="k">${ic("globe")}Internet</div>
+      ${sm ? `<div class="v"><span class="dot ${sm.internet === "connected" ? "on" : "bad"}"></span> ${sm.internet === "connected" ? "Connected" : "Offline"}</div>
+      <div class="s mono">${esc(sm.wan_ip || "no address")}${sm.wan_uptime ? " · up " + dur(sm.wan_uptime) : ""}</div>` : '<div class="v muted">…</div><div class="s">&nbsp;</div>'}</div>
+    <div class="stat"><div class="k">${ic("devices")}Online now</div>
+      <div class="v">${D ? online.length : "…"}</div><div class="s">${D ? `${online.filter(d => d.net === "guest").length} guest · ${online.filter(d => d.net === "iot").length} IoT` : "&nbsp;"}</div></div>
+    <div class="stat"><div class="k">${ic("clock")}Router up</div>
+      <div class="v">${sm ? dur(sm.uptime) : "…"}</div><div class="s">${D && D.block.enable === "on" ? `${D.list.filter(d => d.blocked).length} blocked` : "Nothing blocked"}</div></div>
+  </div>`;
+  if (!D) return status + skel(6);
+  const counts = { all: D.list.length, home: 0, guest: 0, iot: 0, blocked: 0 };
+  D.list.forEach(d => { counts[d.net]++; if (d.blocked) counts.blocked++; });
+  const q = S.q.trim().toLowerCase();
+  const shown = sortDevices(D.list).filter(d =>
+    (S.filter === "all" || (S.filter === "blocked" ? d.blocked : d.net === S.filter)) &&
+    (!q || [devName(d), d.host, d.ip, d.mac, d.where].join(" ").toLowerCase().includes(q)));
+  const filters = [["all", "All"], ["home", "Home"], ["guest", "Guest"], ["iot", "IoT"], ["blocked", "Blocked"]]
+    .filter(([k]) => k === "all" || counts[k])
+    .map(([k, l]) => `<button data-filter="${k}" aria-pressed="${S.filter === k}">${l}<span class="n">${counts[k]}</span></button>`).join("");
+  return status + `<div class="toolbar">
+      <div class="input search">${ic("search")}<input id="q" placeholder="Search name, IP or MAC" value="${esc(S.q)}" autocomplete="off" style="margin-left:8px"></div>
+      <div class="seg" id="flt">${filters}</div>
+    </div>
+    <div class="list" id="dl">${shown.length ? shown.map(deviceRow).join("") : '<div class="empty">No devices match.</div>'}</div>`;
+}
+
+function deviceRow(d) {
+  const open = S.open === d.mac;
+  const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
+    d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
+    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && '<span class="tag">Full speed</span>'].filter(Boolean).join("");
+  const meta = [d.ip, whereText(d)].filter(Boolean).join(" · ");
+  return `<div class="row click ${d.online ? "" : "offline"} ${open ? "open" : ""}" data-mac="${d.mac}" tabindex="0" role="button" aria-expanded="${open}">
+      <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
+      <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${tags}</div><div class="meta">${esc(meta)}</div></div>
+      <div class="right">${ic("chev", "chev")}</div>
+    </div>${open ? deviceDetail(d) : ""}`;
+}
+
+function deviceDetail(d) {
+  const D = S.devices, busy = S.busy[d.mac];
+  const toggles = [];
+  if (d.net === "iot") toggles.push(toggle("internet", d, d.internet, "Internet access"));
+  if (d.net === "guest" && D.guest_limit) toggles.push(toggle("fast", d, d.fast, "Full speed (skip guest limit)"));
+  if (d.net === "home" && D.iot_enabled && D.lan_mode === "selected") toggles.push(toggle("allowed", d, d.allowed, "Can reach IoT devices"));
+  const canBlock = !d.this && !(D.block.enable === "on" && D.block.mode === "white");
+  return `<div class="detail">
+    ${S.editing === d.mac ? `<form class="rename" data-rename="${d.mac}"><div class="input"><input id="rn" value="${esc(d.name || d.host)}" maxlength="40" placeholder="Name"></div>
+      <button class="btn sm primary">Save</button><button type="button" class="btn sm" data-act="cancel">Cancel</button></form>` : ""}
+    <div class="grid">
+      <div><span>IP address</span><b class="mono">${esc(d.ip || "—")}</b></div>
+      <div><span>MAC address</span><b class="mono">${esc(d.mac)}</b>${isPrivateMac(d.mac) ? ' <span class="muted" title="The device picked a random address for this network">· private</span>' : ""}</div>
+      <div><span>Connection</span><b>${esc(whereText(d))}</b></div>
+      ${d.host && d.name && d.host !== d.name ? `<div><span>Reported name</span><b>${esc(d.host)}</b></div>` : ""}
+    </div>
+    <div class="acts">${toggles.join("")}
+      ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
+      ${canBlock ? `<button class="btn sm ${d.blocked ? "" : "danger"}" data-act="${d.blocked ? "unblock" : "block"}" data-mac="${d.mac}" ${busy ? "disabled" : ""}>${d.blocked ? "Unblock" : "Block"}</button>` : ""}
+      ${busy ? '<span class="spin"></span>' : ""}
+    </div></div>`;
+}
+const toggle = (field, d, on, label) => `<label class="togg"><span class="sw"><input type="checkbox" data-field="${field}" data-mac="${d.mac}" ${on ? "checked" : ""}><span></span></span>${esc(label)}</label>`;
+
+function sectionList(title, rows, empty, right) {
+  return `<h2>${title}<span class="count">${rows.length}</span></h2>
+    <div class="list">${rows.length ? rows.join("") : `<div class="empty">${empty}</div>`}</div>`;
+}
+function simpleRow(d, control) {
+  return `<div class="row ${d.online ? "" : "offline"}">
+    <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
+    <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${d.this ? '<span class="tag you">This device</span>' : ""}</div>
+      <div class="meta">${esc([d.ip, whereText(d)].filter(Boolean).join(" · "))}</div></div>
+    <div class="right">${control}</div></div>`;
+}
+const rowSwitch = (field, d, on, label) => `<label class="sw" title="${esc(label)}"><input type="checkbox" aria-label="${esc(label + ": " + devName(d))}" data-field="${field}" data-mac="${d.mac}" ${on ? "checked" : ""}><span></span></label>`;
+
+function pwField(id, value, ph) {
+  const shown = S.reveal[id];
+  return `<div class="input"><input id="${id}" type="${shown ? "text" : "password"}" value="${esc(value)}" ${ph ? `placeholder="${esc(ph)}"` : ""} autocomplete="off">
+    <button type="button" class="iconbtn" data-reveal="${id}" aria-label="Show password">${ic("eye")}</button></div>`;
+}
+
+function viewIot() {
+  const c = S.iot, D = S.devices;
+  if (!c || !D) return `<h2>IoT Wi-Fi</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
+  const f = S.dirty.iot || c;
+  const isDirty = !!S.dirty.iot;
+  const iotDevs = sortDevices(D.list.filter(d => d.net === "iot"));
+  const homes = sortDevices(D.list.filter(d => d.net === "home"));
+  return `<h2>IoT Wi-Fi</h2>
+  <div class="card">
+    <div class="card-h"><div style="flex:1"><h3>${esc(c.ssid || "IoT network")}</h3>
+      <p>A separate 2.4 GHz network for smart devices. They can't reach your devices or this router.</p></div>
+      <label class="sw"><input type="checkbox" id="iot-enable" ${f.enable === "on" ? "checked" : ""} aria-label="IoT Wi-Fi on"><span></span></label></div>
+    <div class="card-b" id="iot-form">
+      <div class="field"><label for="iot-ssid">Network name</label><div class="input"><input id="iot-ssid" value="${esc(f.ssid)}" maxlength="32"></div></div>
+      <div class="field"><label for="iot-pw">Password</label>${pwField("iot-pw", f.password)}</div>
+      <div class="field"><label for="iot-hidden">Hide network name</label><label class="sw"><input type="checkbox" id="iot-hidden" ${f.hidden === "on" ? "checked" : ""}><span></span></label></div>
+      <div class="field"><label for="iot-allow">IoT → home exceptions</label><div class="input"><input id="iot-allow" class="mono" value="${esc(f.allow_lan)}" placeholder="tcp:8899@192.168.50.10"></div>
+        <div class="help">Connections IoT devices may open to your home network. Space-separated, e.g. tcp:8899@192.168.50.10</div></div>
+      <div class="field"><label>Gateway</label><span class="mono">${esc(c.gateway)}</span></div>
+    </div>
+    ${isDirty ? `<div class="card-f"><button class="btn" data-act="iot-reset">Discard</button><button class="btn primary" data-act="iot-save">Save changes</button></div>` : ""}
+  </div>
+  ${sectionList("IoT devices", iotDevs.map(d => simpleRow(d, `<span class="muted" style="font-size:12.5px">Internet</span>` + rowSwitch("internet", d, d.internet, "Internet access"))), "Nothing has joined the IoT network yet.")}
+  <h2>Who can reach IoT devices</h2>
+  <div class="card"><div class="card-h"><div style="flex:1"><h3>Home devices</h3><p>${c.lan_mode === "selected" ? "Only the devices switched on below can open connections to IoT devices." : "Every device on your home network can open connections to IoT devices."}</p></div>
+    <div class="seg" id="lanmode"><button data-mode="all" aria-pressed="${c.lan_mode !== "selected"}">All</button><button data-mode="selected" aria-pressed="${c.lan_mode === "selected"}">Selected</button></div></div></div>
+  ${c.lan_mode === "selected" ? `<div style="margin-top:12px">${'<div class="list">' + (homes.map(d => simpleRow(d, rowSwitch("allowed", d, d.allowed, "Can reach IoT devices"))).join("") || '<div class="empty">No home devices.</div>') + "</div>"}</div>` : ""}`;
+}
+
+function viewGuests() {
+  const g = S.guest, D = S.devices;
+  if (!g || !D) return `<h2>Guest speed limit</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
+  const f = S.dirty.guest || g, isDirty = !!S.dirty.guest;
+  const guests = sortDevices(D.list.filter(d => d.net === "guest" || d.fast));
+  return `<h2>Guest speed limit</h2>
+  <div class="card">
+    <div class="card-h"><div style="flex:1"><h3>Limit each guest</h3><p>Caps every device on the guest Wi-Fi. Your main Wi-Fi and the IoT network are not affected.</p></div>
+      <label class="sw"><input type="checkbox" id="g-enable" ${f.enable === "on" ? "checked" : ""} aria-label="Guest speed limit on"><span></span></label></div>
+    <div class="card-b">
+      <div class="field"><label for="g-down">Download</label><div class="input short"><input id="g-down" inputmode="numeric" value="${esc(f.down)}"><span class="unit">Mbps</span></div></div>
+      <div class="field"><label for="g-up">Upload</label><div class="input short"><input id="g-up" inputmode="numeric" value="${esc(f.up)}"><span class="unit">Mbps</span></div></div>
+    </div>
+    ${isDirty ? `<div class="card-f"><button class="btn" data-act="g-reset">Discard</button><button class="btn primary" data-act="g-save">Save changes</button></div>` : ""}
+  </div>
+  ${sectionList("Guests", guests.map(d => simpleRow(d, g.enable === "on" ? `<span class="muted" style="font-size:12.5px">Full speed</span>` + rowSwitch("fast", d, d.fast, "Full speed") : "")), "No one is on the guest Wi-Fi.")}`;
+}
+
+function viewWifi() {
+  const W = S.wifi;
+  if (!W) return `<h2>Wi-Fi networks</h2><div class="nets">${'<div class="card net"><span class="spin"></span></div>'.repeat(3)}</div>`;
+  const nets = [];
+  if (W.w2) {
+    if (W.smart || (W.w5 && W.w5.ssid === W.w2.ssid && W.w5.psk_key === W.w2.psk_key))
+      nets.push({ id: "main", ssid: W.w2.ssid, band: "2.4 GHz + 5 GHz · Smart Connect", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
+    else {
+      nets.push({ id: "w2", ssid: W.w2.ssid, band: "2.4 GHz", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
+      if (W.w5) nets.push({ id: "w5", ssid: W.w5.ssid, band: "5 GHz", key: W.w5.psk_key, on: W.w5.enable === "on", edit: "wirelessSettingsAdv" });
+    }
+  }
+  if (W.g2) nets.push({ id: "g2", ssid: W.g2.ssid, band: "Guest · 2.4 GHz", key: W.g2.psk_key, on: W.g2.enable === "on", edit: "guestNetworkAdv" });
+  if (W.g5) nets.push({ id: "g5", ssid: W.g5.ssid, band: "Guest · 5 GHz", key: W.g5.psk_key, on: W.g5.enable === "on", edit: "guestNetworkAdv" });
+  if (S.iot) nets.push({ id: "iotnet", ssid: S.iot.ssid, band: "IoT · 2.4 GHz", key: S.iot.password, on: S.iot.enable === "on", tab: "iot" });
+  S.nets = nets;
+  return `<h2>Wi-Fi networks</h2><div class="nets">${nets.map(n => `<div class="card net ${n.on ? "" : "off-net"}">
+      <div class="t">${ic(n.id === "iotnet" ? "iot" : /^g/.test(n.id) ? "guest" : "wifi")}<b>${esc(n.ssid)}</b><span class="spacer"></span>${n.on ? '<span class="dot on"></span>' : '<span class="tag">Off</span>'}</div>
+      <div class="band">${esc(n.band)}</div>
+      ${n.key ? `<div class="pw"><code>${S.reveal[n.id] ? esc(n.key) : "•".repeat(Math.min(n.key.length, 14))}</code>
+        <button class="iconbtn" data-reveal="${n.id}" aria-label="Show password">${ic("eye")}</button>
+        <button class="iconbtn" data-copy="${n.id}" aria-label="Copy password">${ic("copy")}</button>
+        <button class="iconbtn" data-qr="${n.id}" aria-label="Show QR code">${ic("qr")}</button></div>` : '<div class="muted" style="font-size:13px">Open network</div>'}
+      ${S.qr === n.id ? `<div class="qr" id="qrbox"></div>` : ""}
+      <div style="margin-top:12px;font-size:13px">${n.tab ? `<a href="#${n.tab}" data-tab-link="${n.tab}">Edit on the IoT page</a>` : `<a href="${FULL}" data-go="${n.edit}">Edit in TP-Link settings ${ic("ext").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')}</a>`}</div>
+    </div>`).join("")}</div>`;
+}
+
+/* ------------------------------------------------------------------ QR (loaded on first use) */
+let qrLib = null;
+function drawQr() {
+  const box = $id("qrbox"), n = (S.nets || []).find(x => x.id === S.qr);
+  if (!box || !n) return;
+  const escq = s => String(s).replace(/([\\;,:"])/g, "\\$1");
+  const text = `WIFI:T:WPA;S:${escq(n.ssid)};P:${escq(n.key)};;`;
+  const draw = () => { box.innerHTML = ""; jQuery(box).qrcode({ width: 180, height: 180, text: unescape(encodeURIComponent(text)) }); };
+  if (qrLib) return qrLib.then(draw);
+  qrLib = new Promise((res, rej) => { const s = document.createElement("script"); s.src = "/webpages/js/libs/jquery.qrcode.min.js"; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  qrLib.then(draw, () => { box.textContent = "QR code unavailable."; qrLib = null; });
+}
+
+/* ------------------------------------------------------------------ actions */
+const findDev = mac => S.devices && S.devices.list.find(d => d.mac === mac);
+async function setDevice(mac, field, value) {
+  const d = findDev(mac); if (!d) return;
+  const before = d[field];
+  d[field] = value; render();                                   // optimistic
+  try {
+    await iot("device", { operation: "write", mac, [field]: field === "name" ? value : (value ? "on" : "off") });
+    if (field !== "name") toast(({ internet: value ? "Internet on" : "Internet off", fast: value ? "Full speed on" : "Guest limit applies again", allowed: value ? "Can reach IoT devices" : "Can no longer reach IoT devices" })[field] + " · " + devName(d));
+  } catch (e) { d[field] = before; render(); fail(e); }
+}
+async function setBlocked(mac, on) {
+  const d = findDev(mac), D = S.devices; if (!d) return;
+  if (on && !await confirmBox(`Block ${devName(d)}?`, "It is disconnected now and can't rejoin. If it uses a private (random) address, it can come back with a new one; changing the Wi-Fi password is the lasting fix.", "Block", true)) return;
+  S.busy[mac] = true; render();
+  const dashed = mac.replace(/:/g, "-");
+  try {
+    if (on) {
+      if (D.block.mode !== "black") await API.call("/admin/access_control?form=mode", { operation: "write", access_mode: "black" });
+      if (D.block.enable !== "on") await API.call("/admin/access_control?form=enable", { operation: "write", enable: "on" });
+      if (!d.listed) await API.call("/admin/access_control?form=black_list", { operation: "insert", key: "add", old: "add", index: 0, new: JSON.stringify({ name: devName(d).slice(0, 32), mac: dashed }) });
+    } else {
+      const list = (await API.call("/admin/access_control?form=black_list", { operation: "load" })).data || [];
+      const idx = Array.isArray(list) ? list.findIndex(x => (x.mac || "").toUpperCase() === dashed) : -1;
+      if (idx < 0) throw new ApiError("not in the block list");
+      await API.call("/admin/access_control?form=black_list", { operation: "remove", key: dashed, index: idx });
+      // Last one out: switch Access Control back off, as it was before anything was blocked.
+      if (list.length === 1) await API.call("/admin/access_control?form=enable", { operation: "write", enable: "off" });
+    }
+    toast((on ? "Blocked " : "Unblocked ") + devName(d));
+    await loadDevices();
+  } catch (e) { fail(e); }
+  delete S.busy[mac]; render();
+}
+
+document.addEventListener("click", async ev => {
+  const t = ev.target;
+  // The stock UI ignores page links; iot-ui/locale.js (loaded inside it) opens this page once it is up.
+  const gl = t.closest("[data-go]"); if (gl) { try { sessionStorage.setItem("ax10-go", gl.dataset.go); } catch (x) {} return; }
+  const tl = t.closest("[data-tab-link]"); if (tl) { ev.preventDefault(); go(tl.dataset.tabLink); return; }
+  const f = t.closest("[data-filter]"); if (f) { S.filter = f.dataset.filter; S.open = null; render(); return; }
+  const rv = t.closest("[data-reveal]"); if (rv) { S.reveal[rv.dataset.reveal] = !S.reveal[rv.dataset.reveal]; render(); return; }
+  const cp = t.closest("[data-copy]"); if (cp) {
+    const n = (S.nets || []).find(x => x.id === cp.dataset.copy);
+    try { await navigator.clipboard.writeText(n.key); toast("Password copied"); } catch (e) { S.reveal[n.id] = true; render(); toast("Couldn't copy here; the password is shown instead.", true); }
+    return;
+  }
+  const qr = t.closest("[data-qr]"); if (qr) { S.qr = S.qr === qr.dataset.qr ? null : qr.dataset.qr; render(); return; }
+  const m = t.closest("[data-mode]"); if (m && S.iot && m.dataset.mode !== S.iot.lan_mode) {
+    const base = Object.assign({}, S.iot, { lan_mode: m.dataset.mode });
+    try { S.iot = await iot("settings", Object.assign({ operation: "write" }, base)); await loadDevices(); render(); toast(m.dataset.mode === "all" ? "All home devices can reach IoT devices" : "Only selected home devices can reach IoT devices"); }
+    catch (e) { fail(e); }
+    return;
+  }
+  const a = t.closest("[data-act]"); if (a) {
+    const act = a.dataset.act, mac = a.dataset.mac;
+    if (act === "rename") { S.editing = mac; render(); const i = $id("rn"); if (i) { i.focus(); i.select(); } return; }
+    if (act === "cancel") { S.editing = null; render(); return; }
+    if (act === "block" || act === "unblock") return setBlocked(mac, act === "block");
+    if (act === "iot-reset") { delete S.dirty.iot; render(); return; }
+    if (act === "g-reset") { delete S.dirty.guest; render(); return; }
+    if (act === "iot-save") return saveIot();
+    if (act === "g-save") return saveGuest();
+  }
+  if (t.closest(".detail") || t.closest("input,label,button,a")) return;
+  const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; render(); }
+});
+document.addEventListener("keydown", ev => {
+  const row = ev.target.closest && ev.target.closest(".row.click");
+  if (row && (ev.key === "Enter" || ev.key === " ") && ev.target === row) { ev.preventDefault(); row.click(); }
+  if (ev.key === "Escape" && S.editing) { S.editing = null; render(); }
+});
+document.addEventListener("change", ev => {
+  const i = ev.target;
+  if (i.dataset.field && i.dataset.mac) return setDevice(i.dataset.mac, i.dataset.field, i.checked);
+  if (/^iot-/.test(i.id)) return markIot();
+  if (/^g-/.test(i.id)) return markGuest();
+});
+document.addEventListener("input", ev => {
+  const i = ev.target;
+  if (i.id === "q") { S.q = i.value; S.open = null; render(); return; }
+  if (/^iot-/.test(i.id)) return markIot();
+  if (/^g-/.test(i.id)) return markGuest();
+});
+document.addEventListener("submit", ev => {
+  const f = ev.target.closest("[data-rename]"); if (!f) return;
+  ev.preventDefault();
+  const mac = f.dataset.rename, v = $id("rn").value.trim();
+  S.editing = null; setDevice(mac, "name", v);
+});
+
+function readIotForm() {
+  return { enable: $id("iot-enable").checked ? "on" : "off", ssid: $id("iot-ssid").value, password: $id("iot-pw").value,
+           hidden: $id("iot-hidden").checked ? "on" : "off", allow_lan: $id("iot-allow").value.trim(), lan_mode: S.iot.lan_mode };
+}
+function markIot() {
+  const f = readIotForm(), c = S.iot;
+  const same = ["enable", "ssid", "password", "hidden", "allow_lan"].every(k => (f[k] || "") === (c[k] || ""));
+  const was = !!S.dirty.iot;
+  if (same) delete S.dirty.iot; else S.dirty.iot = Object.assign({}, c, f);
+  if (was !== !same) render();
+}
+async function saveIot() {
+  const f = S.dirty.iot; if (!f) return;
+  if (f.enable === "on" && (f.ssid.length < 1 || f.ssid.length > 32)) return toast("The network name needs 1 to 32 characters.", true);
+  if (f.enable === "on" && (f.password.length < 8 || f.password.length > 63)) return toast("The password needs 8 to 63 characters.", true);
+  try {
+    S.iot = await iot("settings", Object.assign({ operation: "write" }, f));
+    delete S.dirty.iot; render(); toast("Saved. IoT devices reconnect in a few seconds.");
+    await loadDevices(); render();
+  } catch (e) { fail(e); }
+}
+function readGuestForm() { return { enable: $id("g-enable").checked ? "on" : "off", down: $id("g-down").value.trim(), up: $id("g-up").value.trim() }; }
+function markGuest() {
+  const f = readGuestForm(), g = S.guest, same = ["enable", "down", "up"].every(k => String(f[k]) === String(g[k]));
+  const was = !!S.dirty.guest;
+  if (same) delete S.dirty.guest; else S.dirty.guest = f;
+  if (was !== !same) render();
+}
+async function saveGuest() {
+  const f = S.dirty.guest; if (!f) return;
+  const d = +f.down, u = +f.up;
+  if (f.enable === "on" && !(d >= 1 && d <= 1000 && u >= 1 && u <= 1000)) return toast("Speeds must be between 1 and 1000 Mbps.", true);
+  try { S.guest = await iot("guest_settings", Object.assign({ operation: "write" }, f)); delete S.dirty.guest; await loadDevices(); render(); toast("Guest limit saved"); }
+  catch (e) { fail(e); }
+}
+
+/* ------------------------------------------------------------------ start */
+function boot() { shell(); render(); refresh(); startPolling(); }
+if (typeof jQuery === "undefined" || !jQuery.encrypt) {
+  $id("app").innerHTML = `<div class="login"><div><b>Couldn't load the router's scripts.</b><p class="muted">Try reloading, or <a href="${FULL}">open the TP-Link settings</a>.</p></div></div>`;
+} else if (API.restore()) boot(); else showLogin();
+</script>
+</body>
+</html>

@@ -35,6 +35,8 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
   15 s whatever TP-Link undoes.
 - **Web page:** Advanced → Wireless → IoT Network (enable, SSID, password, hide,
   IoT → home exceptions, per-device Internet switch).
+- **Dashboard:** `https://192.168.0.1/` opens our own dark dashboard (see
+  [Dashboard](#dashboard-at-)); the stock UI stays at `/webpages/index.html`.
 
 ## Usage
 
@@ -210,6 +212,41 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   page (`REMOTE_ADDR`), sort online first, and can be renamed (UCI list
   `iot_names`, `mac=name`). The stock grid's store sync sends only the first
   changed row, so list switches save immediately via `ev_grid_custom_change`.
+
+### Dashboard at /
+- `iot-ui/dash/index.html` is one self-contained page (no build step). `iot.sh ui`
+  bind-mounts it over `/www/index.html` (what `https://192.168.0.1/` serves) and
+  bind-mounts `dash/login.html`, a redirect to `/`, over `/www/webpages/login.html`
+  (where uhttpd sends every plain-HTTP visit). The stock UI stays at
+  `/webpages/index.html`; `iot.sh ui-remove` undoes both mounts.
+- Tabs: Devices (every device with name, IP, where it is connected; rename, block,
+  and the IoT/guest switches), IoT, Guests, Wi-Fi (passwords with copy and a join
+  QR code). It refreshes every 10 s while visible.
+- **Login and encryption:** every LuCI request is AES-encrypted and RSA-signed. The
+  page loads the stock scripts (`jquery`, `cryptoJS`, `encrypt.js`, `tpEncrypt.js`)
+  and repeats the stock login: `login?form=keys` (RSA key for the password),
+  `login?form=auth` (signing key and sequence number), then `login?form=login`
+  with `confirm=true` (replaces any other admin session). The hash is
+  MD5("admin" + password), or SHA-256 on Singapore units, which the page does not handle.
+- **Shared session:** the page stores the token and keys under the stock UI's
+  `localStorage` names (`token`, `encryptorAES`, `encryptorSeq`, `encryptorHash`,
+  `encryptorRsa`), so each side opens the other already logged in. The router
+  allows one admin session: a login elsewhere replaces ours, and our replies then
+  fail to decrypt, which the page reports as "signed out".
+- **Backend:** `iot_net.lua` forms `devices` (one list with every DHCP lease, the
+  presence data, block-list and IoT/guest flags), `device` (write name, internet,
+  allowed, fast for one MAC) and `summary` (uptime and the PPPoE interface
+  `network.interface.internet` from ubus). The page adds names and guest status
+  from the stock `access_control?form=black_devices` list, which also sees guests
+  connected through the mesh satellite.
+- **Blocking** uses the stock Access Control block list:
+  `access_control?form=mode` (write `access_mode=black`), `form=enable` (write
+  `enable=on`), `form=black_list` (`insert` with `new={"name","mac":"AA-BB-…"}`;
+  `remove` with `key=<mac>` and `index`). Unblocking the last device switches
+  Access Control back off. Tested with a made-up MAC, not a real device.
+- Links to stock pages go to `/webpages/index.html`; the stock UI ignores URL
+  fragments, so the page leaves the target in `sessionStorage` (`ax10-go`) and
+  `locale.js`, which runs inside the stock UI, opens it once the menu is up.
 
 ### Known trade-offs
 - While the IoT network runs, OneMesh onboarding of a **new** satellite over

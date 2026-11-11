@@ -1,0 +1,95 @@
+/* ax10-theme: restyles the stock TP-Link web UI (Archer AX10). Installed by `iot.sh ui`,
+   which appends this file to the UI's per-language stylesheet (locale/<lang>/lan.css);
+   that sheet loads after the stock ones, so these rules win without !important in most
+   places. Colours only touch backgrounds, borders and text: the stock icons are sprite
+   images in TP-Link teal, so the accent stays teal. The main UI is the dashboard at /
+   (iot-ui/dash); this only tidies the stock pages it links to. */
+
+/* ---- type and page ---- */
+body, input, select, textarea, button, a, label, span, div, td, th, h3 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+body { background: #eef1f4; color: #1f2d33; -webkit-font-smoothing: antialiased; }
+
+/* ---- header ---- */
+.background { background: #10262d; }
+.background-decorate { display: none; }
+.top-bar::after { background: #10262d; }
+/* Top-right actions: the stock text and icons are dark, made for the light teal band. */
+.top-bar .func-bar a.button-button .button-text { color: #dbe7ea; }
+.top-bar .func-bar a.button-button .button-icon { filter: brightness(0) invert(1); opacity: .85; }
+.top-bar .func-bar a.button-button:hover .button-text { color: #fff; }
+
+/* ---- page card: wider, rounder, lifted off the grey page ---- */
+.main-content { max-width: 1200px; }
+#main-menu { max-width: 1176px; }
+.page-inner {
+    background: #fff; border-radius: 14px 14px 0 0;
+    box-shadow: 0 1px 2px rgba(16, 38, 45, .06), 0 8px 28px rgba(16, 38, 45, .10);
+}
+
+/* ---- side menu ---- */
+#navigator { background: #f7f9fa; border-right: 1px solid #e3e8eb; }
+#navigator li.navigator-li a { height: 40px; }
+#navigator li.navigator-li-level1.opened > a { background: transparent; }
+#navigator li.navigator-li-level1.selected > a,
+#navigator li.navigator-li.has-child-selected > a {
+    background: #e3f6f8; box-shadow: inset 3px 0 0 #2bb8c6; font-weight: 600;
+}
+#navigator li.navigator-li.has-child-selected { background: #f0f3f5; }
+#navigator li.navigator-li-level1 > a:hover { background: #edf1f3; }
+#navigator li.navigator-li-level1 > a:hover .sub-navigator-text { opacity: 1; }
+#navigator .navigator-ul-level2 span.sub-navigator-text { color: #5d6b72; opacity: 1; }
+#navigator .navigator-ul-level2 li.navigator-li.selected span.sub-navigator-text { color: #0b7f8c; font-weight: 600; }
+#navigator .navigator-ul-level2 li.navigator-li a:hover span.sub-navigator-text { color: #0b7f8c; }
+
+/* ---- section headings ---- */
+.panel-container .panel-title-text { font-size: 18px; line-height: 22px; font-weight: 650; color: #14232a; }
+.panel-container .panel-title-instruction { color: #5d6b72; padding-top: 10px; line-height: 20px; }
+.panel-header { border-bottom-color: #e3e8eb; }
+.panel-container.case, .networkmap-panel .panel-wrap { border-color: #e3e8eb; border-radius: 10px; }
+.panel-container.case .panel-header, .networkmap-panel .panel-header { background: #f7f9fa; }
+
+/* ---- inputs and dropdowns ---- */
+.text-container .text-wrap,
+.combobox-container .combobox-wrap,
+.textarea-container .textarea-wrap { border-color: #cfd6da; border-radius: 8px; }
+.text-container.hover .text-wrap { border-color: #9aa6ac; }
+.text-container.focus .text-wrap,
+.combobox-container.focus .combobox-wrap { border-color: #2bb8c6; box-shadow: 0 0 0 3px rgba(43, 184, 198, .18); }
+.text-container.error .text-wrap { box-shadow: 0 0 0 3px rgba(193, 28, 102, .12); }
+.text-container.readonly .text-wrap { box-shadow: none; }
+
+/* ---- buttons ---- */
+.button-container a.button-button { border-radius: 8px; box-shadow: none; font-weight: 600; letter-spacing: .01em; }
+.button-container a.button-button:hover { box-shadow: 0 2px 8px rgba(11, 127, 140, .25); }
+.button-container.btn-cancel a.button-button,
+.button-container.btn-no a.button-button,
+.button-container.btn-rare a.button-button { box-shadow: inset 0 0 0 1px #cfd6da; }
+.top-bar .button-container a.button-button,
+.top-bar .button-container a.button-button:hover,
+#back-to-top a.button-button,
+.button-container.icon-button a.button-button:hover,
+.button-container.link-button a.button-button:hover { box-shadow: none; }
+
+/* ---- tables ---- */
+.grid-container .grid-panel-content-container { border-color: #e3e8eb; border-radius: 10px; overflow: hidden; }
+.grid-container .grid-header-container { background: #f7f9fa; }
+.grid-container th.grid-header { color: #5d6b72; font-size: 12px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+.grid-container .grid-content-container tr.grid-content-tr { border-top: 1px solid #eef1f4; }
+.grid-container .grid-content-container tr.grid-content-tr:hover td { background: #fafcfd; }
+.grid-container td.grid-content-td .content { overflow-wrap: normal; word-break: normal; }
+
+/* ---- dialogs and the busy overlay ---- */
+.msg-container { border-radius: 14px; box-shadow: 0 12px 40px rgba(16, 38, 45, .22); }
+.msg-container .msg-wrap { border-radius: 14px; }
+.msg-container h3.msg-title { background: #f7f9fa; }
+.mask { background-color: #10262d; opacity: .28; }
+
+/* ---- login ---- */
+.login-background { background: #10262d; }
+.login-bottom, .login-bottom span, .login-bottom label, .login-bottom div { color: #8fa3aa; }
+.login-main-container-page .module-in-main-container { border-radius: 14px; box-shadow: 0 12px 40px rgba(0, 0, 0, .30); }
+
+/* ---- motion: keep state changes near-instant ---- */
+*, *::before, *::after { transition-duration: .08s !important; animation-duration: .12s !important; }
