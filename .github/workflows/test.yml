@@ -16,6 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Lua 5.1 (the router's Lua version)
-        run: sudo apt-get update && sudo apt-get install -y lua5.1
+        run: sh scripts/ci-install-lua.sh
       - name: Run all offline checks
         run: sh tests/run.sh

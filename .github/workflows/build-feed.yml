@@ -77,7 +77,7 @@ jobs:
           gh release download payload --repo lee-soft/ax10-opkg \
             --pattern 'opt.tar.gz' --pattern 'busybox-armv7l' --dir dist
           cp bootstrap/dropbear_vanilla dist/
-          sudo apt-get update && sudo apt-get install -y lua5.1
+          sh scripts/ci-install-lua.sh
           sh tests/run.sh
           tar --owner=0 --group=0 -czf dist/iot-ui.tar.gz -C iot-ui .
           cp boot.sh install.sh iot.sh dist/

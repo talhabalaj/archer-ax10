@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 echo "== shell syntax"
 for f in boot.sh install.sh iot.sh index.sh build-repo.sh deploy-to-pages.sh \
-         scripts/signed-hook.sh tests/iot.sh tests/signing.sh tests/run.sh; do
+         scripts/signed-hook.sh scripts/ci-install-lua.sh tests/iot.sh tests/signing.sh tests/run.sh; do
   sh -n "$f"
 done
 
