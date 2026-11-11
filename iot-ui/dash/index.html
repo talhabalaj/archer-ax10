@@ -129,6 +129,9 @@ h2 .count { color: var(--faint); font-weight: 600; }
 .tag.guest { color: #fcd34d; background: rgba(251, 191, 36, .12); }
 .tag.blocked { color: var(--bad); background: var(--bad-soft); }
 .tag.you { color: var(--accent); background: var(--accent-soft); }
+.tag.cap { color: #93c5fd; background: rgba(96, 165, 250, .13); }
+.capform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.capform .input { height: 36px; max-width: 150px; }
 .offline .nm, .offline .av { opacity: .55; }
 .right { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
 .chev { color: var(--faint); transition: transform .15s; }
@@ -224,6 +227,7 @@ const ICON = {
   wifi: '<path d="M2 8.8a15 15 0 0 1 20 0"/><path d="M5 12.4a10.5 10.5 0 0 1 14 0"/><path d="M8.5 15.9a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19.2" r=".9"/>',
   wired: '<rect x="4" y="3" width="16" height="12" rx="2"/><path d="M8 15v3h8v-3M10 18v3h4v-3M8 7v3M12 7v3M16 7v3"/>',
   mesh: '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.8 7.2 6.3 15.8M13.2 7.2l4.5 8.6M7.5 18h9"/>',
+  gauge: '<path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l4-5"/><circle cx="12" cy="13" r="1.4"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 21v-5h-5"/>',
   power: '<path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>',
@@ -302,12 +306,12 @@ const iot = (form, params) => API.call("/admin/iot_net?form=" + form, params).th
 
 /* ------------------------------------------------------------------ state */
 const S = {
-  tab: (location.hash || "#devices").slice(1),
+  tab: ({ guests: "speed" })[(location.hash || "#devices").slice(1)] || (location.hash || "#devices").slice(1),
   devices: null, summary: null, iot: null, guest: null, wifi: null,
   filter: "all", q: "", open: null, editing: null, reveal: {}, qr: null,
   menu: false, busy: {}, dirty: {},
 };
-const TABS = [["devices", "Devices", "devices"], ["iot", "IoT", "iot"], ["guests", "Guests", "guest"], ["wifi", "Wi-Fi", "wifi"]];
+const TABS = [["devices", "Devices", "devices"], ["iot", "IoT", "iot"], ["speed", "Speed", "gauge"], ["wifi", "Wi-Fi", "wifi"]];
 if (!TABS.some(t => t[0] === S.tab)) S.tab = "devices";
 
 function toast(msg, bad) {
@@ -394,13 +398,14 @@ async function loadSummary() {
 }
 async function loadIot() { S.iot = await iot("settings"); }
 async function loadGuest() { S.guest = await iot("guest_settings"); }
+async function loadShaping() { S.shaping = await iot("shaping"); }
 async function loadWifi() {
   const get = f => API.call("/admin/wireless?form=" + f).then(r => r.data).catch(() => null);
   const [w2, w5, g2, g5, sc] = await Promise.all([get("wireless_2g"), get("wireless_5g"), get("guest_2g"), get("guest_5g"), get("smart_connect")]);
   if (!S.iot) await loadIot();
   S.wifi = { w2, w5, g2, g5, smart: sc && sc.smart_enable === "on" };
 }
-const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], guests: [loadDevices, loadGuest], wifi: [loadWifi] };
+const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], speed: [loadDevices, loadGuest, loadShaping], wifi: [loadWifi] };
 async function refresh(quiet) {
   const tab = S.tab;
   try { await Promise.all(NEEDS[tab].map(f => f())); if (tab === S.tab) render(); }
@@ -410,7 +415,7 @@ let timer = null;
 function startPolling() {
   clearInterval(timer);
   timer = setInterval(() => {
-    if (document.hidden || !API.has() || S.editing || S.tab === "wifi" || Object.keys(S.dirty).length) return;
+    if (document.hidden || !API.has() || S.editing || S.capEdit || S.tab === "wifi" || Object.keys(S.dirty).length) return;
     refresh(true);
   }, 10000);
 }
@@ -502,7 +507,7 @@ function render() {
   const v = $id("view"); if (!v) return;
   const focus = document.activeElement && document.activeElement.id;
   const caret = focus && document.activeElement.selectionStart;
-  v.innerHTML = ({ devices: viewDevices, iot: viewIot, guests: viewGuests, wifi: viewWifi })[S.tab]();
+  v.innerHTML = ({ devices: viewDevices, iot: viewIot, speed: viewSpeed, wifi: viewWifi })[S.tab]();
   if (focus && $id(focus)) { const el = $id(focus); el.focus(); try { if (caret != null) el.setSelectionRange(caret, caret); } catch (x) {} }
   if (S.qr) drawQr();
 }
@@ -544,7 +549,7 @@ function deviceRow(d) {
   const open = S.open === d.mac;
   const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
     d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
-    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && '<span class="tag">Full speed</span>'].filter(Boolean).join("");
+    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>', d.cap && `<span class="tag cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
   const meta = [d.ip, whereText(d)].filter(Boolean).join(" · ");
   return `<div class="row click ${d.online ? "" : "offline"} ${open ? "open" : ""}" data-mac="${d.mac}" tabindex="0" role="button" aria-expanded="${open}">
       <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
@@ -553,6 +558,21 @@ function deviceRow(d) {
     </div>${open ? deviceDetail(d) : ""}`;
 }
 
+// "5↓ 2↑" for a cap of 5 Mbps down, 2 up; 0 means not capped that way.
+const capText = c => [c.down ? `${c.down}↓` : "", c.up ? `${c.up}↑` : ""].filter(Boolean).join(" ") + " Mbps";
+function effectiveCap(d) {
+  const D = S.devices;
+  if (d.cap) return { text: capText(d.cap), why: "Speed cap set for this device" };
+  if (d.net === "guest" && D.guest_limit && !d.fast) return { text: capText({ down: D.guest_down, up: D.guest_up }), why: "Guest limit" };
+  return null;
+}
+function capEditor(d) {
+  const c = d.cap || { down: "", up: "" };
+  return `<form class="capform" data-cap="${d.mac}">
+    <div class="input short"><input id="cap-d" inputmode="numeric" placeholder="none" value="${c.down || ""}" aria-label="Download cap"><span class="unit">↓ Mbps</span></div>
+    <div class="input short"><input id="cap-u" inputmode="numeric" placeholder="none" value="${c.up || ""}" aria-label="Upload cap"><span class="unit">↑ Mbps</span></div>
+    <button class="btn sm primary">Save</button><button type="button" class="btn sm" data-act="cap-cancel">Cancel</button></form>`;
+}
 function deviceDetail(d) {
   const D = S.devices, busy = S.busy[d.mac];
   const toggles = [];
@@ -568,9 +588,13 @@ function deviceDetail(d) {
       <div><span>MAC address</span><b class="mono">${esc(d.mac)}</b>${isPrivateMac(d.mac) ? ' <span class="muted" title="The device picked a random address for this network">· private</span>' : ""}</div>
       <div><span>Connection</span><b>${esc(whereText(d))}</b></div>
       ${d.host && d.name && d.host !== d.name ? `<div><span>Reported name</span><b>${esc(d.host)}</b></div>` : ""}
+      ${d.net !== "iot" ? `<div><span>Speed</span><b>${(e => e ? esc(e.text) + ` <span class="muted" style="font-weight:400">· ${esc(e.why)}</span>` : "No cap")(effectiveCap(d))}</b></div>` : ""}
     </div>
+    ${S.capEdit === d.mac ? capEditor(d) : ""}
     <div class="acts">${toggles.join("")}
       ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
+      ${d.net !== "iot" && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap" data-mac="${d.mac}">${d.cap ? "Change speed cap" : "Cap speed"}</button>` : ""}
+      ${d.cap && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove cap</button>` : ""}
       ${canBlock ? `<button class="btn sm ${d.blocked ? "" : "danger"}" data-act="${d.blocked ? "unblock" : "block"}" data-mac="${d.mac}" ${busy ? "disabled" : ""}>${d.blocked ? "Unblock" : "Block"}</button>` : ""}
       ${busy ? '<span class="spin"></span>' : ""}
     </div></div>`;
@@ -625,14 +649,28 @@ function viewIot() {
   ${c.lan_mode === "selected" ? `<div style="margin-top:12px">${'<div class="list">' + (homes.map(d => simpleRow(d, rowSwitch("allowed", d, d.allowed, "Can reach IoT devices"))).join("") || '<div class="empty">No home devices.</div>') + "</div>"}</div>` : ""}`;
 }
 
-function viewGuests() {
-  const g = S.guest, D = S.devices;
-  if (!g || !D) return `<h2>Guest speed limit</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
+function viewSpeed() {
+  const g = S.guest, D = S.devices, w = S.shaping;
+  if (!g || !D || !w) return `<h2>Whole connection</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
+  const wf = S.dirty.wan || w, wDirty = !!S.dirty.wan;
   const f = S.dirty.guest || g, isDirty = !!S.dirty.guest;
+  const capped = sortDevices(D.list.filter(d => d.cap));
   const guests = sortDevices(D.list.filter(d => d.net === "guest" || d.fast));
-  return `<h2>Guest speed limit</h2>
+  return `<h2>Whole connection</h2>
   <div class="card">
-    <div class="card-h"><div style="flex:1"><h3>Limit each guest</h3><p>Caps every device on the guest Wi-Fi. Your main Wi-Fi and the IoT network are not affected.</p></div>
+    <div class="card-h"><div style="flex:1"><h3>Keep the connection responsive</h3><p>Caps all internet traffic a little under your plan's speed, so calls and games stay smooth while someone downloads. Set about 90% of what a speed test shows.</p></div>
+      <label class="sw"><input type="checkbox" id="w-enable" ${wf.enable === "on" ? "checked" : ""} aria-label="Whole-connection limit on"><span></span></label></div>
+    <div class="card-b">
+      <div class="field"><label for="w-down">Download</label><div class="input short"><input id="w-down" inputmode="numeric" value="${esc(wf.down)}" placeholder="e.g. 18"><span class="unit">Mbps</span></div></div>
+      <div class="field"><label for="w-up">Upload</label><div class="input short"><input id="w-up" inputmode="numeric" value="${esc(wf.up)}" placeholder="e.g. 60"><span class="unit">Mbps</span></div></div>
+    </div>
+    <div class="note">While this is on, all traffic runs through the router's processor instead of its hardware fast path.</div>
+    ${wDirty ? `<div class="card-f"><button class="btn" data-act="w-reset">Discard</button><button class="btn primary" data-act="w-save">Save changes</button></div>` : ""}
+  </div>
+  ${sectionList("Capped devices", capped.map(d => simpleRow(d, `<span class="tag cap">${capText(d.cap)}</span><button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove</button>`)), "No device has its own cap. Open a device on the Devices tab and choose Cap speed.")}
+  <h2>Guest speed limit</h2>
+  <div class="card">
+    <div class="card-h"><div style="flex:1"><h3>Limit each guest</h3><p>Caps every device on the guest Wi-Fi. A device's own cap wins over this.</p></div>
       <label class="sw"><input type="checkbox" id="g-enable" ${f.enable === "on" ? "checked" : ""} aria-label="Guest speed limit on"><span></span></label></div>
     <div class="card-b">
       <div class="field"><label for="g-down">Download</label><div class="input short"><input id="g-down" inputmode="numeric" value="${esc(f.down)}"><span class="unit">Mbps</span></div></div>
@@ -747,9 +785,14 @@ document.addEventListener("click", async ev => {
     if (act === "g-reset") { delete S.dirty.guest; render(); return; }
     if (act === "iot-save") return saveIot();
     if (act === "g-save") return saveGuest();
+    if (act === "w-reset") { delete S.dirty.wan; render(); return; }
+    if (act === "w-save") return saveWan();
+    if (act === "cap") { S.capEdit = mac; render(); const i = $id("cap-d"); if (i) i.focus(); return; }
+    if (act === "cap-cancel") { S.capEdit = null; render(); return; }
+    if (act === "cap-remove") return setCap(mac, "");
   }
   if (t.closest(".detail") || t.closest("input,label,button,a")) return;
-  const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; render(); }
+  const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; S.capEdit = null; render(); }
 });
 document.addEventListener("keydown", ev => {
   const row = ev.target.closest && ev.target.closest(".row.click");
@@ -761,14 +804,24 @@ document.addEventListener("change", ev => {
   if (i.dataset.field && i.dataset.mac) return setDevice(i.dataset.mac, i.dataset.field, i.checked);
   if (/^iot-/.test(i.id)) return markIot();
   if (/^g-/.test(i.id)) return markGuest();
+  if (/^w-/.test(i.id)) return markWan();
 });
 document.addEventListener("input", ev => {
   const i = ev.target;
   if (i.id === "q") { S.q = i.value; S.open = null; render(); return; }
   if (/^iot-/.test(i.id)) return markIot();
   if (/^g-/.test(i.id)) return markGuest();
+  if (/^w-/.test(i.id)) return markWan();
 });
 document.addEventListener("submit", ev => {
+  const cf = ev.target.closest("[data-cap]");
+  if (cf) {
+    ev.preventDefault();
+    const num = v => v.trim() === "" ? 0 : (/^\d+$/.test(v.trim()) ? +v.trim() : NaN);
+    const d = num($id("cap-d").value), u = num($id("cap-u").value);
+    if (!(d >= 0 && d <= 1000 && u >= 0 && u <= 1000)) return toast("Use whole Mbps from 1 to 1000, or leave a box empty for no cap.", true);
+    return setCap(cf.dataset.cap, d || u ? `${d}/${u}` : "");
+  }
   const f = ev.target.closest("[data-rename]"); if (!f) return;
   ev.preventDefault();
   const mac = f.dataset.rename, v = $id("rn").value.trim();
@@ -802,6 +855,29 @@ function markGuest() {
   const was = !!S.dirty.guest;
   if (same) delete S.dirty.guest; else S.dirty.guest = f;
   if (was !== !same) render();
+}
+async function setCap(mac, cap) {
+  const d = findDev(mac); if (!d) return;
+  try {
+    await iot("device", { operation: "write", mac, cap });
+    S.capEdit = null;
+    toast(cap ? `${devName(d)} capped at ${capText({ down: +cap.split("/")[0], up: +cap.split("/")[1] })}` : `Cap removed · ${devName(d)}`);
+    await loadDevices(); render();
+  } catch (e) { fail(e); }
+}
+function readWanForm() { return { enable: $id("w-enable").checked ? "on" : "off", down: $id("w-down").value.trim(), up: $id("w-up").value.trim() }; }
+function markWan() {
+  const f = readWanForm(), w = S.shaping, same = ["enable", "down", "up"].every(k => String(f[k]) === String(w[k] || ""));
+  const was = !!S.dirty.wan;
+  if (same) delete S.dirty.wan; else S.dirty.wan = f;
+  if (was !== !same) render();
+}
+async function saveWan() {
+  const f = S.dirty.wan; if (!f) return;
+  const d = +f.down, u = +f.up;
+  if (f.enable === "on" && !(d >= 1 && d <= 1000 && u >= 1 && u <= 1000)) return toast("Speeds must be between 1 and 1000 Mbps.", true);
+  try { S.shaping = await iot("shaping", Object.assign({ operation: "write" }, f)); delete S.dirty.wan; render(); toast(f.enable === "on" ? `Whole connection capped at ${d}↓ ${u}↑ Mbps` : "Whole-connection limit off"); }
+  catch (e) { fail(e); }
 }
 async function saveGuest() {
   const f = S.dirty.guest; if (!f) return;

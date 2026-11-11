@@ -87,10 +87,19 @@ cat > "$T/bin/mount" <<EOF
 echo "mount \$*" >> "$T/calls"
 EOF
 printf '%s\n' 'nvram set ${CONFIG_WIFI}_map="3" # BH BSS + FH BSS' 'nvram set ${RTORCFG_WIFI}_dwds="1"' > "$T/tplink_brcm.sh"
-cat > "$T/bin/tc" <<EOF
+# tc: remembers root htb and ingress qdiscs per device so "qdisc show" works.
+cat > "$T/bin/tc" <<'EOF'
 #!/bin/sh
-echo "tc \$*" >> "$T/calls"
+echo "tc $*" >> "@T@/calls"
+case "$1 $2" in
+  "qdisc add") case "$*" in *" root handle 1: htb"*) echo "$4 htb" >> "@T@/qdiscs" ;; *" ingress") echo "$4 ingress" >> "@T@/qdiscs" ;; esac ;;
+  "qdisc del") k=htb; [ "$5" = ingress ] && k=ingress
+               grep -vx "$4 $k" "@T@/qdiscs" > "@T@/q2" 2>/dev/null; mv "@T@/q2" "@T@/qdiscs" 2>/dev/null ;;
+  "qdisc show") grep "^$4 " "@T@/qdiscs" 2>/dev/null | sed "s/^$4 htb/qdisc htb 1: root/; s/^$4 ingress/qdisc ingress ffff:/" ;;
+esac
+exit 0
 EOF
+sed "s#@T@#$T#g" "$T/bin/tc" > "$T/tc.new" && mv "$T/tc.new" "$T/bin/tc"
 # ip6tables: same rule memory as iptables, in its own files.
 cat > "$T/bin/ip6tables" <<EOF
 #!/bin/sh
@@ -118,7 +127,7 @@ iot() {
       MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
       NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" \
-      ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true \
+      ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true CLIENTS="$T/clients.json" \
       LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" PATH="$T/bin:$PATH" \
       sh "$s" "$@"
 }
@@ -267,10 +276,12 @@ grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher
 i=0; while [ $i -lt 50 ] && ! grep -qF "dropbear -p" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
 has "dropbear -p"
 
-# --- guest speed limit: shape limited guests, leave the full-speed one alone.
+# --- speed limits: guests, a per-device cap and a mesh guest, all matched by MAC.
 mkdir -p "$T/net/wl1.3"
-echo "192.168.0.50 0x1 0x2 aa:bb:cc:00:00:08 * br-lan" > "$T/arp"
-echo 1 > "$T/guest_on"
+echo 1 > "$T/guest_on"; echo 0 > "$T/wan_on"
+# TP-Link's client list: 06 is a guest behind the mesh satellite (capped), 05 an
+# offline guest and 04 a home device (both left alone).
+printf '%s' '{"AA-BB-CC-00-00-06":{"mac":"AA-BB-CC-00-00-06","connect_status":1,"guest":"GUEST"},"AA-BB-CC-00-00-05":{"mac":"AA-BB-CC-00-00-05","connect_status":0,"guest":"GUEST"},"AA-BB-CC-00-00-04":{"mac":"AA-BB-CC-00-00-04","connect_status":1,"guest":"NON_GUEST"}}' > "$T/clients.json"
 cat > "$T/bin/uci3" <<EOF
 #!/bin/sh
 case "\$*" in
@@ -279,32 +290,64 @@ case "\$*" in
   *iot_guest_limit*) cat "$T/guest_on" ;;
   *iot_guest_down*) echo "5" ;;
   *iot_guest_up*) echo "2" ;;
-  *iot_guest_fast*) echo "aa:bb:cc:00:00:09" ;;
+  *iot_guest_fast*) echo "AA:BB:CC:00:00:09" ;;
+  *iot_caps*) [ -f "$T/caps" ] && cat "$T/caps" || exit 1 ;;
+  *iot_wan_shape*) cat "$T/wan_on" ;;
+  *iot_wan_down*) echo "90" ;;
+  *iot_wan_up*) echo "40" ;;
   *) exec "$T/bin/uci" "\$@" ;;
 esac
 EOF
 chmod +x "$T/bin/uci3"
-: > "$T/calls"
-iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
-has "ip6tables -A AX10_GUEST6 -m mac --mac-source aa:bb:cc:00:00:08 -j REJECT --reject-with icmp6-adm-prohibited"
-grep -q "aa:bb:cc:00:00:09" "$T/calls" && fail "full-speed guest was shaped"
-has "iptables -t mangle -A AX10_GUEST -s 192.168.0.50 -j BLOGSKIP"
-has "iptables -t mangle -A AX10_GUEST -d 192.168.0.50 -j BLOGSKIP"
-has "tc class add dev wl1.3 parent 1: classid 1:10 htb rate 5mbit ceil 5mbit"
-has "tc qdisc add dev wl1.3 parent 1:10 handle 10: pfifo limit 10"
-has "tc class add dev ifb0 parent 1: classid 1:10 htb rate 2mbit ceil 2mbit"
-has "tc qdisc add dev ifb0 parent 1:10 handle 10: pfifo limit 5"
-[ -f "$T/run/guest.sig" ] || fail "guest.sig not written"
+echo "aa-bb-cc-00-00-07=10/0" > "$T/caps"     # download-only cap, given with dashes
+: > "$T/calls"; : > "$T/qdiscs"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+for c in iptables ip6tables; do
+  for m in 08 06 07; do
+    has "$c -t mangle -A AX10_SHAPE_IN -i br-lan -m mac --mac-source aa:bb:cc:00:00:$m -j CONNMARK --set-xmark 0x1000000/0x1000000"
+  done
+  has "$c -t mangle -A AX10_SHAPE -m connmark --mark 0x1000000/0x1000000 -j BLOGSKIP"
+  has "$c -t mangle -I FORWARD 1 -j AX10_SHAPE"
+done
+grep -qi "aa:bb:cc:00:00:09" "$T/calls" && fail "full-speed guest was shaped"
+grep -qi "aa:bb:cc:00:00:0[45]" "$T/calls" && fail "offline guest or home device was shaped"
+has "tc filter add dev br-lan parent ffff: protocol all prio 10 u32 match u32 0 0 action mirred egress redirect dev ifb0"
+for m in 06 07 08; do has "match ether dst aa:bb:cc:00:00:$m"; done
+for m in 06 08; do has "match ether src aa:bb:cc:00:00:$m"; done
+grep -q "match ether src aa:bb:cc:00:00:07" "$T/calls" && fail "upload capped although the cap is download-only"
+has "htb rate 5mbit ceil 5mbit"
+has "htb rate 2mbit ceil 2mbit"
+has "htb rate 10mbit ceil 10mbit"
+has "sfq perturb 10 limit 30"
+[ -f "$T/run/shape.sig" ] || fail "shape.sig not written"
 # Nothing changed: no rebuild.
 : > "$T/calls"
-iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
-grep -q "tc qdisc add" "$T/calls" && fail "second guest sync rebuilt tc"
-grep -q -- "-A AX10_GUEST" "$T/calls" && fail "second guest sync re-added rules"
-# Limit switched off: everything cleared.
-echo 0 > "$T/guest_on"; : > "$T/calls"
-iot "$T/bin/uci3" "$ROOT/iot.sh" guest >/dev/null 2>&1 || true
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+grep -q "tc qdisc add" "$T/calls" && fail "second sync rebuilt tc"
+grep -q -- "-A AX10_SHAPE" "$T/calls" && fail "second sync re-added rules"
+# Queues gone (e.g. TP-Link reset them): rebuilt.
+: > "$T/qdiscs"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+has "tc qdisc add dev br-lan root handle 1: htb default 10"
+# Whole connection capped: everything skips acceleration, no per-device marks.
+echo 1 > "$T/wan_on"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+has "iptables -t mangle -A AX10_SHAPE -j BLOGSKIP"
+has "ip6tables -t mangle -A AX10_SHAPE -j BLOGSKIP"
+has "tc class add dev br-lan parent 1: classid 1:1 htb rate 90mbit ceil 90mbit"
+has "tc class add dev ifb0 parent 1: classid 1:1 htb rate 40mbit ceil 40mbit"
+grep -q -- "-A AX10_SHAPE_IN" "$T/calls" && fail "per-device marks added with the whole connection capped"
+# Everything off: cleared, including the old guest-only limit's leftovers.
+echo 0 > "$T/wan_on"; echo 0 > "$T/guest_on"; rm -f "$T/caps"
+echo "mangle PREROUTING -j AX10_GUEST" >> "$T/rules"; : > "$T/run/guest.sig"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+has "tc qdisc del dev br-lan root"
+has "tc qdisc del dev br-lan ingress"
 has "tc qdisc del dev wl1.3 root"
-[ ! -f "$T/run/guest.sig" ] || fail "guest.sig left behind after limit off"
+grep -q "AX10_GUEST" "$T/rules" && fail "old guest-limit rule left behind"
+grep -q "AX10_SHAPE" "$T/rules" "$T/rules6" 2>/dev/null && fail "shape rules left behind"
+[ ! -f "$T/run/shape.sig" ] || fail "shape.sig left behind after limits off"
+[ ! -f "$T/run/guest.sig" ] || fail "guest.sig left behind"
 
 # --- web-page installer: files copied, JSON edited once even when run twice.
 rm -rf "$T/run/ui" "$T/www" "$T/ctl"

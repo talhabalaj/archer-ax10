@@ -286,7 +286,7 @@ end
 
 ------------------------------------------------------------ guest speed limit
 -- Settings live next to the IoT ones (iot_guest_*); iot.sh's watcher applies them.
-local function guest_apply() os.execute(IOT .. " guest >/dev/null 2>&1 &") end
+local function guest_apply() os.execute(IOT .. " shape >/dev/null 2>&1 &") end
 
 local function read_guest_settings()
     return {
@@ -377,6 +377,25 @@ local function guest_ifaces()
     return g
 end
 
+-- Per-device speed caps: iot_caps "mac=down/up ..." (Mbps, 0 = no cap that way).
+local function caps()
+    local t = {}
+    for _, e in ipairs(words(get("caps", ""))) do
+        local m, d, u = e:match("^([%x:-]+)=(%d+)/(%d+)$")
+        if m then t[normmac(m)] = { down = tonumber(d), up = tonumber(u) } end
+    end
+    return t
+end
+local function caps_save(t)
+    local out = {}
+    for m, c in pairs(t) do out[#out + 1] = m .. "=" .. c.down .. "/" .. c.up end
+    table.sort(out)
+    local c = uci.cursor()
+    if #out > 0 then c:set("openvpn", SEC, "iot_caps", table.concat(out, " ")) else c:delete("openvpn", SEC, "iot_caps") end
+    c:commit("openvpn")
+    guest_apply()
+end
+
 -- Every device in the DHCP leases (MACs seen only on the air or in ARP are the mesh
 -- satellite's own radios, not clients), plus offline devices that still have a setting
 -- (blocked, full speed, allowed to reach IoT, Internet off) so it can be undone.
@@ -385,6 +404,7 @@ local function devices()
     local nm, gif = names(), guest_ifaces()
     local blocked, ac_enable, ac_mode = blocklist()
     local noinet, fast, allow = words(get("noinet", "")), words(get("guest_fast", "")), words(get("lan_allow", ""))
+    local cp = caps()
     local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
@@ -400,6 +420,7 @@ local function devices()
             name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
             net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
             internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac),
+            cap = cp[mac] or false,
         }
     end
     local f = io.open("/tmp/dhcp.leases")
@@ -412,8 +433,11 @@ local function devices()
     end
     for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
     for m in pairs(blocked) do add(m, nil, nil) end
+    for m in pairs(cp) do add(m, nil, nil) end
     return { list = rows, lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
              guest_limit = get("guest_limit", "0") == "1",
+             guest_down = tonumber(get("guest_down", "5")), guest_up = tonumber(get("guest_up", "2")),
+             wan_shape = get("wan_shape", "0") == "1",
              block = { enable = ac_enable, mode = ac_mode } }
 end
 
@@ -436,6 +460,15 @@ local function write_device(form)
     if form.internet == "on" or form.internet == "off" then opts.noinet = list_with("noinet", mac, form.internet == "off") end
     if form.allowed == "on" or form.allowed == "off" then opts.lan_allow = list_with("lan_allow", mac, form.allowed == "on") end
     if next(opts) then save(opts) end
+    if form.cap ~= nil then                     -- "down/up" in Mbps, or "" to remove
+        local t = caps()
+        local d, u = tostring(form.cap):match("^(%d+)/(%d+)$")
+        d, u = tonumber(d), tonumber(u)
+        if form.cap == "" or (d == 0 and u == 0) then t[mac] = nil
+        elseif d and u and d <= 1000 and u <= 1000 then t[mac] = { down = d, up = u }
+        else return false, "-1" end
+        caps_save(t)
+    end
     if form.fast == "on" or form.fast == "off" then
         local c = uci.cursor()
         c:set("openvpn", SEC, "iot_guest_fast", list_with("guest_fast", mac, form.fast == "on"))
@@ -443,6 +476,23 @@ local function write_device(form)
         guest_apply()
     end
     return { mac = mac:upper() }
+end
+
+-- Whole-connection shaping: cap all internet traffic a little under the line speed.
+local function read_shaping()
+    return { enable = get("wan_shape", "0") == "1" and "on" or "off",
+             down = get("wan_down", ""), up = get("wan_up", "") }
+end
+local function write_shaping(form)
+    local d, u = tonumber(form.down), tonumber(form.up)
+    if form.enable == "on" and (not d or not u or d < 1 or u < 1 or d > 1000 or u > 1000) then return false, "-1" end
+    local c = uci.cursor()
+    c:set("openvpn", SEC, "iot_wan_shape", form.enable == "on" and "1" or "0")
+    if d then c:set("openvpn", SEC, "iot_wan_down", tostring(math.floor(d))) end
+    if u then c:set("openvpn", SEC, "iot_wan_up", tostring(math.floor(u))) end
+    c:commit("openvpn")
+    guest_apply()
+    return read_shaping()
 end
 
 -- Router uptime and the Internet connection (PPPoE shows up as "internet").
@@ -469,6 +519,10 @@ local dispatch_tbl = {
     },
     summary = {
         ["read"]  = { cb = summary },
+    },
+    shaping = {
+        ["read"]  = { cb = read_shaping },
+        ["write"] = { cb = write_shaping },
     },
     settings = {
         ["read"]  = { cb = read_settings },

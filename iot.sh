@@ -32,7 +32,8 @@
 #   iot.sh apply      (re)apply everything once
 #   iot.sh watch      foreground loop: re-apply whenever TP-Link undoes our state
 #   iot.sh status     show what is in place
-#   iot.sh guest      apply + show the guest speed limit
+#   iot.sh shape      apply + show the speed limits (per device, guests, whole connection)
+#   iot.sh set caps "aa:bb:cc:dd:ee:03=5/2"   cap a device at 5 Mbps down, 2 up
 #   iot.sh set <key> <value>   save a setting (iot_ prefix optional), e.g.
 #                     iot.sh set ssid "wifi iot"      iot.sh set key "<password>"
 #                     iot.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
@@ -375,110 +376,152 @@ firewall_remove() {
     rm -f "$RUN/fw.sig" "$RUN/fw.snap"
 }
 
-# --------------------------------------------------------- guest speed limit
-# Optional per-device speed cap for TP-Link's guest networks (iot_guest_limit=1).
-# Each guest gets iot_guest_down / iot_guest_up Mbps unless its MAC is listed in
-# iot_guest_fast. Limited guests are exempted from Broadcom acceleration
-# (BLOGSKIP) so their packets pass through the qdiscs: download is shaped with an
-# htb class per guest on the guest Wi-Fi interface, upload by redirecting the
-# interface's ingress to ifb0 and shaping there. Full-speed guests keep
-# acceleration. Limited guests get no IPv6 (rejected, so they fall back to IPv4
-# at once): the caps match IPv4 addresses, and IPv6 would bypass them.
-# The main Wi-Fi and wifi-iot are never touched.
+# ------------------------------------------------------------- speed limits
+# Three kinds of cap, all optional:
+#   - per device: iot_caps "mac=down/up ..." in Mbps (0 = no cap that way);
+#   - guests: each connected guest gets iot_guest_down/up (iot_guest_limit=1)
+#     unless its MAC is in iot_guest_fast; a per-device cap wins;
+#   - the whole connection: iot_wan_shape=1 caps all internet traffic at
+#     iot_wan_down/up, a little under the line speed, so queues stay short.
+# Devices are matched by MAC, so a cap covers IPv4 and IPv6 and survives a new IP.
+# Download: htb on br-lan's egress (routed traffic into the home bridge; traffic
+# between home devices is bridged and never passes there), one class per capped
+# device, u32-matched on the Ethernet destination. Upload: br-lan's ingress is
+# redirected to ifb0 and shaped there by Ethernet source. Leaves are sfq (fair
+# between connections; this kernel has no fq_codel or cake). The IoT bridge is
+# never shaped.
+# Broadcom acceleration bypasses Linux queues, so shaped traffic gets BLOGSKIP:
+# everything when the whole connection is capped, else only connections of capped
+# devices (conntrack bit 0x1000000, set when the device sends). Packet marks are
+# left alone; TP-Link's VPN client uses them.
 TC="${TC:-tc}"
 IPT6="${IPT6:-/usr/sbin/ip6tables -w}"
-CH_GUEST6=AX10_GUEST6
 IFB="${IFB:-ifb0}"
-CH_GUEST=AX10_GUEST
-guest_load() {
-    GL_ON="$(cfg guest_limit 0)"
-    GL_DOWN="$(cfg guest_down 5)"
-    GL_UP="$(cfg guest_up 2)"
-    GL_FAST="$(cfg guest_fast '')"
+LANBR="${LANBR:-br-lan}"
+CLIENTS="${CLIENTS:-/tmp/client_list.json}"
+CH_SHAPE=AX10_SHAPE          # mangle FORWARD: BLOGSKIP
+CH_SHAPE_IN=AX10_SHAPE_IN    # mangle PREROUTING: mark capped devices' connections
+CT_BIT=0x1000000
+CH_GUEST=AX10_GUEST; CH_GUEST6=AX10_GUEST6   # the guest-only limit of v27 and older
+shape_load() {
+    GL_ON="$(cfg guest_limit 0)"; GL_DOWN="$(cfg guest_down 5)"; GL_UP="$(cfg guest_up 2)"
+    GL_FAST="$(cfg guest_fast '' | tr 'A-F-' 'a-f:')"
+    CAPS="$(cfg caps '' | tr 'A-F-' 'a-f:')"
+    WS_ON="$(cfg wan_shape 0)"; WS_DOWN="$(cfg wan_down 0)"; WS_UP="$(cfg wan_up 0)"
 }
 guest_ifs() {   # guest Wi-Fi interfaces from TP-Link's own config (wifi-iface guest=on)
     for sec in $($UCI show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.guest='\{0,1\}on'\{0,1\}$/\1/p"); do
         i="$($UCI -q get "wireless.$sec.ifname")"; [ -d "$NET/$i" ] && echo "$i"
     done
 }
-guest_macs() {  # every connected guest MAC
+guest_macs() {  # connected guests: on our guest Wi-Fi, or behind the mesh satellite (TP-Link's client list)
     for i in $(guest_ifs); do $WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'; done
+    [ -f "$CLIENTS" ] && tr '{' '\n' < "$CLIENTS" | grep '"guest":"GUEST"' | grep '"connect_status":1' |
+        sed -n 's/.*"mac":"\([0-9A-Fa-f-]*\)".*/\1/p' | tr 'A-F-' 'a-f:'
 }
-guest_list() {  # "mac ip ifname" for every connected guest with a known IP
-    for i in $(guest_ifs); do
-        for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'); do
-            ip="$(awk -v m="$m" 'tolower($4)==m && $3=="0x2" {print $1; exit}' "$ARP" 2>/dev/null)"
-            [ -n "$ip" ] || ip="$(awk -v m="$m" 'tolower($2)==m {print $3; exit}' "$LEASES" 2>/dev/null)"
-            [ -n "$ip" ] && echo "$m $ip $i"
-        done
+is_fast() { case " $GL_FAST " in *" $1 "*) return 0;; esac; return 1; }
+shape_list() {  # "mac down up" for every device to cap
+    for e in $CAPS; do echo "${e%%=*} $(echo "${e#*=}" | tr '/' ' ')"; done
+    [ "$GL_ON" = 1 ] || return 0
+    for m in $(guest_macs | sort -u); do
+        is_fast "$m" && continue
+        case " $CAPS " in *" $m="*) continue;; esac
+        echo "$m $GL_DOWN $GL_UP"
     done
 }
-is_fast() { for f in $GL_FAST; do [ "$(echo "$f" | tr A-F a-f)" = "$1" ] && return 0; done; return 1; }
-guest_clear() {
-    for i in $(guest_ifs); do
-        $TC qdisc del dev "$i" root 2>/dev/null; $TC qdisc del dev "$i" ingress 2>/dev/null
-    done
+sfq_limit() { l=$(($1 * 3)); [ "$l" -ge 20 ] || l=20; [ "$l" -le 127 ] || l=127; echo "$l"; }   # ~35 ms at the cap
+# htb's default burst (a few KB) is too small for this kernel's timer: measured, an
+# 18 Mbps class delivered 10-13 Mbps. Allow ~20 ms of traffic at the rate, >= 15 KB.
+htb_burst() { b=$(($1 * 2500)); [ "$b" -ge 15000 ] || b=15000; echo "burst $b cburst $b"; }
+shape_clear() {
+    $TC qdisc del dev "$LANBR" root 2>/dev/null; $TC qdisc del dev "$LANBR" ingress 2>/dev/null
     $TC qdisc del dev "$IFB" root 2>/dev/null
-    while $IPT -t mangle -D PREROUTING -j $CH_GUEST 2>/dev/null; do :; done
-    while $IPT -t mangle -D FORWARD -j $CH_GUEST 2>/dev/null; do :; done
-    $IPT -t mangle -F $CH_GUEST 2>/dev/null; $IPT -t mangle -X $CH_GUEST 2>/dev/null
-    while $IPT6 -D FORWARD -j $CH_GUEST6 2>/dev/null; do :; done
-    $IPT6 -F $CH_GUEST6 2>/dev/null; $IPT6 -X $CH_GUEST6 2>/dev/null
+    for c in "$IPT" "$IPT6"; do
+        while $c -t mangle -D FORWARD -j $CH_SHAPE 2>/dev/null; do :; done
+        while $c -t mangle -D PREROUTING -j $CH_SHAPE_IN 2>/dev/null; do :; done
+        $c -t mangle -F $CH_SHAPE 2>/dev/null; $c -t mangle -X $CH_SHAPE 2>/dev/null
+        $c -t mangle -F $CH_SHAPE_IN 2>/dev/null; $c -t mangle -X $CH_SHAPE_IN 2>/dev/null
+    done
+    # Leftovers of the old guest-only limit (per guest Wi-Fi interface, by IP).
+    if $IPT -t mangle -S $CH_GUEST >/dev/null 2>&1 || [ -f "$RUN/guest.sig" ]; then
+        for i in $(guest_ifs); do $TC qdisc del dev "$i" root 2>/dev/null; $TC qdisc del dev "$i" ingress 2>/dev/null; done
+        while $IPT -t mangle -D PREROUTING -j $CH_GUEST 2>/dev/null; do :; done
+        while $IPT -t mangle -D FORWARD -j $CH_GUEST 2>/dev/null; do :; done
+        $IPT -t mangle -F $CH_GUEST 2>/dev/null; $IPT -t mangle -X $CH_GUEST 2>/dev/null
+        while $IPT6 -D FORWARD -j $CH_GUEST6 2>/dev/null; do :; done
+        $IPT6 -F $CH_GUEST6 2>/dev/null; $IPT6 -X $CH_GUEST6 2>/dev/null
+        rm -f "$RUN/guest.sig"
+    fi
 }
-guest_sync() {
-    guest_load
-    if [ "$GL_ON" != 1 ]; then
-        [ -f "$RUN/guest.sig" ] && { guest_clear; rm -f "$RUN/guest.sig"; log "guest speed limit off"; }
+shape_ok() {   # everything the last build added is still there
+    $TC qdisc show dev "$LANBR" 2>/dev/null | grep -q "htb 1:" &&
+    $TC qdisc show dev "$LANBR" 2>/dev/null | grep -q "ingress" &&
+    $TC qdisc show dev "$IFB" 2>/dev/null | grep -q "htb 1:" &&
+    $IPT -t mangle -C FORWARD -j $CH_SHAPE 2>/dev/null && $IPT6 -t mangle -C FORWARD -j $CH_SHAPE 2>/dev/null
+}
+shape_class() {   # shape_class <dev> <minor> <Mbps>: capped class with an sfq leaf
+    $TC class add dev "$1" parent 1:1 classid "1:$2" htb rate "${3}mbit" ceil "${3}mbit" $(htb_burst "$3")
+    $TC qdisc add dev "$1" parent "1:$2" handle "$2:" sfq perturb 10 limit "$(sfq_limit "$3")"
+}
+shape_sync() {
+    shape_load
+    list="$(shape_list | awk 'NF == 3 && $1 ~ /^[0-9a-f:]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && ($2 > 0 || $3 > 0)' | sort -u)"
+    wan=0
+    [ "$WS_ON" = 1 ] && [ "$WS_DOWN" -gt 0 ] 2>/dev/null && [ "$WS_UP" -gt 0 ] 2>/dev/null && wan=1
+    if [ -z "$list" ] && [ "$wan" = 0 ]; then
+        if [ -f "$RUN/shape.sig" ] || [ -f "$RUN/guest.sig" ]; then
+            shape_clear; rm -f "$RUN/shape.sig"; log "speed limits off"
+        fi
         return 0
     fi
-    list="$(guest_list)"
-    slow="$(echo "$list" | while read m ip i; do [ -n "$m" ] && ! is_fast "$m" && echo "$m $ip $i"; done)"
-    slow6="$(guest_macs | while read m; do [ -n "$m" ] && ! is_fast "$m" && echo "$m"; done | sort -u | tr '\n' ' ')"
-    sig="$GL_DOWN|$GL_UP|$slow|$slow6"
-    [ "$(cat "$RUN/guest.sig" 2>/dev/null)" = "$sig" ] && $IPT -t mangle -C PREROUTING -j $CH_GUEST 2>/dev/null &&
-        $IPT -t mangle -C FORWARD -j $CH_GUEST 2>/dev/null && $IPT6 -C FORWARD -j $CH_GUEST6 2>/dev/null && return 0
-    guest_clear
+    sig="$wan|$WS_DOWN|$WS_UP|$(echo $list)"
+    [ "$(cat "$RUN/shape.sig" 2>/dev/null)" = "$sig" ] && shape_ok && return 0
+    shape_clear
     lsmod 2>/dev/null | grep -q '^xt_BLOGSKIP' || insmod /lib/modules/iplatform/xt_BLOGSKIP.ko 2>/dev/null
-    $IPT -t mangle -N $CH_GUEST 2>/dev/null
-    # PREROUTING sees uploads; downloads only carry the guest's address after
-    # de-NAT, so the same chain is also hooked into FORWARD.
-    $IPT -t mangle -I PREROUTING 1 -j $CH_GUEST
-    $IPT -t mangle -I FORWARD 1 -j $CH_GUEST
-    # No IPv6 for limited guests; ahead of the stock "accept established" rule.
-    $IPT6 -N $CH_GUEST6 2>/dev/null
-    $IPT6 -I FORWARD 1 -j $CH_GUEST6
-    for m in $slow6; do $IPT6 -A $CH_GUEST6 -m mac --mac-source "$m" -j REJECT --reject-with icmp6-adm-prohibited; done
-    $IP link set "$IFB" up 2>/dev/null
-    $TC qdisc add dev "$IFB" root handle 1: htb default 1
-    $TC class add dev "$IFB" parent 1: classid 1:1 htb rate 1000mbit
-    for i in $(guest_ifs); do
-        $TC qdisc add dev "$i" root handle 1: htb default 1
-        $TC class add dev "$i" parent 1: classid 1:1 htb rate 1000mbit
-        $TC qdisc add dev "$i" ingress
+    for c in "$IPT" "$IPT6"; do
+        $c -t mangle -N $CH_SHAPE 2>/dev/null
+        $c -t mangle -I FORWARD 1 -j $CH_SHAPE
+        if [ "$wan" = 1 ]; then
+            $c -t mangle -A $CH_SHAPE -j BLOGSKIP
+        else
+            $c -t mangle -N $CH_SHAPE_IN 2>/dev/null
+            $c -t mangle -I PREROUTING 1 -j $CH_SHAPE_IN
+            echo "$list" | while read m d u; do
+                $c -t mangle -A $CH_SHAPE_IN -i "$LANBR" -m mac --mac-source "$m" -j CONNMARK --set-xmark $CT_BIT/$CT_BIT
+            done
+            $c -t mangle -A $CH_SHAPE -m connmark --mark $CT_BIT/$CT_BIT -j BLOGSKIP
+        fi
     done
-    QD=$((GL_DOWN * 2)); [ "$QD" -ge 5 ] || QD=5
-    QU=$((GL_UP * 2)); [ "$QU" -ge 5 ] || QU=5
-    n=10
-    echo "$slow" | while read m ip i; do
-        [ -n "$m" ] || continue
-        $IPT -t mangle -A $CH_GUEST -s "$ip" -j BLOGSKIP
-        $IPT -t mangle -A $CH_GUEST -d "$ip" -j BLOGSKIP
-        # Short leaf queues: the default (txqueuelen 1000) adds seconds of delay at
-        # a few Mbps, and there is no fq_codel/sfq in this kernel. Size each queue
-        # to ~25 ms at the cap (2 full-size packets per Mbps, at least 5).
-        $TC class add dev "$i" parent 1: classid 1:$n htb rate "${GL_DOWN}mbit" ceil "${GL_DOWN}mbit"
-        $TC qdisc add dev "$i" parent 1:$n handle $n: pfifo limit "$QD"
-        $TC filter add dev "$i" parent 1: protocol ip prio 1 u32 match ip dst "$ip/32" flowid 1:$n
-        $TC filter add dev "$i" parent ffff: protocol ip prio 1 u32 match ip src "$ip/32" action mirred egress redirect dev "$IFB"
-        $TC class add dev "$IFB" parent 1: classid 1:$n htb rate "${GL_UP}mbit" ceil "${GL_UP}mbit"
-        $TC qdisc add dev "$IFB" parent 1:$n handle $n: pfifo limit "$QU"
-        $TC filter add dev "$IFB" parent 1: protocol ip prio 1 u32 match ip src "$ip/32" flowid 1:$n
+    $IP link set "$IFB" up 2>/dev/null
+    for dev in "$LANBR" "$IFB"; do
+        if [ "$wan" = 1 ]; then
+            [ "$dev" = "$LANBR" ] && t="$WS_DOWN" || t="$WS_UP"
+            r="${t}mbit"; q="$(sfq_limit "$t")"
+        else t=1000; r=1000mbit; q=127; fi
+        $TC qdisc add dev "$dev" root handle 1: htb default 10
+        $TC class add dev "$dev" parent 1: classid 1:1 htb rate "$r" ceil "$r" $(htb_burst "$t")
+        $TC class add dev "$dev" parent 1:1 classid 1:10 htb rate "$r" ceil "$r" $(htb_burst "$t")
+        $TC qdisc add dev "$dev" parent 1:10 handle 10: sfq perturb 10 limit "$q"
+    done
+    $TC qdisc add dev "$LANBR" ingress
+    $TC filter add dev "$LANBR" parent ffff: protocol all prio 10 u32 match u32 0 0 action mirred egress redirect dev "$IFB"
+    n=11
+    echo "$list" | while read m d u; do
+        if [ "$d" -gt 0 ]; then
+            shape_class "$LANBR" "$n" "$d"
+            $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid "1:$n"
+        fi
+        if [ "$u" -gt 0 ]; then
+            shape_class "$IFB" "$n" "$u"
+            $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid "1:$n"
+        fi
         n=$((n + 1))
     done
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$sig" > "$RUN/guest.sig"
-    log "guest speed limit: $(echo "$slow" | grep -c .) guest(s) at ${GL_DOWN}/${GL_UP} Mbps, IPv6 off for $(echo $slow6 | wc -w)"
+    echo "$sig" > "$RUN/shape.sig"
+    log "speed limits: $(echo "$list" | grep -c .) device(s) capped$([ "$wan" = 1 ] && echo ", whole connection at ${WS_DOWN}/${WS_UP} Mbps")"
 }
+guest_sync() { shape_sync; }   # older callers
 
 # --------------------------------------------------------------- apply/stop
 # One pass. Returns 0 when everything is in place.
@@ -686,7 +729,7 @@ status() {
 
 # Commands that change the router take the lock for their whole run.
 case "$1" in
-    apply|start|stop|guest|ui|ui-remove|boot)
+    apply|start|stop|guest|shape|ui|ui-remove|boot)
         lock || { log "$1: another iot.sh run still holds the lock; gave up after ${LOCK_WAIT}s"
                   echo "iot.sh: another run is in progress; try again" >&2; exit 1; }
         trap unlock EXIT ;;
@@ -698,7 +741,7 @@ case "$1" in
         while :; do
             if lock 5; then
                 apply >/dev/null 2>&1
-                guest_sync >/dev/null 2>&1
+                shape_sync >/dev/null 2>&1
                 unlock
             fi
             lifeline_guard
@@ -707,16 +750,20 @@ case "$1" in
         done ;;
     start)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
-        apply; guest_sync; inittab_add; watcher_restart; log "watcher registered" ;;
-    stop) stop; guest_clear; rm -f "$RUN/guest.sig" ;;
-    guest) guest_sync; guest_load; echo "guest limit: $GL_ON  ${GL_DOWN}/${GL_UP} Mbps  full-speed: ${GL_FAST:-none}"; guest_list ;;
+        apply; shape_sync; inittab_add; watcher_restart; log "watcher registered" ;;
+    stop) stop; shape_clear; rm -f "$RUN/shape.sig" ;;
+    guest|shape)
+        shape_sync; shape_load
+        echo "whole connection: $([ "$WS_ON" = 1 ] && echo "${WS_DOWN}/${WS_UP} Mbps" || echo off)"
+        echo "guest limit: $GL_ON  ${GL_DOWN}/${GL_UP} Mbps  full-speed: ${GL_FAST:-none}"
+        echo "capped (mac down up):"; shape_list | sort -u ;;
     ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_restart ;;
     ui-remove) ui_remove ;;
     boot)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
         # In-process, not "$0 start": the fetched file is not executable.
-        [ "$(cfg enabled 0)" = 1 ] && { apply; guest_sync; inittab_add; log "watcher registered"; }
+        [ "$(cfg enabled 0)" = 1 ] && { apply; shape_sync; inittab_add; log "watcher registered"; }
         lifeline_guard ;;
     status) status ;;
     set)

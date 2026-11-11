@@ -181,26 +181,42 @@ on TCP 8899, which is what the `allow_lan` exception permits.
   ECDSA key is regenerated each boot (`-R`). Pin the RSA key in known_hosts
   and connect with `-o HostKeyAlgorithms=ssh-rsa` to avoid host-key warnings.
 
-### Guest speed limit (Advanced → Wireless → Guest Speed)
-- Caps each device on TP-Link's guest networks (`iot_guest_limit`,
-  `iot_guest_down`/`iot_guest_up` in Mbps, per device); MACs in
-  `iot_guest_fast` are exempt ("Full speed" switch). Main Wi-Fi and wifi-iot
-  are never shaped. `iot.sh guest` applies and prints it; the watcher keeps it
-  in sync as guests come and go.
-- Broadcom acceleration bypasses Linux queues, so limited guests are exempted
-  with the `BLOGSKIP` target (`/lib/modules/iplatform/xt_BLOGSKIP.ko`) in mangle
-  PREROUTING (uploads) **and** FORWARD (downloads only carry the guest address
-  after de-NAT). Download: `htb` class per guest on the guest Wi-Fi interface,
-  `u32 match ip dst`. Upload: ingress qdisc → `mirred` redirect to `ifb0` →
-  `htb` class per guest.
-- IPv6 bypassed the IPv4-only caps (fast.com uses IPv6), so limited guests get
-  IPv6 rejected (`ip6tables` chain `AX10_GUEST6` at FORWARD position 1, ahead of
-  "accept established", `icmp6-adm-prohibited`) and fall back to IPv4.
-- No `fq_codel`/`codel`/`sfq` in this kernel. Each class gets a `pfifo` sized
-  to ~25 ms at its cap (2 packets per Mbps, min 5) instead of the default
-  1000-packet queue. Measured: a fixed 30 packets gave +80 ms loaded latency at
-  5 Mbps (vs ~1 ms on the unshaped main Wi-Fi). Shorter queues trade a little
-  throughput on long-RTT paths for lower latency.
+### Speed limits (dashboard Speed tab; Advanced → Wireless → Guest Speed)
+- Three optional caps, all applied by `iot.sh shape` and kept in sync by the
+  watcher: per device (`iot_caps`, `mac=down/up` in Mbps, 0 = no cap that way),
+  guests (`iot_guest_limit`, `iot_guest_down`/`iot_guest_up` per device; MACs in
+  `iot_guest_fast` exempt; a per-device cap wins), and the whole connection
+  (`iot_wan_shape`, `iot_wan_down`/`iot_wan_up`). Guests are the devices on our
+  guest Wi-Fi plus those TP-Link's client list (`/tmp/client_list.json`) marks
+  `GUEST` and connected, which covers guests behind the mesh satellite.
+- Matched by **MAC**, so a cap covers IPv4 and IPv6 and survives a new IP.
+  Download: `htb` on `br-lan`'s egress (routed traffic into the home bridge;
+  traffic between home devices is bridged and never passes there), one class per
+  device, `u32 match ether dst`. Upload: `br-lan` ingress → `mirred` redirect to
+  `ifb0` → `htb` class per device, `u32 match ether src`. Leaves are `sfq`. The IoT
+  bridge is never shaped.
+- Broadcom acceleration bypasses Linux queues. Capped devices' connections get
+  conntrack bit `0x1000000` in mangle PREROUTING (`-m mac --mac-source`, iptables
+  and ip6tables) and `BLOGSKIP` in mangle FORWARD by that bit; with the whole
+  connection capped, everything forwarded gets `BLOGSKIP`. Packet marks are left
+  alone: TP-Link's VPN client saves its mark bit `0x40000` into the conntrack mark.
+- Measured (MacBook on 5 GHz, Cloudflare speed test): a 5/2 Mbps cap gave
+  3.1–4.6 / 1.5–1.9 Mbps over IPv4 and 3.6–4.6 / 1.7–1.9 over IPv6; removed,
+  17–23 / 65–72. The non-accelerated path carries the full line (whole connection
+  capped at 100: 18–23 Mbps down, same as accelerated).
+- Whole connection: this line showed no bufferbloat (ping 19–20 ms idle and
+  under full download or upload load), so the cap is off by default. With it at
+  18/60, one device got 8–17 Mbps, depending on what the rest of the house was
+  using.
+- htb's default burst (a few KB) under-delivers here, so classes get ~20 ms of
+  traffic at their rate (at least 15 KB). Queue limits: `sfq limit` = 3 packets
+  per Mbps, 20–127.
+- Kernel 4.1.52 queueing: `htb`, `sfq`, `prio` are present; `fq_codel`, `codel`,
+  `cake`, `pie`, `fq`, `tbf`, `red`, `hfsc`, `drr`, `netem` are not. An earlier
+  note here said `sfq` was missing; it isn't.
+- The stock firmware has a hidden per-device limit (`smart_network?form=client_speed_limit`,
+  `write` with `mac`, `enableLimit`, kbps limits; the UI hides it unless
+  `supportSpeedLimit`). It accepts settings and enforces nothing on this unit.
 - Live updates: `iot.sh` runs take turns through a lock (`/tmp/ax10-iot/lock`),
   so a rebuild by hand, the watcher and the web page cannot interleave. A
   command that cannot get the lock within 60 s exits with an error; the
