@@ -33,6 +33,14 @@
 #   iot.sh watch      foreground loop: re-apply whenever TP-Link undoes our state
 #   iot.sh status     show what is in place
 #   iot.sh shape      apply + show the speed limits (per device, guests, whole connection)
+#   iot.sh open [s]   with the lock on, let new devices join for s seconds (default 600)
+#   iot.sh close      end that window now
+#   iot.sh home       apply + show the home allow list (iot_home_lock, iot_home_allow)
+#   iot.sh home-open [s]  let new home devices in for s seconds; they are added
+#   iot.sh home-close     end that window now
+#   iot.sh home-allow add|remove|keep|unkeep <mac>   edit the list (under the lock)
+#   iot.sh home-set lock 0|1 / home-set expire <days>
+#   iot.sh forget <mac>   drop an IoT device's fixed address (not re-pinned from its lease)
 #   iot.sh set caps "aa:bb:cc:dd:ee:03=5/2"   cap a device at 5 Mbps down, 2 up
 #   iot.sh set <key> <value>   save a setting (iot_ prefix optional), e.g.
 #                     iot.sh set ssid "wifi iot"      iot.sh set key "<password>"
@@ -217,6 +225,7 @@ vif_sync() {
 }
 vif_release() {
     [ -d "$NET/$VIF" ] || return 0
+    $WL -i "$VIF" macmode 0 2>/dev/null; $WL -i "$VIF" mac none 2>/dev/null
     $WL -i "$VIF" bss down 2>/dev/null
     $HAPD_CLI -i "$VIF" set ignore_broadcast_ssid 1 >/dev/null 2>&1
     $WL -i "$VIF" closed 1 2>/dev/null
@@ -231,6 +240,449 @@ vif_release() {
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/dnsmasq.conf}"
 DNSMASQ_INIT="${DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
 MARK_BEGIN="# ax10-iot begin"; MARK_END="# ax10-iot end"
+# ------------------------------------------------------------ known devices
+# Every IoT device keeps its address: each pass pins new IoT leases into iot_static.
+# Lock (iot_lock=1): only pinned devices may join the IoT Wi-Fi (Broadcom MAC allow
+# list, macmode 2), and unknown ones already connected are dropped. `iot.sh open`
+# lets new devices join for a while; they are pinned as they get an address.
+commit_cfg() {   # /etc is ramfs: TP-Link's uci_commit_flash also writes flash
+    if [ -x "${COMMIT_FLASH:-/sbin/uci_commit_flash}" ]; then "${COMMIT_FLASH:-/sbin/uci_commit_flash}" openvpn
+    else $UCI commit openvpn; fi
+}
+# Devices removed with "Forget" (iot_forget) are not pinned again from their old
+# lease; only the "allow new devices" window takes them back.
+autopin() {
+    [ -f "$LEASES" ] || return 0
+    new=""; back=""; forget="$(cfg forget '' | tr A-F a-f)"
+    while read -r _exp mac ip _rest; do
+        case "$ip" in "$PREFIX".*) ;; *) continue ;; esac
+        mac="$(echo "$mac" | tr A-F a-f)"
+        case " $STATIC $new " in *" $mac,"*) continue ;; esac
+        case " $forget " in *" $mac "*) lock_open || continue; back="$back $mac" ;; esac
+        new="$new $mac,$ip"
+    done < "$LEASES"
+    [ -n "$new" ] || return 0
+    STATIC="$(echo $STATIC $new)"
+    $UCI set "$SEC.iot_static=$STATIC"
+    if [ -n "$back" ]; then
+        f=""; for m in $forget; do case " $back " in *" $m "*) ;; *) f="$f $m" ;; esac; done
+        $UCI set "$SEC.iot_forget=$(echo $f)"
+    fi
+    commit_cfg >/dev/null
+    log "fixed address for new IoT device(s):$new"
+}
+known_macs() { for s in $STATIC; do echo "${s%%,*}"; done | tr a-f A-F | sort | tr '\n' ' '; }
+now_s() { if [ -r /proc/uptime ]; then cut -d. -f1 /proc/uptime; else date +%s; fi; }   # seconds since boot
+lock_open() {    # is the "allow new devices" window open?
+    u="$(cat "$RUN/open_until" 2>/dev/null)"
+    [ -n "$u" ] && [ "$(now_s)" -lt "$u" ] 2>/dev/null
+}
+lock_sync() {
+    [ -d "$NET/$VIF" ] || return 0
+    if [ "$(cfg lock 0)" = 1 ] && ! lock_open; then
+        want="$(known_macs)"
+        have="$($WL -i "$VIF" mac 2>/dev/null | awk '{print toupper($2)}' | sort | tr '\n' ' ')"
+        if [ "$want" != "$have" ]; then
+            $WL -i "$VIF" mac none 2>/dev/null
+            [ -n "$want" ] && $WL -i "$VIF" mac $want
+        fi
+        if [ "$($WL -i "$VIF" macmode 2>/dev/null)" != 2 ]; then
+            $WL -i "$VIF" macmode 2
+            log "IoT network locked to $(echo $want | wc -w) known device(s)"
+        fi
+        for m in $($WL -i "$VIF" assoclist 2>/dev/null | awk '{print toupper($2)}'); do
+            case " $want " in *" $m "*) ;; *) $WL -i "$VIF" deauthenticate "$m" 2>/dev/null; log "removed unknown device $m from the IoT network" ;; esac
+        done
+    elif [ "$($WL -i "$VIF" macmode 2>/dev/null)" = 2 ]; then
+        $WL -i "$VIF" macmode 0
+        log "IoT network open to new devices"
+    fi
+}
+# ------------------------------------------------------------- home allow list
+# Our own allow list for the home network (TP-Link's Access Control stays off; its
+# guest exemption needs a firewall match this kernel lacks). Two layers:
+#   - the home Wi-Fi radios (iot_home_ifs, default wl0.1 wl1.1) take only listed
+#     MACs (wl macmode 2), and unlisted devices already on them are disconnected;
+#   - devices the radios can't see (behind the mesh satellite, or wired) are dropped
+#     in the raw table by MAC once TP-Link's client list shows them as home clients.
+#     Only listed-as-client MACs are dropped, so guests on the same bridge and the
+#     satellite's own radios are never caught.
+# `iot.sh home-open [s]` lets new devices in for a while; they are added as they show
+# up. Last-seen times are kept in RAM and saved to flash once a day; with
+# iot_home_expire=N, entries not seen for N days are removed (iot_home_keep never).
+CH_HOME=AX10_HOME
+home_load() {
+    H_LOCK="$(cfg home_lock 0)"
+    H_ALLOW="$(cfg home_allow '' | tr A-F a-f)"
+    H_KEEP="$(cfg home_keep '' | tr A-F a-f)"
+    H_EXPIRE="$(cfg home_expire 0)"
+    H_IFS=""; for i in $(cfg home_ifs 'wl0.1 wl1.1'); do [ -d "$NET/$i" ] && H_IFS="$H_IFS $i"; done
+}
+home_listed() { case " $H_ALLOW $H_KEEP " in *" $1 "*) return 0 ;; esac; return 1; }
+home_open_now() { u="$(cat "$RUN/home_open_until" 2>/dev/null)"; [ -n "$u" ] && [ "$(now_s)" -lt "$u" ] 2>/dev/null; }
+home_clients() {   # home devices connected now: on our home radios, or TP-Link's client list (non-guest)
+    for i in $H_IFS; do $WL -i "$i" assoclist 2>/dev/null | awk '{print tolower($2)}'; done
+    [ -f "$CLIENTS" ] && tr '{' '\n' < "$CLIENTS" | grep '"guest":"NON_GUEST"' | grep '"connect_status":1' |
+        sed -n 's/.*"mac":"\([0-9A-Fa-f-]*\)".*/\1/p' | tr 'A-F-' 'a-f:'
+}
+# Forget last-seen times, so a re-added device starts a fresh clock. Also in the saved
+# copy (the caller commits), so a reboot can't bring the old time back.
+sed_seen_del() {
+    if [ -f "$RUN/home_seen" ]; then
+        for m in "$@"; do grep -v "^$m " "$RUN/home_seen" > "$RUN/home_seen.new"; mv "$RUN/home_seen.new" "$RUN/home_seen"; done
+    fi
+    v=""; for e in $(cfg home_seen ''); do case " $* " in *" ${e%%=*} "*) ;; *) v="$v $e" ;; esac; done
+    $UCI set "$SEC.iot_home_seen=$(echo $v)"
+}
+home_save_allow() { $UCI set "$SEC.iot_home_allow=$(echo $H_ALLOW)" && commit_cfg >/dev/null; }
+epoch() { d="$(date +%s 2>/dev/null)"; [ "${d:-0}" -gt 1700000000 ] 2>/dev/null && echo "$d"; }   # empty until NTP has set the clock
+home_seen_sync() {   # home_seen_sync <connected macs>
+    now="$(epoch)"; [ -n "$now" ] || return 0
+    f="$RUN/home_seen"
+    [ -f "$f" ] || for e in $(cfg home_seen ''); do echo "${e%%=*} ${e#*=}"; done > "$f"
+    { for m in $1; do echo "$m $now"; done
+      for m in $H_ALLOW; do grep -q "^$m " "$f" || echo "$m $now"; done   # first sight starts the clock
+      cat "$f"; } | sort -k1,1 -k2,2nr | awk '!s[$1]++' > "$f.new" && mv "$f.new" "$f"
+    # Expire entries not seen for H_EXPIRE days.
+    if [ "$H_EXPIRE" -gt 0 ] 2>/dev/null; then
+        old=""; for m in $H_ALLOW; do
+            case " $H_KEEP " in *" $m "*) continue ;; esac
+            t="$(awk -v m="$m" '$1==m{print $2}' "$f")"
+            [ -n "$t" ] && [ $((now - t)) -gt $((H_EXPIRE * 86400)) ] && old="$old $m"
+        done
+        new=""; for m in $H_ALLOW; do case " $old " in *" $m "*) ;; *) new="$new $m" ;; esac; done
+        # Never expire the list down to nothing: that would leave the lock with no one on it.
+        [ -z "$(echo $new $H_KEEP)" ] && old=""
+        if [ -n "$old" ]; then
+            H_ALLOW="$(echo $new)"; sed_seen_del $old; home_save_allow
+            log "removed from the home allow list after $H_EXPIRE days unseen:$old"
+        fi
+    fi
+    # Save to flash once a day.
+    last="$(cat "$RUN/home_seen.saved" 2>/dev/null)"
+    if [ $((now - ${last:-0})) -gt 86400 ]; then
+        $UCI set "$SEC.iot_home_seen=$(awk '{printf "%s=%s ", $1, $2}' "$f" | sed 's/ $//')" && commit_cfg >/dev/null
+        echo "$now" > "$RUN/home_seen.saved"
+    fi
+}
+# Open the home radios again, but only the ones we locked (home_owned): a filter
+# TP-Link or someone else set is left alone.
+home_unlock() {
+    for i in $(cat "$RUN/home_owned" 2>/dev/null); do
+        [ "$($WL -i "$i" macmode 2>/dev/null)" = 2 ] && { $WL -i "$i" macmode 0; log "home Wi-Fi ($i) open to any device${1:+ ($1)}"; }
+    done
+    rm -f "$RUN/home_owned"
+    home_fw_clear
+}
+home_fw_clear() {
+    for t in "$IPT" "$IPT6"; do
+        while $t -t raw -D PREROUTING -i "$LANBR" -j $CH_HOME 2>/dev/null; do :; done
+        $t -t raw -F $CH_HOME 2>/dev/null; $t -t raw -X $CH_HOME 2>/dev/null
+    done
+}
+home_sync() { home_sync_lists; portal_sync; }
+home_sync_lists() {
+    home_load; mkdir -p "$RUN"
+    conn="$(home_clients | sort -u | tr '\n' ' ')"
+    home_seen_sync "$conn"
+    [ "$H_LOCK" = 1 ] || { home_unlock; return 0; }
+    if home_open_now; then
+        g=" $(guest_macs | sort -u | tr '\n' ' ') "
+        new=""; for m in $conn; do home_listed "$m" || case "$g" in *" $m "*) ;; *) new="$new $m" ;; esac; done
+        if [ -n "$new" ]; then H_ALLOW="$(echo $H_ALLOW $new)"; sed_seen_del $new; home_save_allow; log "added to the home allow list:$new"; fi
+        home_unlock "window open"; return 0
+    fi
+    # On with an empty list would lock out everyone, including whoever manages it.
+    if [ -z "$(echo $H_ALLOW $H_KEEP)" ]; then home_unlock "the allow list is empty"; return 0; fi
+    want="$(echo $H_ALLOW $H_KEEP | tr ' ' '\n' | tr a-f A-F | sort -u | tr '\n' ' ')"
+    for i in $H_IFS; do
+        have="$($WL -i "$i" mac 2>/dev/null | awk '{print toupper($2)}' | sort | tr '\n' ' ')"
+        [ "$want" = "$have" ] || { $WL -i "$i" mac none 2>/dev/null; $WL -i "$i" mac $want; }
+        [ "$($WL -i "$i" macmode 2>/dev/null)" = 2 ] || { $WL -i "$i" macmode 2; log "home Wi-Fi ($i) locked to $(echo $want | wc -w) device(s)"; }
+        grep -qx "$i" "$RUN/home_owned" 2>/dev/null || echo "$i" >> "$RUN/home_owned"
+        for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print toupper($2)}'); do
+            case " $want " in *" $m "*) ;; *) $WL -i "$i" deauthenticate "$m" 2>/dev/null; log "removed unlisted device $m from the home Wi-Fi ($i)" ;; esac
+        done
+    done
+    # Devices behind the satellite or wired: drop unlisted home clients by MAC.
+    # A MAC stays dropped once seen (it vanishes from the client list when cut off),
+    # until it is listed or shows up on the guest Wi-Fi: guests are never dropped.
+    g=" $(guest_macs | sort -u | tr '\n' ' ') "
+    drop="$(cat "$RUN/home_drop" 2>/dev/null)"
+    for m in $conn; do drop="$drop $m"; done
+    keep=""; for m in $drop; do
+        home_listed "$m" && continue
+        case "$g" in *" $m "*) continue ;; esac
+        case " $keep " in *" $m "*) ;; *) keep="$keep $m" ;; esac
+    done
+    drop="$(echo $keep)"; echo "$drop" > "$RUN/home_drop"
+    for t in "$IPT" "$IPT6"; do
+        $t -t raw -N $CH_HOME 2>/dev/null
+        $t -t raw -C PREROUTING -i "$LANBR" -j $CH_HOME 2>/dev/null || $t -t raw -I PREROUTING 1 -i "$LANBR" -j $CH_HOME
+        w="$(echo $drop | tr ' ' '\n' | tr a-f A-F | sort | tr '\n' ' ')"
+        h="$($t -t raw -S $CH_HOME 2>/dev/null | sed -n 's/.*--mac-source \([^ ]*\).*/\1/p' | tr a-f A-F | sort | tr '\n' ' ')"
+        [ "$w" = "$h" ] && continue
+        $t -t raw -F $CH_HOME
+        for m in $drop; do $t -t raw -A $CH_HOME -m mac --mac-source "$m" -j DROP; done
+        [ "$t" = "$IPT" ] && [ -n "$drop" ] && log "home network: dropping unlisted device(s) $drop"
+        flush=1
+    done
+    # Accelerated (Broadcom flow cache) connections skip netfilter: drop them so the
+    # new rules apply to connections already open.
+    [ -n "$flush" ] && command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+    flush=""
+}
+# Change the list or settings under the run lock, so the watcher and the dashboard
+# never write from stale copies. home_edit <add|remove|keep|unkeep> <mac>
+home_edit() {
+    mac="$(echo "$2" | tr A-F- a-f:)"
+    echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "iot.sh: bad MAC '$2'" >&2; return 1; }
+    home_load; a=""; k=""
+    for m in $H_ALLOW; do [ "$m" = "$mac" ] || a="$a $m"; done
+    for m in $H_KEEP; do [ "$m" = "$mac" ] || k="$k $m"; done
+    was_keep=0; case " $H_KEEP " in *" $mac "*) was_keep=1 ;; esac
+    case "$1" in
+        add) a="$a $mac"; [ "$was_keep" = 1 ] && k="$k $mac" ;;
+        keep) a="$a $mac"; k="$k $mac" ;;
+        unkeep) a="$a $mac" ;;
+        remove) ;;
+        *) echo "iot.sh: home-allow add|remove|keep|unkeep <mac>" >&2; return 1 ;;
+    esac
+    if [ "$1" = remove ] && [ "$H_LOCK" = 1 ] && [ -z "$(echo $a $k)" ]; then
+        echo "iot.sh: that is the last device on the list; turn the lock off instead" >&2; return 1
+    fi
+    $UCI set "$SEC.iot_home_allow=$(echo $a)"; $UCI set "$SEC.iot_home_keep=$(echo $k)"
+    case "$1" in add|keep|remove) sed_seen_del "$mac" ;; esac
+    commit_cfg >/dev/null
+    log "home allow list: $1 $mac"
+}
+home_set() {   # home_set <lock|expire> <value>
+    home_load
+    case "$1" in
+        lock) case "$2" in 0|1) ;; *) return 1 ;; esac
+              if [ "$2" = 1 ] && [ -z "$(echo $H_ALLOW $H_KEEP)" ]; then echo "iot.sh: the allow list is empty" >&2; return 1; fi ;;
+        expire) case "$2" in ''|*[!0-9]*) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
+    $UCI set "$SEC.iot_home_$1=$2" && commit_cfg >/dev/null
+    log "home allow list: $1 = $2"
+}
+# ------------------------------------------------------------- join-home page
+# A device on the home allow list that connects to the guest Wi-Fi gets no internet
+# there: its web requests go to a page on the router with the home Wi-Fi name,
+# password and a QR code. It ends by itself once the device leaves the guest Wi-Fi.
+# The standard captive-portal way, for those devices only:
+#   - DNS (udp 53, redirected to PORTAL_DNS) answers every name with the router's
+#     IPv4 address and no IPv6 answers; DNS over IPv6 to the router is refused, so
+#     the phone falls back to IPv4;
+#   - HTTP (tcp 80, redirected to PORTAL_PORT) gets "302 Found" to the page, so the
+#     phone's captive-network check (captive.apple.com, connectivitycheck...) fails
+#     and it opens its sign-in sheet;
+#   - HTTPS to the router is reset at once (no stock-admin certificate warning);
+#   - everything else is rejected (no internet), IPv4 and IPv6.
+# One small Lua process serves both (a second uhttpd can't start: TP-Link's build
+# registers a fixed ubus object). Only those devices can reach it: the page shows
+# the home password.
+CH_PORTAL=AX10_PORTAL; CH_PORTAL_IN=AX10_PORTAL_IN; CH_PORTAL_NAT=AX10_PORTAL_NAT
+PORTAL_PORT="${PORTAL_PORT:-8081}"
+PORTAL_DNS="${PORTAL_DNS:-5354}"
+CH_PORTAL_IN6=AX10_PORTAL_IN6
+LUA="${LUA:-/usr/bin/lua}"
+PORTAL="$RUN/portal"
+html_esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'"; s/'/\\&#39;/g"; }
+portal_page() {
+    sec="$(cfg home_wifi wl03)"
+    ssid="$($UCI -q get "wireless.$sec.ssid")"; key="$($UCI -q get "wireless.$sec.psk_key")"
+    [ -n "$ssid" ] || { log "join-home page: no SSID in wireless.$sec"; return 1; }
+    mkdir -p "$PORTAL"
+    for f in jquery.min.js jquery.qrcode.min.js; do [ -f "$PORTAL/$f" ] || cp "$WWW/js/libs/$f" "$PORTAL/$f" 2>/dev/null; done
+    es="$(printf '%s' "$ssid" | html_esc)"; ek="$(printf '%s' "$key" | html_esc)"
+    cat > "$PORTAL/index.html.new" <<EOF
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Join the home Wi-Fi</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--ink:#14181f;--muted:#5b6472;--line:#e3e6eb;--accent:#0f9d8a}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1014;--card:#161a20;--ink:#eef1f5;--muted:#9aa3b0;--line:#262c35;--accent:#2dd4bf}}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,system-ui,sans-serif}
+main{max-width:420px;margin:0 auto;padding:28px 16px}
+h1{font-size:24px;margin:0 0 6px}p{color:var(--muted);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+.k{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.v{display:flex;align-items:center;gap:10px;font:600 20px/1.3 ui-monospace,Menlo,monospace;word-break:break-all;margin-top:2px}
+button{margin-left:auto;flex:none;border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:9px;padding:6px 12px;font:600 14px system-ui}
+#qr{display:flex;justify-content:center;padding:8px 0}#qr canvas{background:#fff;padding:10px;border-radius:10px}
+ol{color:var(--muted);padding-left:20px;margin:0}
+</style></head><body><main>
+<h1>You're on the home Wi-Fi list</h1>
+<p>This device can now use the home network, so the guest Wi-Fi no longer gives it internet. Switch networks:</p>
+<div class="card"><div class="k">Network</div><div class="v"><span id="s">$es</span></div></div>
+<div class="card"><div class="k">Password</div><div class="v"><span id="p">$ek</span><button id="c" type="button">Copy</button></div></div>
+<div class="card"><ol><li>Copy the password.</li><li>Open Settings, then Wi-Fi.</li><li>Choose <b>$es</b> and paste the password.</li></ol></div>
+<div class="card"><div class="k">Or scan from another phone</div><div id="qr"></div></div>
+</main>
+<script src="/jquery.min.js"></script><script src="/jquery.qrcode.min.js"></script>
+<script>
+var s=document.getElementById("s").textContent,p=document.getElementById("p").textContent;
+var q=function(x){return x.replace(/([\\\;,:"])/g,"\\\\\$1")};
+try{jQuery("#qr").qrcode({width:200,height:200,text:unescape(encodeURIComponent("WIFI:T:WPA;S:"+q(s)+";P:"+q(p)+";;"))})}catch(e){document.getElementById("qr").textContent="QR code unavailable."}
+document.getElementById("c").onclick=function(){var b=this;var done=function(){b.textContent="Copied"};
+if(navigator.clipboard){navigator.clipboard.writeText(p).then(done,function(){sel()})}else sel();
+function sel(){var r=document.createRange();r.selectNodeContents(document.getElementById("p"));var w=getSelection();w.removeAllRanges();w.addRange(r);try{document.execCommand("copy");done()}catch(e){}}};
+</script></body></html>
+EOF
+    mv "$PORTAL/index.html.new" "$PORTAL/index.html"
+    cat > "$PORTAL/server.lua" <<'EOF'
+-- server.lua <root> <addr> <http port> <dns port>: captive-portal DNS + HTTP.
+local socket = require "socket"
+local root, addr, hport, dport = arg[1], arg[2], tonumber(arg[3]), tonumber(arg[4])
+local home = "http://" .. addr .. ":" .. hport .. "/"
+local http = assert(socket.bind(addr, hport))
+local dns = assert(socket.udp()); assert(dns:setsockname(addr, dport))
+http:settimeout(0); dns:settimeout(0)
+local ip4 = string.char(addr:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$"))
+local function read(p) local f = io.open(p, "rb"); if not f then return nil end; local d = f:read("*a"); f:close(); return d end
+-- Every A query gets the router; other types get an empty answer (so no IPv6).
+local function answer(q)
+    if #q < 17 then return nil end
+    local i = 13
+    while i <= #q do local n = q:byte(i); if n == 0 then break end; i = i + n + 1 end
+    if i + 4 > #q then return nil end
+    local qtype = q:byte(i + 1) * 256 + q:byte(i + 2)
+    local question = q:sub(13, i + 4)
+    local a = qtype == 1
+    local r = q:sub(1, 2) .. "\129\128\0\1\0" .. (a and "\1" or "\0") .. "\0\0\0\0" .. question
+    if a then r = r .. "\192\12\0\1\0\1\0\0\0\10\0\4" .. ip4 end
+    return r
+end
+local function serve(c)
+    c:settimeout(5)
+    local path = (c:receive("*l") or ""):match("^%u+%s+(%S+)") or "/"
+    local host = ""
+    repeat local h = c:receive("*l"); if h then host = h:match("^[Hh]ost:%s*(%S+)") or host end until not h or h == ""
+    local ours = host == addr .. ":" .. hport
+    local js = ours and path:match("^/(jquery[%w.]*%.js)$")
+    local body, head
+    if js then body = read(root .. "/" .. js) or ""; head = "200 OK\r\nContent-Type: application/javascript"
+    elseif ours then body = read(root .. "/index.html") or ""; head = "200 OK\r\nContent-Type: text/html; charset=utf-8"
+    else body = '<a href="' .. home .. '">Join the home Wi-Fi</a>'; head = "302 Found\r\nLocation: " .. home .. "\r\nContent-Type: text/html" end
+    c:send("HTTP/1.0 " .. head .. "\r\nCache-Control: no-store\r\nContent-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
+    c:close()
+end
+while true do
+    local ready = socket.select({ http, dns }, nil, 60)
+    for _, s in ipairs(ready or {}) do
+        if s == dns then
+            local q, ip, port = dns:receivefrom()
+            local r = q and answer(q)
+            if r then dns:sendto(r, ip, port) end
+        else
+            local c = http:accept()
+            if c then pcall(serve, c) end
+        end
+    end
+end
+EOF
+}
+portal_running() { p="$(cat "$RUN/portal.pid" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+portal_clear() {
+    while $IPT -D FORWARD -i "$LANBR" -j $CH_PORTAL 2>/dev/null; do :; done
+    while $IPT6 -D FORWARD -i "$LANBR" -j $CH_PORTAL 2>/dev/null; do :; done
+    while $IPT -t nat -D PREROUTING -i "$LANBR" -j $CH_PORTAL_NAT 2>/dev/null; do :; done
+    while $IPT -D INPUT -i "$LANBR" -j $CH_PORTAL_IN 2>/dev/null; do :; done
+    while $IPT6 -D INPUT -i "$LANBR" -j $CH_PORTAL_IN6 2>/dev/null; do :; done
+    $IPT -F $CH_PORTAL 2>/dev/null; $IPT -X $CH_PORTAL 2>/dev/null
+    $IPT6 -F $CH_PORTAL 2>/dev/null; $IPT6 -X $CH_PORTAL 2>/dev/null
+    $IPT -t nat -F $CH_PORTAL_NAT 2>/dev/null; $IPT -t nat -X $CH_PORTAL_NAT 2>/dev/null
+    $IPT -F $CH_PORTAL_IN 2>/dev/null; $IPT -X $CH_PORTAL_IN 2>/dev/null
+    $IPT6 -F $CH_PORTAL_IN6 2>/dev/null; $IPT6 -X $CH_PORTAL_IN6 2>/dev/null
+    portal_running && kill "$(cat "$RUN/portal.pid")" 2>/dev/null
+    rm -f "$RUN/portal.pid"
+}
+portal_sync() {
+    pm=""
+    if [ "$H_LOCK" = 1 ]; then
+        g=" $(guest_macs | sort -u | tr '\n' ' ') "
+        for m in $H_ALLOW $H_KEEP; do
+            case "$g" in *" $m "*) case " $pm " in *" $m "*) ;; *) pm="$pm $m" ;; esac ;; esac
+        done
+    fi
+    pm="$(echo $pm)"
+    if [ -z "$pm" ]; then
+        [ -s "$RUN/portal_macs" ] && log "join-home page off"
+        [ -e "$RUN/portal_macs" ] && { portal_clear; rm -f "$RUN/portal_macs"; }
+        return 0
+    fi
+    if [ "$pm" = "$(cat "$RUN/portal_macs" 2>/dev/null)" ] && portal_running &&
+       $IPT -C FORWARD -i "$LANBR" -j $CH_PORTAL 2>/dev/null &&
+       $IPT -t nat -C PREROUTING -i "$LANBR" -j $CH_PORTAL_NAT 2>/dev/null; then return 0; fi
+    portal_clear
+    portal_page || return 0
+    lan="$($UCI -q get network.lan.ipaddr)"; lan="${lan:-192.168.0.1}"
+    $IPT -N $CH_PORTAL 2>/dev/null; $IPT6 -N $CH_PORTAL 2>/dev/null
+    $IPT -t nat -N $CH_PORTAL_NAT 2>/dev/null; $IPT -N $CH_PORTAL_IN 2>/dev/null; $IPT6 -N $CH_PORTAL_IN6 2>/dev/null
+    for m in $pm; do
+        $IPT -A $CH_PORTAL -m mac --mac-source "$m" -p tcp -j REJECT --reject-with tcp-reset
+        $IPT -A $CH_PORTAL -m mac --mac-source "$m" -j REJECT
+        $IPT6 -A $CH_PORTAL -m mac --mac-source "$m" -j REJECT
+        $IPT -t nat -A $CH_PORTAL_NAT -m mac --mac-source "$m" -p tcp --dport 80 -j DNAT --to-destination "$lan:$PORTAL_PORT"
+        $IPT -t nat -A $CH_PORTAL_NAT -m mac --mac-source "$m" -p udp --dport 53 -j DNAT --to-destination "$lan:$PORTAL_DNS"
+        $IPT -A $CH_PORTAL_IN -m mac --mac-source "$m" -p tcp --dport "$PORTAL_PORT" -j ACCEPT
+        $IPT -A $CH_PORTAL_IN -m mac --mac-source "$m" -p udp --dport "$PORTAL_DNS" -j ACCEPT
+        $IPT -A $CH_PORTAL_IN -m mac --mac-source "$m" -p tcp --dport 53 -j REJECT --reject-with tcp-reset
+        $IPT -A $CH_PORTAL_IN -m mac --mac-source "$m" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+        $IPT6 -A $CH_PORTAL_IN6 -m mac --mac-source "$m" -p udp --dport 53 -j REJECT
+        $IPT6 -A $CH_PORTAL_IN6 -m mac --mac-source "$m" -p tcp -j REJECT --reject-with tcp-reset
+    done
+    $IPT -A $CH_PORTAL_IN -p tcp --dport "$PORTAL_PORT" -j DROP
+    $IPT -A $CH_PORTAL_IN -p udp --dport "$PORTAL_DNS" -j DROP
+    $IPT -I FORWARD 1 -i "$LANBR" -j $CH_PORTAL; $IPT6 -I FORWARD 1 -i "$LANBR" -j $CH_PORTAL
+    $IPT -t nat -I PREROUTING 1 -i "$LANBR" -j $CH_PORTAL_NAT
+    $IPT -I INPUT 1 -i "$LANBR" -j $CH_PORTAL_IN; $IPT6 -I INPUT 1 -i "$LANBR" -j $CH_PORTAL_IN6
+    $LUA "$PORTAL/server.lua" "$PORTAL" "$lan" "$PORTAL_PORT" "$PORTAL_DNS" >/dev/null 2>&1 &
+    echo $! > "$RUN/portal.pid"
+    echo "$pm" > "$RUN/portal_macs"
+    command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+    log "guest Wi-Fi: showing the join-home page to $pm"
+}
+watcher_wanted() { [ "$(cfg enabled 0)" = 1 ] || [ "$(cfg home_lock 0)" = 1 ]; }
+
+# TP-Link's Access Control in allow-list mode is meant for the home Wi-Fi, but it
+# catches guests twice:
+#   - its Wi-Fi MAC filter goes on the guest interfaces too, so strangers can't join;
+#   - its firewall chain (raw table, access_control) drops every MAC not on the list.
+#     With guest_enable=off it means to let guests through with "-m physdev
+#     --physdev-in <guest if>" rules, but this kernel has no physdev match, so those
+#     rules fail silently and guests get no address and no internet.
+# Keep the guest interfaces open, and accept each connected guest by MAC in our own
+# chain at the top of TP-Link's (rebuilt on every firewall reload; checked every run).
+# Block-list mode is left as TP-Link has it.
+GUEST_AC=ax10_guest_ac
+guest_wifi_open() {
+    on=0
+    [ "$($UCI -q get access_control.settings.enable)" = on ] &&
+        [ "$($UCI -q get access_control.settings.access_mode)" = white ] && on=1
+    if [ "$on" = 1 ]; then
+        for i in $(guest_ifs); do
+            [ "$($WL -i "$i" macmode 2>/dev/null)" = 0 ] && continue
+            $WL -i "$i" macmode 0 && log "kept the guest Wi-Fi ($i) open: TP-Link's allow list is for the home Wi-Fi"
+        done
+    fi
+    macs="$(guest_macs | sort -u | tr '\n' ' ')"
+    for t in "$IPT" "$IPT6"; do
+        $t -t raw -S access_control >/dev/null 2>&1 || continue      # Access Control off: no chain
+        $t -t raw -N "$GUEST_AC" 2>/dev/null
+        if [ "$on" != 1 ]; then
+            $t -t raw -D access_control -j "$GUEST_AC" 2>/dev/null
+            $t -t raw -F "$GUEST_AC"; continue
+        fi
+        $t -t raw -C access_control -j "$GUEST_AC" 2>/dev/null || $t -t raw -I access_control 1 -j "$GUEST_AC"
+        want="$(echo $macs | tr ' ' '\n' | tr a-f A-F | sort | tr '\n' ' ')"
+        have="$($t -t raw -S "$GUEST_AC" 2>/dev/null | sed -n 's/.*--mac-source \([^ ]*\).*/\1/p' | tr a-f A-F | sort | tr '\n' ' ')"
+        [ "$want" = "$have" ] && continue
+        $t -t raw -F "$GUEST_AC"
+        for m in $macs; do $t -t raw -A "$GUEST_AC" -m mac --mac-source "$m" -j ACCEPT; done
+    done
+}
 dhcp_block() {
     echo "$MARK_BEGIN"
     echo "dhcp-range=set:iot,$START,$END,255.255.255.0,12h"
@@ -611,7 +1063,10 @@ apply() {
     wds_guard
     brfilter_sync
     firewall_ok || { firewall; log "firewall (re)applied"; }
+    autopin
     dhcp_sync
+    lock_sync
+    guest_wifi_open
 }
 
 stop() {
@@ -778,6 +1233,7 @@ status() {
     echo "subnet:    $GW/24  dhcp $START-$END  dns $DNS"
     echo "no-inet:   ${NOINET:-none}"
     echo "static:    ${STATIC:-none}"
+    echo "lock:      $([ "$(cfg lock 0)" = 1 ] && { lock_open && echo "on, open to new devices" || echo "on ($($WL -i "$VIF" macmode 2>/dev/null) = allow list)"; } || echo off)"
     echo "allow-lan: ${ALLOW_LAN:-none}"
     echo "home->iot: $LAN_MODE$([ "$LAN_MODE" = selected ] && echo " (${LAN_ALLOW:-nobody})")"
     firewall_ok && echo "firewall:  ok" || echo "firewall:  MISSING/outdated"
@@ -790,7 +1246,7 @@ status() {
 
 # Commands that change the router take the lock for their whole run.
 case "$1" in
-    apply|start|stop|guest|shape|ui|ui-remove|boot)
+    apply|start|stop|guest|shape|open|close|forget|home|home-open|home-close|home-allow|home-set|ui|ui-remove|boot)
         lock || { log "$1: another iot.sh run still holds the lock; gave up after ${LOCK_WAIT}s"
                   echo "iot.sh: another run is in progress; try again" >&2; exit 1; }
         trap unlock EXIT ;;
@@ -801,8 +1257,11 @@ case "$1" in
     watch)
         while :; do
             if lock 5; then
-                apply >/dev/null 2>&1
-                shape_sync >/dev/null 2>&1
+                if [ "$(cfg enabled 0)" = 1 ]; then
+                    apply >/dev/null 2>&1
+                    shape_sync >/dev/null 2>&1
+                fi
+                home_sync >/dev/null 2>&1
                 unlock
             fi
             lifeline_guard
@@ -811,8 +1270,50 @@ case "$1" in
         done ;;
     start)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
-        apply; shape_sync; inittab_add; watcher_restart; log "watcher registered" ;;
-    stop) stop; shape_clear; rm -f "$RUN/shape.sig" ;;
+        apply; shape_sync; home_sync; inittab_add; watcher_restart; log "watcher registered" ;;
+    stop)
+        stop; shape_clear; rm -f "$RUN/shape.sig"
+        # The home allow list is not part of the IoT network: keep it (and a watcher) running.
+        if [ "$(cfg home_lock 0)" = 1 ]; then home_sync; inittab_add; log "watcher kept for the home allow list"
+        else home_load; home_unlock; portal_clear; rm -f "$RUN/portal_macs"; fi ;;
+    open|close)
+        load; mkdir -p "$RUN"
+        if [ "$1" = open ]; then
+            s="${2:-600}"; case "$s" in ''|*[!0-9]*) s=600 ;; esac
+            echo $(( $(now_s) + s )) > "$RUN/open_until"
+            log "new IoT devices allowed for ${s}s"
+        else rm -f "$RUN/open_until"; fi
+        lock_sync ;;
+    home-open|home-close)
+        mkdir -p "$RUN"
+        if [ "$1" = home-open ]; then
+            s="${2:-600}"; case "$s" in ''|*[!0-9]*) s=600 ;; esac
+            echo $(( $(now_s) + s )) > "$RUN/home_open_until"; log "new home devices allowed for ${s}s"
+        else rm -f "$RUN/home_open_until"; fi
+        home_sync ;;
+    home-allow) home_edit "$2" "$3" || exit 1; home_sync ;;
+    forget)   # forget <mac>: drop an IoT device's fixed address; autopin won't re-pin it
+        load; mac="$(echo "$2" | tr A-F- a-f:)"
+        echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "iot.sh: bad MAC '$2'" >&2; exit 1; }
+        st=""; for e in $STATIC; do [ "$(echo "${e%%,*}" | tr A-F a-f)" = "$mac" ] || st="$st $e"; done
+        fg="$(cfg forget '' | tr A-F a-f)"; case " $fg " in *" $mac "*) ;; *) fg="$fg $mac" ;; esac
+        $UCI set "$SEC.iot_static=$(echo $st)"; $UCI set "$SEC.iot_forget=$(echo $fg)"
+        commit_cfg >/dev/null; log "forgot IoT device $mac"
+        if [ "$(cfg enabled 0)" = 1 ]; then apply; fi ;;
+    home-set)
+        home_set "$2" "$3" || exit 1
+        home_sync
+        if watcher_wanted; then grep -q "$TAG" "$INITTAB" 2>/dev/null || { inittab_add; log "watcher registered (home allow list)"; }
+        else inittab_del; fi ;;
+    home)
+        home_sync
+        echo "home lock: $([ "$H_LOCK" = 1 ] && { home_open_now && echo "on, open to new devices" || echo on; } || echo off)"
+        echo "radios:    $H_IFS"
+        echo "allowed:   $H_ALLOW"
+        echo "always:    ${H_KEEP:-none}"
+        echo "dropped:   $(cat "$RUN/home_drop" 2>/dev/null)"
+        echo "join page: $(cat "$RUN/portal_macs" 2>/dev/null)$(portal_running && echo " (server up)")"
+        echo "expire:    $([ "$H_EXPIRE" -gt 0 ] 2>/dev/null && echo "$H_EXPIRE days" || echo off)" ;;
     guest|shape)
         shape_sync; shape_load
         echo "whole connection: $([ "$WS_ON" = 1 ] && echo "${WS_DOWN}/${WS_UP} Mbps" || echo off)"
@@ -826,7 +1327,8 @@ case "$1" in
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
         # In-process, not "$0 start": the fetched file is not executable.
-        [ "$(cfg enabled 0)" = 1 ] && { apply; shape_sync; inittab_add; log "watcher registered"; }
+        if [ "$(cfg enabled 0)" = 1 ]; then apply; shape_sync; home_sync; inittab_add; log "watcher registered"
+        elif [ "$(cfg home_lock 0)" = 1 ]; then home_sync; inittab_add; log "watcher registered (home allow list)"; fi
         lifeline_guard ;;
     status) status ;;
     set)
@@ -835,7 +1337,6 @@ case "$1" in
         # /etc is ramfs: plain `uci commit` is lost on reboot. TP-Link's uci_commit_flash
         # goes through its patched luci.model.uci, which also writes the config to flash.
         $UCI set "$SEC.iot_$k=$3" || exit 1
-        if [ -x "${COMMIT_FLASH:-/sbin/uci_commit_flash}" ]; then "${COMMIT_FLASH:-/sbin/uci_commit_flash}" openvpn
-        else $UCI commit openvpn; fi && echo "saved iot_$k" ;;
-    *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+        commit_cfg && echo "saved iot_$k" ;;
+    *) sed -n '2,/^# ====/p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

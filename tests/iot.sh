@@ -32,7 +32,9 @@ case "\$1" in
   ssid) if [ -n "\$2" ]; then echo "\$2" > "$T/run/ssid.\$i"; else echo "Current SSID: \"\$(cat "$T/run/ssid.\$i" 2>/dev/null)\""; fi ;;
   bss) if [ -n "\$2" ]; then echo "\$2" > "$T/run/bss.\$i"; else cat "$T/run/bss.\$i" 2>/dev/null || echo down; fi ;;
   dwds) if [ -n "\$2" ]; then echo "\$2" > "$T/dwds"; else cat "$T/dwds" 2>/dev/null || echo 0; fi ;;
-  assoclist) if [ "\$i" = wl1.3 ]; then echo "assoclist AA:BB:CC:00:00:08"; echo "assoclist AA:BB:CC:00:00:09"; fi ;;
+  assoclist) if [ "\$i" = wl1.3 ]; then echo "assoclist AA:BB:CC:00:00:08"; echo "assoclist AA:BB:CC:00:00:09"; fi
+             if [ "\$i" = wl1.1 ]; then echo "assoclist AA:BB:CC:00:00:20"; echo "assoclist AA:BB:CC:00:00:21"; fi ;;
+  macmode) if [ -n "\$2" ]; then echo "\$2" > "$T/run/macmode.\$i"; else cat "$T/run/macmode.\$i" 2>/dev/null; fi ;;
   map) if [ -n "\$2" ]; then [ "\$2" = 0 ] && echo "0x0:" > "$T/map" || echo "0x\$2:" > "$T/map"; else cat "$T/map" 2>/dev/null || echo "0x0:"; fi ;;
 esac
 EOF
@@ -122,7 +124,7 @@ chmod +x "$T/bin/"*
 # iot <uci stub> <script> <args...>: run iot.sh with every host touch-point stubbed.
 iot() {
   u="$1"; s="$2"; shift 2
-  env UCI="$u" WL="$T/bin/wl" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
+  env UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
       IPT="$T/bin/iptables" IPT6="$T/bin/ip6tables" TC="$T/bin/tc" \
       MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
@@ -275,6 +277,63 @@ grep -q "ax10-iot-watch" "$T/inittab" || fail "boot did not register the watcher
 # The lifeline starts in the background; give it up to 5 s.
 i=0; while [ $i -lt 50 ] && ! grep -qF "dropbear -p" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
 has "dropbear -p"
+
+# --- known devices: new IoT leases are pinned; the lock lets only pinned devices join.
+cat > "$T/bin/uci4" <<EOF
+#!/bin/sh
+echo "uci \$*" >> "$T/calls"
+case "\$*" in
+  "set "*) exit 0 ;;
+  *iot_lock*) cat "$T/lock_on" 2>/dev/null || echo 0 ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci4"
+printf '%s\n' "1000 AA:BB:CC:DD:EE:05 192.168.50.150 cam *" "1000 aa:bb:cc:dd:ee:01 192.168.50.10 logger *" \
+  "1000 aa:bb:cc:dd:ee:07 192.168.0.50 laptop *" > "$T/leases"
+: > "$T/calls"
+iot "$T/bin/uci4" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+has "uci set openvpn.archer_boot.iot_static=aa:bb:cc:dd:ee:01,192.168.50.10 aa:bb:cc:dd:ee:05,192.168.50.150"
+grep -q "dhcp-host=aa:bb:cc:dd:ee:05,192.168.50.150" "$T/dnsmasq.conf" || fail "new fixed address not in dnsmasq.conf"
+grep -q "aa:bb:cc:dd:ee:07" "$T/calls" && fail "home device pinned on the IoT network"
+grep -q "macmode 2" "$T/calls" && fail "locked although the lock is off"
+# Lock on: allow list of the known devices, allow-only mode.
+echo 1 > "$T/lock_on"; : > "$T/calls"
+iot "$T/bin/uci4" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+has "wl -i wl1.4 mac AA:BB:CC:DD:EE:01 AA:BB:CC:DD:EE:05"
+has "wl -i wl1.4 macmode 2"
+# The "allow new devices" window lifts it.
+: > "$T/calls"
+iot "$T/bin/uci4" "$ROOT/iot.sh" open 600 >/dev/null 2>&1 || true
+[ -s "$T/run/open_until" ] || fail "open did not record its window"
+grep -q "macmode 2" "$T/calls" && fail "locked while open to new devices"
+rm -f "$T/lock_on" "$T/run/open_until"; : > "$T/leases"
+# TP-Link's allow list must not close the guest Wi-Fi.
+cat > "$T/bin/uci5" <<EOF
+#!/bin/sh
+case "\$*" in
+  *access_control.settings.enable*) echo on ;;
+  *access_control.settings.access_mode*) cat "$T/ac_mode" ;;
+  "show wireless") echo "wireless.guest2g.guest='on'" ;;
+  *wireless.guest2g.ifname*) echo "wl1.3" ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci5"; mkdir -p "$T/net/wl1.3"
+echo white > "$T/ac_mode"; : > "$T/calls"
+iot "$T/bin/uci5" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+has "wl -i wl1.3 macmode 0"
+# ...nor its firewall chain: connected guests are accepted by MAC, IPv4 and IPv6.
+has "iptables -t raw -I access_control 1 -j ax10_guest_ac"
+has "iptables -t raw -A ax10_guest_ac -m mac --mac-source aa:bb:cc:00:00:08 -j ACCEPT"
+has "ip6tables -t raw -A ax10_guest_ac -m mac --mac-source aa:bb:cc:00:00:09 -j ACCEPT"
+: > "$T/calls"
+iot "$T/bin/uci5" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+grep -q "raw -F ax10_guest_ac" "$T/calls" && fail "guest accept rules rebuilt with no change"
+echo black > "$T/ac_mode"; : > "$T/calls"
+iot "$T/bin/uci5" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+grep -q "wl -i wl1.3 macmode 0" "$T/calls" && fail "guest Wi-Fi filter removed in block-list mode"
+has "iptables -t raw -D access_control -j ax10_guest_ac"
 
 # --- speed limits: guests, a per-device cap and a mesh guest, all matched by MAC.
 mkdir -p "$T/net/wl1.3"
@@ -439,5 +498,164 @@ last_ln="$(grep -n '^filter AX10_IOT_FWD ' "$T/rules" | tail -n1 | cut -d: -f1)"
 [ -n "$drop_ln" ] && [ "$drop_ln" -lt "$acc_ln" ] || fail "concurrent runs: drop not before accept"
 [ "$acc_ln" -eq "$last_ln" ] || fail "concurrent runs: final accept is not last"
 [ ! -e "$T/run/lock" ] || fail "lock left behind after concurrent runs"
+
+# --- home allow list: radios take listed MACs only, unlisted ones are kicked, and an
+# unlisted home client behind the satellite (04 in the client list) is dropped by MAC;
+# guests (06 behind the satellite, 08/09 on the guest radio) are left alone.
+mkdir -p "$T/net/wl1.1"; rm -f "$T/run/home_drop"
+cat > "$T/bin/uci6" <<EOF
+#!/bin/sh
+case "\$*" in
+  *iot_home_lock*) [ -f "$T/home_on" ] && echo 1 || echo 0 ;;
+  *iot_home_allow*) echo "aa:bb:cc:00:00:20" ;;
+  *iot_home_keep*) echo "aa:bb:cc:00:00:30" ;;
+  "show wireless") echo "wireless.guest2g.guest='on'" ;;
+  *wireless.guest2g.ifname*) echo "wl1.3" ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci6"
+: > "$T/home_on"; : > "$T/calls"
+iot "$T/bin/uci6" "$ROOT/iot.sh" home >/dev/null 2>&1 || true
+has "wl -i wl1.1 mac AA:BB:CC:00:00:20 AA:BB:CC:00:00:30"
+has "wl -i wl1.1 macmode 2"
+has "wl -i wl1.1 deauthenticate AA:BB:CC:00:00:21"
+grep -q "deauthenticate AA:BB:CC:00:00:20" "$T/calls" && fail "listed device kicked off the home Wi-Fi"
+has "iptables -t raw -I PREROUTING 1 -i br-lan -j AX10_HOME"
+has "iptables -t raw -A AX10_HOME -m mac --mac-source aa:bb:cc:00:00:04 -j DROP"
+has "ip6tables -t raw -A AX10_HOME -m mac --mac-source aa:bb:cc:00:00:04 -j DROP"
+grep -q "AX10_HOME -m mac --mac-source aa:bb:cc:00:00:0[689]" "$T/calls" && fail "guest dropped by the home allow list"
+grep -q "AX10_HOME -m mac --mac-source aa:bb:cc:00:00:20" "$T/calls" && fail "listed device dropped"
+# A device dropped earlier that moves to the guest Wi-Fi is let go.
+echo "aa:bb:cc:00:00:04 aa:bb:cc:00:00:08" > "$T/run/home_drop"; : > "$T/calls"
+iot "$T/bin/uci6" "$ROOT/iot.sh" home >/dev/null 2>&1 || true
+grep -q "aa:bb:cc:00:00:08" "$T/run/home_drop" && fail "device on the guest Wi-Fi still dropped"
+grep -q "aa:bb:cc:00:00:04" "$T/run/home_drop" || fail "unlisted home device no longer dropped"
+# Nothing changes on a second run.
+: > "$T/calls"
+iot "$T/bin/uci6" "$ROOT/iot.sh" home >/dev/null 2>&1 || true
+grep -q "raw -F AX10_HOME\|macmode 2" "$T/calls" && fail "home allow list rebuilt with no change"
+# Lock off: radios open, chain gone.
+rm -f "$T/home_on"; : > "$T/calls"
+iot "$T/bin/uci6" "$ROOT/iot.sh" home >/dev/null 2>&1 || true
+has "wl -i wl1.1 macmode 0"
+has "iptables -t raw -D PREROUTING -i br-lan -j AX10_HOME"
+
+# --- home allow list edits go through iot.sh (stateful uci: settings are really saved).
+mkdir -p "$T/u"; rm -f "$T/u/"* "$T/run/home_seen" "$T/run/home_drop"
+cat > "$T/bin/uci7" <<EOF
+#!/bin/sh
+case "\$*" in
+  "-q get openvpn.archer_boot.iot_home_"*|"-q get openvpn.archer_boot.iot_enabled") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
+  "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
+  "set openvpn.archer_boot.iot_"*) kv="\${2#openvpn.archer_boot.}"; echo "\${kv#*=}" > "$T/u/\${kv%%=*}" ;;
+  "commit openvpn") ;;
+  "show wireless") echo "wireless.guest2g.guest='on'" ;;
+  *wireless.guest2g.ifname*) echo "wl1.3" ;;
+  *wireless.wl03.ssid*) echo "home net" ;;
+  *wireless.wl03.psk_key*) echo 'pa<ss&"w0rd' ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci7"
+cat > "$T/bin/lua" <<EOF
+#!/bin/sh
+echo "lua \$*" >> "$T/calls"
+exec sleep 30
+EOF
+chmod +x "$T/bin/lua"; mkdir -p "$T/www/js/libs"; : > "$T/www/js/libs/jquery.min.js"; : > "$T/www/js/libs/jquery.qrcode.min.js"
+h() { iot "$T/bin/uci7" "$ROOT/iot.sh" "$@" >/dev/null 2>&1; }
+# The lock can't go on with an empty list.
+h home-set lock 1 && fail "lock turned on with an empty allow list"
+# An empty list with the window open enrolls the home clients on the radios (not guests).
+echo 1 > "$T/u/iot_home_lock"; h home-open 600
+grep -q "aa:bb:cc:00:00:20" "$T/u/iot_home_allow" || fail "open window did not enroll a home device into an empty list"
+grep -q "aa:bb:cc:00:00:08" "$T/u/iot_home_allow" && fail "guest enrolled into the home allow list"
+h home-close
+# add / keep / unkeep / remove
+h home-allow add AA-BB-CC-00-00-40 || fail "home-allow add failed"
+grep -q "aa:bb:cc:00:00:40" "$T/u/iot_home_allow" || fail "add did not save"
+h home-allow keep aa:bb:cc:00:00:40; grep -q "aa:bb:cc:00:00:40" "$T/u/iot_home_keep" || fail "keep did not save"
+h home-allow unkeep aa:bb:cc:00:00:40
+grep -q "aa:bb:cc:00:00:40" "$T/u/iot_home_keep" && fail "unkeep left it pinned"
+grep -q "aa:bb:cc:00:00:40" "$T/u/iot_home_allow" || fail "unkeep took it off the list"
+h home-allow remove aa:bb:cc:00:00:40; grep -q "aa:bb:cc:00:00:40" "$T/u/iot_home_allow" && fail "remove did not save"
+h home-allow add "bad;rm" && fail "bad MAC accepted"
+# Re-adding an expired device starts a fresh clock instead of expiring it again.
+echo 1 > "$T/u/iot_home_expire"
+echo "aa:bb:cc:00:00:50 1000000000" >> "$T/run/home_seen"
+h home-allow add aa:bb:cc:00:00:50
+grep -q "aa:bb:cc:00:00:50" "$T/u/iot_home_allow" || fail "re-added device expired again at once"
+# Expiry never empties the list.
+echo "aa:bb:cc:00:00:60" > "$T/u/iot_home_allow"; : > "$T/u/iot_home_keep"
+echo "aa:bb:cc:00:00:60 1000000000" > "$T/run/home_seen"; h home
+[ -n "$(cat "$T/u/iot_home_allow")" ] || fail "expiry emptied the allow list"
+echo 0 > "$T/u/iot_home_expire"
+# The last device can't be removed while the lock is on.
+h home-allow remove aa:bb:cc:00:00:60 && fail "removed the last device with the lock on"
+# Turning the IoT network off keeps the home lock and its watcher.
+: > "$T/inittab"; : > "$T/calls"; h stop
+grep -q "ax10-iot-watch" "$T/inittab" || fail "stop removed the watcher the home lock needs"
+grep -q "raw -D PREROUTING -i br-lan -j AX10_HOME" "$T/calls" && fail "stop tore down the home lock"
+echo 0 > "$T/u/iot_home_lock"; h home-set lock 0
+grep -q "ax10-iot-watch" "$T/inittab" && fail "watcher left running with nothing to watch"
+
+# A re-added device's old last-seen time is gone from the saved copy too (reboot-safe).
+echo "aa:bb:cc:00:00:70=1000000000 aa:bb:cc:00:00:20=1000000001" > "$T/u/iot_home_seen"; rm -f "$T/run/home_seen"
+h home-allow add aa:bb:cc:00:00:70
+grep -q "aa:bb:cc:00:00:70" "$T/u/iot_home_seen" && fail "old last-seen time kept in the saved copy"
+grep -q "aa:bb:cc:00:00:20" "$T/u/iot_home_seen" || fail "other devices' last-seen times lost"
+h home-allow remove aa:bb:cc:00:00:70
+# A radio filter we didn't set (TP-Link deny mode 1) survives stop with both features off.
+echo 0 > "$T/u/iot_home_lock"; rm -f "$T/run/home_owned"; echo 1 > "$T/run/macmode.wl1.1"; : > "$T/calls"; h stop
+grep -q "wl -i wl1.1 macmode 0" "$T/calls" && fail "stop reset a radio filter it did not set"
+rm -f "$T/run/macmode.wl1.1"
+# forget: drops the pin and records it, under the lock.
+echo "aa:bb:cc:dd:ee:01,192.168.50.10 aa:bb:cc:dd:ee:05,192.168.50.150" > "$T/u/iot_static"; : > "$T/u/iot_forget"
+h forget AA:BB:CC:DD:EE:05 || fail "forget failed"
+grep -q "ee:05" "$T/u/iot_static" && fail "forget kept the fixed address"
+grep -q "aa:bb:cc:dd:ee:01" "$T/u/iot_static" || fail "forget dropped another device"
+grep -q "aa:bb:cc:dd:ee:05" "$T/u/iot_forget" || fail "forget not recorded"
+rm -f "$T/u/iot_static" "$T/u/iot_forget"
+
+# --- join-home page: a listed device on the guest Wi-Fi (08) gets the page, not internet.
+echo 1 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:20 aa:bb:cc:00:00:08" > "$T/u/iot_home_allow"; : > "$T/calls"
+h home
+has "iptables -t nat -A AX10_PORTAL_NAT -m mac --mac-source aa:bb:cc:00:00:08 -p tcp --dport 80 -j DNAT --to-destination 192.168.0.1:8081"
+has "iptables -A AX10_PORTAL -m mac --mac-source aa:bb:cc:00:00:08 -j REJECT"
+has "ip6tables -A AX10_PORTAL -m mac --mac-source aa:bb:cc:00:00:08 -j REJECT"
+has "iptables -A AX10_PORTAL_IN -p tcp --dport 8081 -j DROP"
+i=0; while [ $i -lt 30 ] && ! grep -qF "server.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "server.lua $T/run/portal 192.168.0.1 8081 5354"
+has "iptables -t nat -A AX10_PORTAL_NAT -m mac --mac-source aa:bb:cc:00:00:08 -p udp --dport 53 -j DNAT --to-destination 192.168.0.1:5354"
+has "ip6tables -A AX10_PORTAL_IN6 -m mac --mac-source aa:bb:cc:00:00:08 -p udp --dport 53 -j REJECT"
+has "iptables -A AX10_PORTAL_IN -m mac --mac-source aa:bb:cc:00:00:08 -p tcp --dport 443 -j REJECT --reject-with tcp-reset"
+grep -q "mac-source aa:bb:cc:00:00:20 .*REJECT\|mac-source aa:bb:cc:00:00:09 .*REJECT" "$T/calls" && fail "join page for a device not on the guest Wi-Fi or not listed"
+grep -q 'pa&lt;ss&amp;&quot;w0rd' "$T/run/portal/index.html" || fail "join page lacks the escaped home password"
+grep -q "home net" "$T/run/portal/index.html" || fail "join page lacks the home SSID"
+# Unchanged on the next run; gone once it is off the list.
+: > "$T/calls"; h home
+grep -q "server.lua" "$T/calls" && fail "join page server restarted with no change"
+echo "aa:bb:cc:00:00:20" > "$T/u/iot_home_allow"; : > "$T/calls"; h home
+has "iptables -t nat -D PREROUTING -i br-lan -j AX10_PORTAL_NAT"
+[ -e "$T/run/portal.pid" ] && fail "join page server left running"
+echo 0 > "$T/u/iot_home_lock"; h home
+
+# --- Forget: a forgotten IoT device is not pinned again from its old lease.
+cat > "$T/bin/uci8" <<EOF
+#!/bin/sh
+echo "uci \$*" >> "$T/calls"
+case "\$*" in
+  "set "*) exit 0 ;;
+  *iot_forget*) echo "aa:bb:cc:dd:ee:05" ;;
+  *iot_lock*) echo 0 ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci8"
+printf '%s\n' "1000 AA:BB:CC:DD:EE:05 192.168.50.150 cam *" > "$T/leases"; rm -f "$T/run/open_until"; : > "$T/calls"
+iot "$T/bin/uci8" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+grep -q "iot_static=.*aa:bb:cc:dd:ee:05" "$T/calls" && fail "forgotten device pinned again from its lease"
+: > "$T/leases"
 
 echo "iot.sh tests passed"

@@ -130,6 +130,9 @@ h2 .count { color: var(--faint); font-weight: 600; }
 .tag.blocked { color: var(--bad); background: var(--bad-soft); }
 .tag.you { color: var(--accent); background: var(--accent-soft); }
 .tag.cap { color: #93c5fd; background: rgba(96, 165, 250, .13); }
+.tag.no { color: var(--warn); background: rgba(251, 146, 60, .13); }
+.acadd { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 18px; border-top: 1px solid var(--line); }
+.acadd .input { flex: 1 1 160px; }
 .capform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 .capform .input { height: 36px; max-width: 150px; }
 .offline .nm, .offline .av { opacity: .55; }
@@ -408,17 +411,22 @@ function whereText(d) {
 // IoT devices are ours only; TP-Link doesn't see that network.
 const BAND = { "2.4G": "2.4 GHz", "5G": "5 GHz", "5G_2": "5 GHz" };
 async function loadDevices() {
-  const [r, stock] = await Promise.all([iot("devices"),
-    API.call("/admin/access_control?form=black_devices", { operation: "load" }).then(x => x.data).catch(() => null)]);
+  const [r, stock, home] = await Promise.all([iot("devices"),
+    API.call("/admin/access_control?form=black_devices", { operation: "load" }).then(x => x.data).catch(() => null),
+    iot("home").catch(() => null)]);
+  r.mesh = [];
   if (Array.isArray(stock)) {
     const by = {};
     stock.forEach(x => { if (x.mac) by[x.mac.toUpperCase().replace(/-/g, ":")] = x; });
     const keep = d => d.name || d.blocked || d.fast || d.allowed || !d.internet;   // has a setting
     r.list = r.list.filter(d => {
       if (d.net === "iot") return true;
+      // Guests on our own guest Wi-Fi radio: TP-Link's list leaves them out while
+      // Access Control is on with guests exempt, so our radio's word counts.
+      if (d.net === "guest" && d.online && !by[d.mac]) return true;
       const x = by[d.mac];
       if (!x) {
-        if (d.online && !keep(d)) return false;                 // mesh equipment, not a client
+        if (d.online && !keep(d)) { r.mesh.push(d); return false; }   // mesh equipment, not a client
         d.online = false; d.where = ""; return true;
       }
       if (!d.host && x.name) d.host = x.name;
@@ -433,6 +441,14 @@ async function loadDevices() {
   // A device on the block list is only blocked while Access Control is on, in block-list mode.
   const live = r.block.enable === "on" && r.block.mode === "black";
   r.list.forEach(d => { d.listed = d.blocked; d.blocked = d.blocked && live; });
+  // Our home allow list (iot.sh home_sync).
+  // The router's JSON encoder turns an empty list into {}.
+  if (home) { if (!Array.isArray(home.list)) home.list = []; if (!Array.isArray(home.dropped)) home.dropped = []; }
+  r.home = home; S.homeAt = Date.now();
+  r.white = home ? home.list.map(x => ({ mac: x.mac.toUpperCase(), seen: x.seen, keep: x.keep })) : null;
+  r.allowOn = !!home && home.lock === "on";
+  const wl = new Set((r.white || []).map(x => x.mac));
+  r.list.forEach(d => { d.onWhite = wl.has(d.mac); });
   const prev = S.devices && S.devices.byMac, now = {};
   r.list.forEach(d => {
     now[d.mac] = { down: d.down, up: d.up };
@@ -446,7 +462,7 @@ async function loadSummary() {
   const [s, inet] = await Promise.all([iot("summary"), API.call("/admin/status?form=internet").then(r => r.data).catch(() => null)]);
   S.summary = Object.assign({}, s, { internet: inet ? inet.internet_status : (s.wan_up ? "connected" : "disconnected") });
 }
-async function loadIot() { S.iot = await iot("settings"); }
+async function loadIot() { S.iot = await iot("settings"); S.iotLoadedAt = Date.now(); }
 async function loadGuest() { S.guest = await iot("guest_settings"); }
 async function loadShaping() { S.shaping = await iot("shaping"); }
 async function loadWifi() {
@@ -455,7 +471,7 @@ async function loadWifi() {
   if (!S.iot) await loadIot();
   S.wifi = { w2, w5, g2, g5, smart: sc && sc.smart_enable === "on" };
 }
-const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], speed: [loadDevices, loadGuest, loadShaping], wifi: [loadWifi] };
+const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], speed: [loadDevices, loadGuest, loadShaping], wifi: [loadWifi, loadDevices] };
 async function refresh(quiet) {
   const tab = S.tab;
   try { await Promise.all(NEEDS[tab].map(f => f())); if (tab === S.tab) render(); }
@@ -597,8 +613,8 @@ function viewDevices() {
 
 function deviceRow(d) {
   const open = S.open === d.mac;
-  const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
-    d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
+  const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>', S.devices.allowOn && d.net === "home" && !d.onWhite && '<span class="tag no" title="Not on the home Wi-Fi allow list">Not allowed</span>',
+    d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "guest" && d.online && d.onWhite && S.devices.allowOn && '<span class="tag cap" title="On the home allow list: this device sees a page with the home Wi-Fi password instead of internet">Join page</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
     d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>', d.cap && `<span class="tag cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
   const meta = [d.ip, whereText(d), d.online && d.rssi ? `${d.rssi} dBm` : ""].filter(Boolean).join(" · ");
   const live = d.online && d.live && (d.live.down >= 1000 || d.live.up >= 1000)
@@ -631,7 +647,7 @@ function deviceDetail(d) {
   if (d.net === "iot") toggles.push(toggle("internet", d, d.internet, "Internet access"));
   if (d.net === "guest" && D.guest_limit) toggles.push(toggle("fast", d, d.fast, "Full speed (skip guest limit)"));
   if (d.net === "home" && D.iot_enabled && D.lan_mode === "selected") toggles.push(toggle("allowed", d, d.allowed, "Can reach IoT devices"));
-  const canBlock = !d.this && !(D.block.enable === "on" && D.block.mode === "white");
+  const canBlock = !d.this;
   return `<div class="detail">
     ${S.editing === d.mac ? `<form class="rename" data-rename="${d.mac}"><div class="input"><input id="rn" value="${esc(d.name || d.host)}" maxlength="40" placeholder="Name"></div>
       <button class="btn sm primary">Save</button><button type="button" class="btn sm" data-act="cancel">Cancel</button></form>` : ""}
@@ -641,6 +657,9 @@ function deviceDetail(d) {
       ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
       ${d.net !== "iot" && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap" data-mac="${d.mac}">${d.cap ? "Change speed cap" : "Cap speed"}</button>` : ""}
       ${d.cap && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove cap</button>` : ""}
+      ${d.net !== "iot" && D.white ? (d.onWhite
+        ? (d.this ? "" : `<button class="btn sm" data-act="ac-remove" data-mac="${d.mac}">Remove from home Wi-Fi</button>`)
+        : `<button class="btn sm" data-act="ac-allow" data-mac="${d.mac}">Allow on home Wi-Fi</button>`) : ""}
       ${canBlock ? `<button class="btn sm ${d.blocked ? "" : "danger"}" data-act="${d.blocked ? "unblock" : "block"}" data-mac="${d.mac}" ${busy ? "disabled" : ""}>${d.blocked ? "Unblock" : "Block"}</button>` : ""}
       ${busy ? '<span class="spin"></span>' : ""}
     </div></div>`;
@@ -848,13 +867,33 @@ function viewIot() {
     </div>
     ${isDirty ? `<div class="card-f"><button class="btn" data-act="iot-reset">Discard</button><button class="btn primary" data-act="iot-save">Save changes</button></div>` : ""}
   </div>
-  ${sectionList("IoT devices", iotDevs.map(d => simpleRow(d, `<span class="muted" style="font-size:12.5px">Internet</span>` + rowSwitch("internet", d, d.internet, "Internet access"))), "Nothing has joined the IoT network yet.")}
+  ${joinCard(c, iotDevs)}
+  ${sectionList("IoT devices", iotDevs.map(d => simpleRow(d,
+      (d.pinned ? `<span class="tag" title="This device always gets ${esc(d.pinned)}">Fixed ${esc(d.pinned.split(".").pop() === d.pinned ? d.pinned : "." + d.pinned.split(".").pop())}</span>` : "")
+      + `<span class="muted" style="font-size:12.5px">Internet</span>` + rowSwitch("internet", d, d.internet, "Internet access")
+      + (d.pinned && (!d.online || c.lock === "on") ? `<button class="btn sm" data-act="forget" data-mac="${d.mac}">Forget</button>` : ""))),
+    "Nothing has joined the IoT network yet.")}
   <h2>Who can reach IoT devices</h2>
   <div class="card"><div class="card-h"><div style="flex:1"><h3>Home devices</h3><p>${c.lan_mode === "selected" ? "Only the devices switched on below can open connections to IoT devices." : "Every device on your home network can open connections to IoT devices."}</p></div>
     <div class="seg" id="lanmode"><button data-mode="all" aria-pressed="${c.lan_mode !== "selected"}">All</button><button data-mode="selected" aria-pressed="${c.lan_mode === "selected"}">Selected</button></div></div></div>
   ${c.lan_mode === "selected" ? `<div style="margin-top:12px">${'<div class="list">' + (homes.map(d => simpleRow(d, rowSwitch("allowed", d, d.allowed, "Can reach IoT devices"))).join("") || '<div class="empty">No home devices.</div>') + "</div>"}</div>` : ""}`;
 }
 
+// Who can join the IoT Wi-Fi: lock switch and the "allow new devices" window.
+function joinCard(c, iotDevs) {
+  const known = iotDevs.filter(d => d.pinned).length;
+  const left = Math.max(0, Math.round((c.open_left || 0) - (Date.now() - (S.iotLoadedAt || Date.now())) / 1000));
+  const open = c.lock === "on" && left > 0;
+  const mmss = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `<h2>Who can join</h2>
+  <div class="card"><div class="card-h"><div style="flex:1"><h3>Lock the IoT network</h3>
+    <p>${c.lock !== "on" ? "Any device with the password can join. Each one keeps its address once it has joined."
+      : open ? `<b style="color:var(--warn)">Open to new devices · ${mmss(left)} left.</b> Set up the device in its app now; it is added when it gets an address.`
+      : `Only the ${known} known device${known === 1 ? "" : "s"} below can join. Others are turned away, even with the password.`}</p></div>
+    <label class="sw"><input type="checkbox" id="iot-lock" ${c.lock === "on" ? "checked" : ""} aria-label="Lock the IoT network"><span></span></label></div>
+    ${c.lock === "on" ? `<div class="card-f">${open ? `<button class="btn" data-act="iot-close">Lock now</button>` : `<button class="btn primary" data-act="iot-open">Allow new devices for 10 minutes</button>`}</div>` : ""}
+  </div>`;
+}
 function viewSpeed() {
   const g = S.guest, D = S.devices, w = S.shaping;
   if (!g || !D || !w) return `<h2>Whole connection</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
@@ -916,7 +955,58 @@ function viewWifi() {
         <button class="iconbtn" data-qr="${n.id}" aria-label="Show QR code">${ic("qr")}</button></div>` : '<div class="muted" style="font-size:13px">Open network</div>'}
       ${S.qr === n.id ? `<div class="qr" id="qrbox"></div>` : ""}
       <div style="margin-top:12px;font-size:13px">${n.tab ? `<a href="#${n.tab}" data-tab-link="${n.tab}">Edit on the IoT page</a>` : `<a href="${FULL}" data-go="${n.edit}">Edit in TP-Link settings ${ic("ext").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')}</a>`}</div>
-    </div>`).join("")}</div>`;
+    </div>`).join("")}</div>
+  ${accessCard()}`;
+}
+
+// Who can join the home network: our own allow list (iot.sh home_sync). The home
+// Wi-Fi radios take only listed devices; unlisted ones behind the mesh satellite or
+// on a cable are cut off by the firewall. The guest Wi-Fi is never touched.
+const ago = (now, t) => { if (!t) return "Not seen yet"; const s = Math.max(0, now - t);
+  return s < 120 ? "Seen just now" : s < 3600 ? `Seen ${Math.round(s / 60)} min ago` : s < 86400 ? `Seen ${Math.round(s / 3600)} h ago` : `Seen ${Math.round(s / 86400)} days ago`; };
+function accessCard() {
+  const D = S.devices, H = D && D.home;
+  if (!D) return `<h2>Who can join the home network</h2>` + skel(3);
+  if (!H) return `<h2>Who can join the home network</h2><div class="card"><div class="card-b" style="padding:18px">Couldn't read the allow list.</div></div>`;
+  const on = D.allowOn, ssid = (S.wifi && S.wifi.w2 && S.wifi.w2.ssid) || "the home Wi-Fi";
+  const meshMacs = new Set(meshUnits(D).map(d => d.mac));
+  const byMac = {}; D.list.concat(D.mesh).forEach(d => { byMac[d.mac] = d; });
+  const busy = S.busy.ac, now = H.now || Math.floor(Date.now() / 1000);
+  const left = Math.max(0, Math.round((H.open_left || 0) - (Date.now() - (S.homeAt || Date.now())) / 1000));
+  const open = on && left > 0, mmss = x => `${Math.floor(x / 60)}:${String(x % 60).padStart(2, "0")}`;
+  const allowed = D.white.map(x => {
+    const d = byMac[x.mac], mesh = meshMacs.has(x.mac), live = d && d.online || mesh;
+    const nm = d ? devName(d) : x.mac;
+    const meta = [x.mac, mesh ? "Mesh unit (the satellite itself)" : d && d.online ? whereText(d) : ago(now, x.seen)].join(" · ");
+    const right = (x.keep ? '<span class="tag" title="Never removed for being away">Always</span>' : "")
+      + (d && d.this ? '<span class="tag you">This device</span>'
+        : `<button class="btn sm" data-act="ac-${x.keep ? "unkeep" : "keep"}" data-mac="${x.mac}" ${busy ? "disabled" : ""} title="${x.keep ? "Let it expire like the others" : "Never remove it for being away"}">${x.keep ? "Unpin" : "Pin"}</button>
+           <button class="btn sm" data-act="ac-remove" data-mac="${x.mac}" ${busy ? "disabled" : ""}>Remove</button>`);
+    return { live, nm, html: `<div class="row ${live ? "" : "offline"}">
+      <div class="av">${ic(d && !mesh ? connIcon(d) : mesh ? "mesh" : "wifi")}<span class="dot ${live ? "on" : ""}"></span></div>
+      <div style="min-width:0"><div class="nm"><span>${esc(nm)}</span>${d && d.net === "guest" ? '<span class="tag guest">On guest now</span>' : ""}</div><div class="meta mono">${esc(meta)}</div></div>
+      <div class="right">${right}</div></div>` };
+  }).sort((a, b) => (b.live - a.live) || a.nm.localeCompare(b.nm, undefined, { sensitivity: "base" })).map(x => x.html);
+  const others = sortDevices(D.list.filter(d => d.net !== "iot" && !d.onWhite)).map(d => `<div class="row ${d.online ? "" : "offline"}">
+    <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
+    <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${d.net === "guest" ? '<span class="tag guest">Guest</span>' : ""}${isPrivateMac(d.mac) ? '<span class="tag" title="Private (random) address: the phone may show up with a new one later">Private address</span>' : ""}${(H.dropped || []).includes(d.mac.toLowerCase()) ? '<span class="tag blocked">Cut off</span>' : ""}</div>
+      <div class="meta mono">${esc([d.mac, d.ip, whereText(d)].filter(Boolean).join(" · "))}</div></div>
+    <div class="right"><button class="btn sm" data-act="ac-allow" data-mac="${d.mac}" ${busy ? "disabled" : ""}>Allow</button></div></div>`);
+  const exp = [[0, "Never"], [7, "After 7 days away"], [14, "After 14 days away"], [30, "After 30 days away"], [90, "After 90 days away"]];
+  return `<h2>Who can join the home network</h2>
+  <div class="card"><div class="card-h"><div style="flex:1"><h3>Only allowed devices</h3>
+    <p>${!on ? "Off. Any device with the password can join. You can build the list first, then turn this on."
+      : open ? `<b style="color:var(--warn)">Open to new devices · ${mmss(left)} left.</b> Connect the new device now; it is added as soon as it shows up.`
+      : `Only the ${D.white.length} devices below can use ${esc(ssid)}, on Wi-Fi, through the mesh satellite or on a cable. Others are turned away, even with the password. The guest Wi-Fi still lets in anyone with its password.`}</p></div>
+    ${busy ? '<span class="spin"></span>' : ""}<label class="sw"><input type="checkbox" id="ac-on" ${on ? "checked" : ""} ${busy ? "disabled" : ""} aria-label="Only allowed devices can join the home network"><span></span></label></div>
+    <div class="card-b"><div class="field"><label for="ac-exp">Remove devices</label><div class="input short" style="max-width:240px"><select id="ac-exp" style="width:100%;background:transparent;border:0;color:inherit;font:inherit">${exp.map(([v, l]) => `<option value="${v}" ${+H.expire === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="help">Devices not seen for this long are taken off the list. Pinned devices never are.</div></div></div>
+    <form class="acadd" id="ac-add"><div class="input"><input id="ac-name" maxlength="32" placeholder="Name" autocomplete="off"></div>
+      <div class="input"><input id="ac-mac" class="mono" placeholder="MAC, e.g. AA:BB:CC:DD:EE:FF" autocomplete="off"></div>
+      <button class="btn" ${busy ? "disabled" : ""}>Add</button></form>
+    ${on ? `<div class="card-f">${open ? `<button class="btn" data-act="ac-close">Lock now</button>` : `<button class="btn primary" data-act="ac-open">Allow new devices for 10 minutes</button>`}</div>` : ""}</div>
+  ${sectionList("Allowed", allowed, "The list is empty.")}
+  ${sectionList("Not on the list", others, "Every device seen is on the list.")}`;
 }
 
 /* ------------------------------------------------------------------ QR (loaded on first use) */
@@ -999,9 +1089,24 @@ document.addEventListener("click", async ev => {
     if (act === "w-save") return saveWan();
     if (act === "cap") { S.capEdit = mac; render(); const i = $id("cap-d"); if (i) i.focus(); return; }
     if (act === "cap-cancel") { S.capEdit = null; render(); return; }
+    if (act === "iot-open" || act === "iot-close") {
+      try { await iot("iot_open", { operation: "write", seconds: act === "iot-open" ? 600 : 0 }); await new Promise(r => setTimeout(r, 1200)); await loadIot(); render();
+            toast(act === "iot-open" ? "New devices can join for 10 minutes" : "IoT network locked"); } catch (e) { fail(e); }
+      return;
+    }
+    if (act === "forget") {
+      const d = findDev(mac); if (!d) return;
+      if (!await confirmBox(`Forget ${devName(d)}?`, S.iot && S.iot.lock === "on" ? "It loses its fixed address and can no longer join the IoT network until you allow new devices." : "It loses its fixed address. If it joins again it gets a new one.", "Forget", true)) return;
+      try { await iot("device", { operation: "write", mac, pin: "off" }); await loadDevices(); render(); toast(`Forgot ${devName(d)}`); } catch (e) { fail(e); }
+      return;
+    }
     if (act === "conns-on") { S.conns = { mac }; render(); watchConns(); return; }
     if (act === "conns-off") { S.conns = null; watchConns(); render(); return; }
     if (act === "cap-remove") return setCap(mac, "");
+    if (act === "ac-allow") { const d = findDev(mac); return acAllow(mac, d && (d.name || d.host)); }
+    if (act === "ac-remove") return acRemove(mac);
+    if (act === "ac-keep" || act === "ac-unkeep") return acBusy(async () => { await homeAllow(mac, act === "ac-keep" ? "keep" : "unkeep"); toast(act === "ac-keep" ? "Pinned: never removed for being away" : "Unpinned"); });
+    if (act === "ac-open" || act === "ac-close") return acBusy(async () => { await iot("home_open", { operation: "write", seconds: act === "ac-open" ? 600 : 0 }); toast(act === "ac-open" ? "New devices can join for 10 minutes" : "Home network locked"); });
   }
   if (t.closest(".detail") || t.closest("input,label,button,a")) return;
   const row = t.closest(".row.click"); if (row) { S.open = S.open === row.dataset.mac ? null : row.dataset.mac; S.editing = null; S.capEdit = null; S.detail = null; S.conns = null; watchConns(); render(); watchDetail(); }
@@ -1014,6 +1119,9 @@ document.addEventListener("keydown", ev => {
 document.addEventListener("change", ev => {
   const i = ev.target;
   if (i.dataset.field && i.dataset.mac) return setDevice(i.dataset.mac, i.dataset.field, i.checked);
+  if (i.id === "iot-lock") return setLock(i.checked);
+  if (i.id === "ac-on") return setAllowList(i.checked);
+  if (i.id === "ac-exp") return acBusy(async () => { await iot("home", { operation: "write", expire: i.value }); toast(+i.value ? `Devices away for ${i.value} days are removed` : "Devices are never removed for being away"); });
   if (/^iot-/.test(i.id)) return markIot();
   if (/^g-/.test(i.id)) return markGuest();
   if (/^w-/.test(i.id)) return markWan();
@@ -1026,6 +1134,13 @@ document.addEventListener("input", ev => {
   if (/^w-/.test(i.id)) return markWan();
 });
 document.addEventListener("submit", ev => {
+  if (ev.target.id === "ac-add") {
+    ev.preventDefault();
+    const raw = $id("ac-mac").value.trim().toUpperCase().replace(/[-.\s]/g, ":");
+    const mac = /^[0-9A-F]{12}$/.test(raw.replace(/:/g, "")) ? raw.replace(/:/g, "").match(/../g).join(":") : "";
+    if (!mac) return toast("That isn't a MAC address. It looks like AA:BB:CC:DD:EE:FF.", true);
+    return acAllow(mac, $id("ac-name").value.trim());
+  }
   const cf = ev.target.closest("[data-cap]");
   if (cf) {
     ev.preventDefault();
@@ -1040,6 +1155,57 @@ document.addEventListener("submit", ev => {
   S.editing = null; setDevice(mac, "name", v);
 });
 
+/* home allow list (iot.sh home_sync) */
+const MESH_RE = /archer|deco|tp-?link|mesh|extender|repeater/i;
+function meshUnits(D) { return D.mesh.filter(m => MESH_RE.test(devName(m))); }
+async function acBusy(fn) {
+  S.busy.ac = true; render();
+  try { await fn(); } catch (e) { fail(e); }
+  delete S.busy.ac;
+  await new Promise(r => setTimeout(r, 800));                    // let iot.sh home finish
+  try { await loadDevices(); } catch (e) { if (e instanceof AuthError) fail(e); }
+  render();
+}
+const homeAllow = (mac, op, name) => iot("home_allow", Object.assign({ operation: "write", mac, op }, name ? { name } : {}));
+function acAllow(mac, name) {
+  return acBusy(async () => { await homeAllow(mac, "add", name); toast(`${name || mac} can join the home network`); });
+}
+async function acRemove(mac) {
+  const D = S.devices, d = findDev(mac) || D.mesh.find(m => m.mac === mac), nm = d ? devName(d) : mac;
+  if (d && d.this) return toast("That's the device you're using; removing it would lock you out.", true);
+  if (D.allowOn && D.white.length <= 1) return toast("That's the last device on the list. Turn the allow list off instead.", true);
+  const mesh = meshUnits(D).some(m => m.mac === mac) || MESH_RE.test(nm);
+  if (!await confirmBox(`Remove ${nm}?`, (mesh ? "This looks like mesh or Wi-Fi equipment; removing it can take the satellite and everything on it offline. " : "")
+    + (D.allowOn ? "It is disconnected now and can't rejoin the home network. The guest Wi-Fi still works for it." : "It won't be able to join once the allow list is on."), "Remove", true)) return;
+  return acBusy(async () => { await homeAllow(mac, "remove"); toast(`Removed ${nm}`); });
+}
+async function setAllowList(on) {
+  const D = S.devices; if (!D || !D.white) return;
+  if (!on) {
+    if (!await confirmBox("Turn the allow list off?", "Any device with the password can join the home network again. The list is kept for next time.", "Turn off")) return render();
+    return acBusy(async () => { await iot("home", { operation: "write", lock: "off" }); toast("Allow list off"); });
+  }
+  // Never lock out the device in use or the mesh satellite: pin them first.
+  const must = D.list.filter(d => d.this && !d.onWhite).concat(meshUnits(D).filter(m => !D.white.some(w => w.mac === m.mac)));
+  const out = D.list.filter(d => d.online && d.net === "home" && !d.onWhite && !d.this);
+  const msg = [`Only the ${D.white.length + must.length} devices on the list can use the home network.`,
+    must.length ? `${must.map(devName).join(", ")} ${must.length === 1 ? "is" : "are"} added first so you stay connected.` : "",
+    out.length ? `${out.length} connected device${out.length === 1 ? " is" : "s are"} not on the list and will be cut off: ${out.map(devName).join(", ")}.` : ""].filter(Boolean).join(" ");
+  if (!await confirmBox("Turn the allow list on?", msg, "Turn on")) return render();
+  return acBusy(async () => {
+    for (const m of must) await homeAllow(m.mac, "keep", devName(m));
+    await iot("home", { operation: "write", lock: "on" });
+    toast("Allow list on: only listed devices can use the home network");
+  });
+}
+
+async function setLock(on) {
+  if (on && S.devices && !S.devices.list.some(d => d.net === "iot" && d.pinned)) { toast("No known IoT devices yet; locking now would keep everything out.", true); render(); return; }
+  try {
+    S.iot = await iot("settings", Object.assign({ operation: "write" }, S.iot, { lock: on ? "on" : "off" })); S.iotLoadedAt = Date.now();
+    render(); toast(on ? "IoT network locked to known devices" : "IoT network unlocked");
+  } catch (e) { fail(e); }
+}
 function readIotForm() {
   return { enable: $id("iot-enable").checked ? "on" : "off", ssid: $id("iot-ssid").value, password: $id("iot-pw").value,
            hidden: $id("iot-hidden").checked ? "on" : "off", allow_lan: $id("iot-allow").value.trim(), lan_mode: S.iot.lan_mode };

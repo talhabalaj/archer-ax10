@@ -242,6 +242,14 @@ local function read_settings()
         gateway  = get("ip", "192.168.50.1"),
         allow_lan = get("allow_lan", ""),
         lan_mode = get("lan_mode", "all"),
+        lock     = get("lock", "0") == "1" and "on" or "off",
+        open_left = (function()
+            local f = io.open("/tmp/ax10-iot/open_until"); if not f then return 0 end
+            local u = tonumber(f:read("*l") or ""); f:close()
+            local uf = io.open("/proc/uptime"); local now = uf and tonumber((uf:read("*l") or ""):match("^(%d+)")) or 0
+            if uf then uf:close() end
+            return (u and u > now) and (u - now) or 0
+        end)(),
     }
 end
 
@@ -259,6 +267,7 @@ local function write_settings(form)
     if key ~= nil then opts.key = key end
     if form.allow_lan ~= nil then opts.allow_lan = form.allow_lan end
     if form.lan_mode == "all" or form.lan_mode == "selected" then opts.lan_mode = form.lan_mode end
+    if form.lock == "on" or form.lock == "off" then opts.lock = form.lock == "on" and "1" or "0" end
     save(opts)
     return read_settings()
 end
@@ -450,6 +459,11 @@ local function devices()
     local blocked, ac_enable, ac_mode = blocklist()
     local noinet, fast, allow = words(get("noinet", "")), words(get("guest_fast", "")), words(get("lan_allow", ""))
     local cp = caps()
+    local pins = {}
+    for _, e in ipairs(words(get("static", ""))) do
+        local m, ip = e:match("^([%x:]+),(%S+)$")
+        if m then pins[normmac(m)] = ip end
+    end
     local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
@@ -465,7 +479,7 @@ local function devices()
             name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
             net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
             internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac),
-            cap = cp[mac] or false,
+            cap = cp[mac] or false, pinned = pins[mac] or false,
         }
         local r, x = rows[#rows], st[mac]
         if x then r.down, r.up, r.rssi, r.rate, r.conn = x.down, x.up, x.rssi, x.rate, x.conn
@@ -479,6 +493,9 @@ local function devices()
         end
         f:close()
     end
+    -- Pinned IoT devices first: their reserved address marks them as IoT even when
+    -- they have no lease right now and also appear in a setting list below.
+    for m, ip in pairs(pins) do add(m, ip, nil) end
     for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
     for m in pairs(blocked) do add(m, nil, nil) end
     for m in pairs(cp) do add(m, nil, nil) end
@@ -660,6 +677,11 @@ local function write_device(form)
     if form.internet == "on" or form.internet == "off" then opts.noinet = list_with("noinet", mac, form.internet == "off") end
     if form.allowed == "on" or form.allowed == "off" then opts.lan_allow = list_with("lan_allow", mac, form.allowed == "on") end
     if next(opts) then save(opts) end
+    if form.pin == "off" then
+        -- Through iot.sh, under the lock autopin runs under, so the watcher can't
+        -- save a stale pin list over it. iot_forget keeps it from being re-pinned.
+        if os.execute(IOT .. " forget " .. mac .. " >/dev/null 2>&1") ~= 0 then return false, "-1" end
+    end
     if form.cap ~= nil then                     -- "down/up" in Mbps, or "" to remove
         local t = caps()
         local d, u = tostring(form.cap):match("^(%d+)/(%d+)$")
@@ -714,7 +736,134 @@ local function summary()
              proto = wan.proto or "" }
 end
 
+-- Let new devices join the locked IoT network for a while (seconds; 0 ends it).
+local function write_open(form)
+    local s = tonumber(form.seconds) or 600
+    s = math.max(0, math.min(math.floor(s), 3600))
+    os.execute(IOT .. (s > 0 and (" open " .. s) or " close") .. " >/dev/null 2>&1 &")
+    return { open_left = s }
+end
+
+-- Disconnect one device from the home Wi-Fi now. TP-Link's allow list only turns
+-- away new joins, so a device taken off it stays connected until it is kicked.
+-- Only interfaces carrying the home network's name; guests and IoT are left alone.
+local function write_kick(form)
+    local mac = normmac(form.mac)
+    if not mac:match(MAC_PAT) then return false, "-1" end
+    sh([[home="$(/usr/sbin/wl -i wl0.1 ssid)"; cd /sys/class/net || exit 0
+for i in wl[0-9] wl[0-9].[0-9]; do
+    [ -d "$i" ] && [ "$(/usr/sbin/wl -i $i ssid)" = "$home" ] && /usr/sbin/wl -i $i deauthenticate ]] .. mac .. [[
+
+done]])
+    return { mac = mac }
+end
+
+-- Our home allow list (iot.sh home_sync). Every change goes through iot.sh, which
+-- edits the list under its run lock, so it never races the 15 s watcher.
+local function home_run(args) os.execute(IOT .. " " .. args .. " >/dev/null 2>&1 &") end
+local function home_cmd(args) return os.execute(IOT .. " " .. args .. " >/dev/null 2>&1") == 0 end
+-- The MAC of the device making this request, from the neighbour tables (IPv4 or
+-- IPv6), so the lock can never shut out whoever is turning it on.
+local function requester_mac()
+    local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
+    local ip = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
+    if ip == "" then return nil end
+    if ip:match("^%d+%.%d+%.%d+%.%d+$") then
+        local f = io.open("/proc/net/arp")
+        if f then
+            for line in f:lines() do
+                local a, flags, m = line:match("^(%S+)%s+%S+%s+(%S+)%s+(%S+)")
+                if a == ip and flags ~= "0x0" and normmac(m):match(MAC_PAT) then f:close(); return normmac(m) end
+            end
+            f:close()
+        end
+        return nil
+    end
+    local want = v6full(ip)
+    for line in sh("ip -6 neigh show"):gmatch("[^\n]+") do
+        local a, m = line:match("^(%S+) .*lladdr (%S+)")
+        if a and v6full(a) == want and normmac(m):match(MAC_PAT) then return normmac(m) end
+    end
+    return nil
+end
+local function read_home()
+    local seen = {}
+    local f = io.open("/tmp/ax10-iot/home_seen")
+    if f then
+        for line in f:lines() do local m, t = line:match("^(%S+) (%d+)"); if m then seen[m] = tonumber(t) end end
+        f:close()
+    end
+    local keep, list = words(get("home_keep", ""):lower()), {}
+    for _, m in ipairs(words(get("home_allow", ""):lower())) do
+        list[#list + 1] = { mac = m, seen = seen[m], keep = has(keep, m) }
+    end
+    for _, m in ipairs(keep) do
+        if not has(words(get("home_allow", ""):lower()), m) then list[#list + 1] = { mac = m, seen = seen[m], keep = true } end
+    end
+    local open_left = 0
+    local of = io.open("/tmp/ax10-iot/home_open_until")
+    if of then
+        local u = tonumber(of:read("*l") or ""); of:close()
+        local now = uptime()
+        if u and u > now then open_left = u - now end
+    end
+    local df = io.open("/tmp/ax10-iot/home_drop"); local dropped = df and df:read("*l") or ""; if df then df:close() end
+    return { lock = get("home_lock", "0") == "1" and "on" or "off", expire = tonumber(get("home_expire", "0")) or 0,
+             open_left = open_left, now = os.time(), list = list, dropped = words(dropped) }
+end
+local function write_home(form)
+    if form.lock == "on" then
+        local me = requester_mac()
+        if not me then return false, "can't tell which device this is; open the dashboard over Wi-Fi or a cable on the home network" end
+        local cur = read_home()
+        local listed = false
+        for _, x in ipairs(cur.list) do if x.mac == me and x.keep then listed = true end end
+        if not listed and not home_cmd("home-allow keep " .. me) then return false, "couldn't add this device" end
+        if not home_cmd("home-set lock 1") then return false, "couldn't turn the lock on" end
+    elseif form.lock == "off" then
+        if not home_cmd("home-set lock 0") then return false, "couldn't turn the lock off" end
+    end
+    local e = tonumber(form.expire)
+    if e and e >= 0 and e <= 365 and not home_cmd("home-set expire " .. math.floor(e)) then return false, "-1" end
+    return read_home()
+end
+-- Add, remove or mark one entry ("keep" entries never expire).
+local function write_home_allow(form)
+    local mac = normmac(form.mac)
+    if not mac:match(MAC_PAT) then return false, "-1" end
+    local op = form.op
+    if op ~= "add" and op ~= "remove" and op ~= "keep" and op ~= "unkeep" then return false, "-1" end
+    if op == "remove" and mac == requester_mac() then return false, "that's the device you're using" end
+    if form.name and form.name ~= "" and #form.name <= 40 then set_name(mac, form.name) end
+    if not home_cmd("home-allow " .. op .. " " .. mac) then
+        return false, op == "remove" and "that's the last device on the list; turn the lock off instead" or "-1"
+    end
+    return read_home()
+end
+local function write_home_open(form)
+    local s = tonumber(form.seconds) or 600
+    s = math.max(0, math.min(math.floor(s), 3600))
+    home_run(s > 0 and ("home-open " .. s) or "home-close")
+    return { open_left = s }
+end
+
 local dispatch_tbl = {
+    home = {
+        ["read"]  = { cb = read_home },
+        ["write"] = { cb = write_home },
+    },
+    home_allow = {
+        ["write"] = { cb = write_home_allow },
+    },
+    home_open = {
+        ["write"] = { cb = write_home_open },
+    },
+    kick = {
+        ["write"] = { cb = write_kick },
+    },
+    iot_open = {
+        ["write"] = { cb = write_open },
+    },
     devices = {
         ["read"]  = { cb = devices },
     },

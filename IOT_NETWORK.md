@@ -63,6 +63,29 @@ inverter-link: the phone is on another subnet, so automatic discovery won't find
 the logger. Add it by IP (192.168.50.10). The logger connects back to the phone
 on TCP 8899, which is what the `allow_lan` exception permits.
 
+## Home allow list and join-home page
+
+Our own allow list for the home network, run by the watcher (`iot.sh home`), edited on
+the dashboard's Wi-Fi tab. TP-Link's Access Control stays off: in allow-list mode it
+also filters the guest Wi-Fi, and its guest exemption uses `-m physdev`, which this
+kernel lacks, so guests silently lose internet.
+
+- Home radios (`iot_home_ifs`, default `wl0.1 wl1.1`) take only listed MACs
+  (`wl macmode 2`); unlisted clients are disconnected.
+- Unlisted home clients the radios can't see (behind the mesh satellite, wired) are
+  dropped by MAC in the raw table (`AX10_HOME`). Guests are never dropped.
+- `iot.sh home-open [s]` lets new devices in for a while; they are added as they appear.
+- Last-seen times are saved daily; `iot_home_expire=N` removes entries unseen for N
+  days, except pinned ones (`iot_home_keep`).
+- Edits go through `iot.sh home-allow` / `home-set` under the run lock. Turning the
+  lock on pins the requesting device (resolved on the router), and refuses an empty list.
+- A listed device that joins the guest Wi-Fi gets the join-home page instead of
+  internet: its DNS answers every name with the router (no IPv6), HTTP gets a 302 to
+  the page (so the phone's captive-network check opens it), HTTPS is reset. A small Lua
+  server serves it (a second uhttpd can't start on TP-Link's build).
+- Apple devices change their private MAC when the network's security changes (e.g.
+  WPA2/WPA3 to WPA3-only): add the new MACs before such a change, or they are locked out.
+
 ## What we learned about this router
 
 ### Storage and persistence
