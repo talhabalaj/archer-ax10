@@ -122,6 +122,9 @@ case "$1" in
         load_guard; [ -f "$RUN/load.log" ] || { sleep 2; load_guard; }
         echo "uptime   busy  network  load   down kbit/s  up kbit/s"
         tail -n "${2:-8}" "$RUN/load.log" 2>/dev/null | awk '{ printf "%-8s %3d%%  %5d%%  %5s  %11d  %9d\n", $1, $2, $3, $4, $5, $6 }' ;;
+    reboot)   # save the usage log, then reboot (a reboot otherwise loses what came since the last save)
+        usage_on && { usage_sync; usage_save; echo "$(epoch)" > "$RUN/usage.saved"; log "usage log saved; rebooting"; }
+        ${REBOOT:-/sbin/reboot} ;;
     usage)   # count up to now, then show the log: days, months, devices this month
         usage_sync
         awk '{ printf "%-34s %9.2f GB down %9.2f GB up\n", $1, $2 / 1073741824, $3 / 1073741824 }' "$RUN/usage" ;;

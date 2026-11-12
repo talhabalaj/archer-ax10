@@ -52,6 +52,9 @@ the log at `$RUN/iot.log`.
 
 ## Rules that come from incidents
 
+- **Reboot with `ax10.sh reboot`,** not `reboot`: it saves the usage log first (it is
+  only saved every 4 hours, and a reboot loses what came since).
+
 - **Flash is the dangerous part.** The router keeps one 128 KB settings partition,
   holding every setting including the boot hook. A failed save loses all of it, and
   with it our way back in. Before writing anything large, run it through TP-Link's

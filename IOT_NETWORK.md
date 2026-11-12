@@ -147,8 +147,12 @@ out the WAN port, so they never pass through our queues (which sit on `br-lan` a
   added only for devices the radios don't list, so a device moving between router
   and satellite is not counted twice. What neither source sees shows as "not matched
   to a device".
-- `$RUN/usage` (bytes), saved to flash every 4 hours in MB (`iot_usage_days`,
-  `_months`, `_devs`); 62 days, 24 months, devices for this month and the last.
+- `$RUN/usage` (bytes), saved to flash every 4 hours in MB, as UCI lists with one
+  entry each (`iot_usage_days`, `_months`, `_devs`: one long value would be cut at
+  2465 characters by TP-Link's startup); 62 days, 24 months, devices for this month and
+  the last. Not saved at the first reading after a start (flash holds that already). A
+  reboot loses what came since the last save: `ax10.sh reboot` saves first. (Four
+  reboots in under 4 hours on 12 Nov lost that day's per-device figures this way.)
   `iot_usage_boot` vs `/proc/sys/kernel/random/boot_id` decides whether a first
   reading is new traffic (a new boot) or only a baseline.
 

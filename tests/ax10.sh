@@ -590,6 +590,9 @@ case "\$*" in
   "-q get openvpn.archer_boot.iot_usage_"*) k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
   "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget"|"-q get openvpn.archer_boot.iot_caps"|"-q get openvpn.archer_boot.iot_noinet"|"-q get openvpn.archer_boot.iot_guest_fast"|"-q get openvpn.archer_boot.iot_lan_allow"|"-q get openvpn.archer_boot.iot_hidden"|"-q get openvpn.archer_boot.iot_hidden_devices") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
   "set openvpn.archer_boot.iot_"*) kv="\${2#openvpn.archer_boot.}"; echo "\${kv#*=}" > "$T/u/\${kv%%=*}" ;;
+  "-q delete openvpn.archer_boot.iot_usage_"*) rm -f "$T/u/\${3#openvpn.archer_boot.}" ;;
+  "add_list openvpn.archer_boot.iot_usage_"*) kv="\${2#openvpn.archer_boot.}"; f="$T/u/\${kv%%=*}"; v="\${kv#*=}"
+      if [ -s "\$f" ]; then printf ' %s' "\$v" >> "\$f"; else printf '%s' "\$v" > "\$f"; fi ;;
   "commit openvpn") ;;
   "show wireless") echo "wireless.guest2g.guest='on'" ;;
   *wireless.guest2g.ifname*) echo "wl1.3" ;;
@@ -870,9 +873,10 @@ wanc 400 90; [ "$(usage "T:$day")" = "300/40" ] || fail "usage: growth not added
 [ "$(usage "M:$mon")" = "300/40" ] || fail "usage: month total wrong ($(usage "M:$mon"))"
 wanc 10 5;   [ "$(usage "T:$day")" = "310/45" ] || fail "usage: a restarted counter not counted as new ($(usage "T:$day"))"
 [ "$(usage "T:$day")" = "310/45" ] || fail "usage: an unchanged counter was counted again"
-grep -q "$day=0/0" "$T/u/iot_usage_days" || fail "usage: saved to flash more than once in 4 hours ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
-rm -f "$T/run/usage.saved"; usage "T:$day" >/dev/null                      # the 4 hours are up
+[ ! -s "$T/u/iot_usage_days" ] || fail "usage: saved to flash at the first reading after a start, or within 4 hours ($(cat "$T/u/iot_usage_days"))"
+echo 1 > "$T/run/usage.saved"; usage "T:$day" >/dev/null                   # the 4 hours are up
 grep -q "$day=310/45" "$T/u/iot_usage_days" || fail "usage: not saved to flash ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
+grep -q "^$mon=310/45$" "$T/u/iot_usage_months" || fail "usage: month not saved as one list entry ($(cat "$T/u/iot_usage_months" 2>/dev/null))"
 [ "$(cat "$T/u/iot_usage_boot")" = boot1 ] || fail "usage: the boot it is counting in was not recorded"
 # The baseline file lost while the router keeps running: nothing is counted twice.
 rm -f "$T/run/usage.last"; [ "$(usage "T:$day")" = "310/45" ] || fail "usage: lost baseline made it count the same traffic again ($(usage "T:$day"))"
@@ -881,6 +885,9 @@ wanc 12 6; [ "$(usage "T:$day")" = "312/46" ] || fail "usage: counting did not c
 rm -f "$T/run/usage" "$T/run/usage.last" "$T/run/usage.saved"; BOOTID=boot2; wanc 7 3
 # (From the last save, 310/45: what came after it went with the RAM.)
 [ "$(usage "T:$day")" = "317/48" ] || fail "usage: log not carried over a reboot, or the new boot's traffic not counted ($(usage "T:$day"))"
+# `ax10.sh reboot` saves the log first, so a planned reboot loses nothing.
+wanc 20 9; REBOOT=true WAN_DEV=wan0 USAGE_BOOT="$BOOTID" iot "$T/bin/uci7" "$ROOT/ax10.sh" reboot >/dev/null 2>&1 || true
+grep -q "$day=330/54" "$T/u/iot_usage_days" || fail "usage: reboot did not save the log first ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
 # Device history: the previous calendar month is kept on the 1st of March, May and July too.
 if date -d @0 +%Y >/dev/null 2>&1; then
   for d in 2026-03-01 2026-05-01 2026-07-01 2026-01-01; do

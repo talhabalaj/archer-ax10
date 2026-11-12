@@ -23,8 +23,9 @@ local function get(k, d)
     return v
 end
 
-local function words(s)
+local function words(s)       -- a space-separated setting, or a UCI list (a table)
     local t = {}
+    if type(s) == "table" then for _, w in ipairs(s) do t[#t + 1] = w end; return t end
     for w in (s or ""):gmatch("%S+") do t[#t + 1] = w end
     return t
 end

@@ -49,6 +49,7 @@
 #   ax10.sh home-set lock 0|1 / home-set expire <days>
 #   ax10.sh forget-device <mac>[,<mac>...]  forget devices: all their settings, hidden while offline
 #   ax10.sh usage        data used: per day, per month, per device this month
+#   ax10.sh reboot       save the usage log, then reboot
 #   ax10.sh sync         apply everything now (after forget-device / entry, which only save)
 #   ax10.sh entry caps|noinet|guest_fast|lan_allow <mac> <value|on|off>   one device's setting
 #   ax10.sh forget <mac>   drop an IoT device's fixed address (not re-pinned from its lease)

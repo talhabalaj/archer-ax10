@@ -49,9 +49,15 @@ usage_load() {   # the log as saved in flash -> $RUN/usage (bytes)
       for e in $(cfg usage_devs ''); do echo "D:${e%%=*} ${e#*=}"; done
     } | awk '{ split($2, v, "/"); if (v[1] ~ /^[0-9]+$/ && v[2] ~ /^[0-9]+$/) printf "%s %.0f %.0f\n", $1, v[1] * 1048576, v[2] * 1048576 }' > "$RUN/usage"
 }
+# Saved as UCI lists, one short entry each: TP-Link's startup cuts any single saved
+# value to 2465 characters, and the devices of two months in one value would pass that.
 usage_save() {   # $RUN/usage -> flash, in whole MB
-    pick() { awk -v p="$1" 'index($1, p) == 1 { printf "%s=%.0f/%.0f ", substr($1, 3), $2 / 1048576, $3 / 1048576 }' "$RUN/usage" | sed 's/ $//'; }
-    $UCI set "$SEC.iot_usage_days=$(pick T:)"; $UCI set "$SEC.iot_usage_months=$(pick M:)"; $UCI set "$SEC.iot_usage_devs=$(pick D:)"
+    for k in days:T: months:M: devs:D:; do
+        key="$SEC.iot_usage_${k%%:*}"; p="${k#*:}"
+        $UCI -q delete "$key"
+        awk -v p="$p" 'index($1, p) == 1 { printf "%s=%.0f/%.0f\n", substr($1, 3), $2 / 1048576, $3 / 1048576 }' "$RUN/usage" |
+            while read -r e; do $UCI add_list "$key=$e"; done
+    done
     commit_cfg >/dev/null
 }
 usage_on() { [ "$(cfg usage_on 1)" = 1 ]; }       # counting is on unless iot_usage_on=0
@@ -123,7 +129,9 @@ usage_sync() {
             /^T:/ { if ($1 >= dcut) print; next } /^M:/ { if ($1 >= mcut) print; next }
             /^D:/ { if (index($1, m1) == 1 || index($1, m2) == 1) print; next }' "$RUN/usage" | sort > "$RUN/usage.new" && mv "$RUN/usage.new" "$RUN/usage"
     fi
-    # To flash every few hours.
+    # To flash every few hours. Not at the first reading after a start: what the log
+    # holds then is what flash holds, plus seconds.
     last="$(cat "$RUN/usage.saved" 2>/dev/null)"
-    if [ $((now - ${last:-0})) -ge "${USAGE_SAVE_EVERY:-14400}" ]; then usage_save; echo "$now" > "$RUN/usage.saved"; fi
+    if [ -z "$last" ]; then echo "$now" > "$RUN/usage.saved"
+    elif [ $((now - last)) -ge "${USAGE_SAVE_EVERY:-14400}" ]; then usage_save; echo "$now" > "$RUN/usage.saved"; fi
 }
