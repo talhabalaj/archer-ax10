@@ -1,7 +1,7 @@
 # ==== src/10-lock.sh: the run lock, pid files
 # One lock around everything that changes the router or the saved settings: every
 # ax10.sh command but `status`, every watcher pass, and the dashboard's own settings
-# writes (iot_net.lua takes the same lock). Without it, interleaved rebuilds leave
+# writes (web/ax10.lua takes the same lock). Without it, interleaved rebuilds leave
 # rules in the wrong order, and two writers of one list lose each other's change.
 #
 # It is the kernel's lock (lockf, through nixio): it belongs to one process, is not

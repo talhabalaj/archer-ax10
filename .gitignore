@@ -1,10 +1,11 @@
-# opkg feed build output (produced by build-repo.sh / CI)
-/repo/
+# opkg feed build output (CI: feed/, dist/)
+/feed/
+/dist/
 *.ipk
 Packages
 Packages.gz
-# optional cloudflare-mirror tooling
-.wrangler/
+# luac without -p writes this
+luac.out
 # editor / OS
 *.swp
 *~
@@ -13,3 +14,4 @@ Packages.gz
 # built from src/ by scripts/build.sh
 /ax10.sh
 /ax10.sh.tmp
+/build/

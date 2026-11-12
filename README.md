@@ -1,106 +1,74 @@
-# archer-ax10
+# archer-ax10 (personal fork)
 
-Personal fork: see [ROUTER_SETUP.md](ROUTER_SETUP.md) for the SSH-first boot setup,
-LAN access, and release URLs used on this router. The fork's `boot.sh` starts only
-the SSH lifeline; `install.sh` installs opkg separately. The original upstream
-documentation follows below.
+Add-ons for a **TP-Link Archer AX10** on its stock firmware: nothing is reflashed. The
+router's root filesystem is read-only and everything else is RAM, so the add-ons are
+started again at every boot by a hook saved in the router's settings, and come from the
+signed releases of this repo.
 
-> ⚡ **Just want it working?** Skip the build — grab the prebuilt binaries and get started in minutes at **[archer-boot.pages.dev](https://archer-boot.pages.dev)** (root the router first via [Waujito/TPLlAX1500GPL](https://github.com/Waujito/TPLlAX1500GPL)).
+## What it adds
 
-A self-assembling boot + package system for the **TP-Link Archer AX10** (Broadcom BCM963178,
-ARMv7l, glibc 2.26, busybox-init, kernel 4.1) running TP-Link's OpenWrt-based firmware.
-
-The router has a **read-only squashfs root and no writable persistence** except one
-flash-stored hook. Instead of reflashing, this project turns that single hook into a
-bootstrap: on every boot the router fetches a script from the internet, hardens the stock
-firmware, then **rebuilds a modern userland from an `opkg` feed** — a real HTTPS `wget`, a
-full busybox applet layer, an SSH server, a Broadcom wifi apply backend, and a modern **LuCI**
-web UI — all supervised by busybox-init. Nothing but the hook is persisted; the whole stack
-reassembles itself from packages each boot.
-
-> This is my own router. The URLs default to my GitHub; override them and it's yours.
+- **Isolated IoT Wi-Fi**: its own hidden network, subnet and firewall; devices pinned and
+  locked; internet per device.
+- **Home allow list**: only listed devices join the home Wi-Fi (also through the mesh
+  satellite and on cables); a join page on the guest Wi-Fi helps listed devices move over.
+- **Speed limits**: per device, for guests, and for the whole connection, fixed or
+  automatic (follows the line); calls and games first, guests last.
+- **Local names and DNS over HTTPS**: `<device>.home`, encrypted upstream DNS.
+- **Data usage** per day, month and device, and a **router load** watcher.
+- **Dashboard** at `https://192.168.0.1/` (the stock UI stays at `/webpages/index.html`).
 
 ## How a boot works
 
 ```
-openvpn "up" hook  (the ONE flash-persisted boot-exec, survives reboots)
-        │  waits for WAN, then fetches over HTTPS
-        ▼
-boot.sh (this repo) ── fetched from GitHub Releases
-        ├─ set root password = the router's OWN web-GUI password (see "Password" below)
-        ├─ start a lifeline dropbear on :2222
-        ├─ bootstrap busybox 1.31 + a real HTTPS wget (stock 1.19 wget has no SSL)
-        ├─ bootstrap opkg (static Entware + glibc loader tree in tmpfs)
-        └─ opkg install ax10-busybox               ← from the GitHub Releases feed
-                    │   default = opkg + a full userland only. Now: opkg install nyancat htop mc ...
-                    ▼
-        ax10-busybox ─ ~396 applets + box-wide HTTPS wget
-
-   optional add-ons — opkg install them if you want them (deps pulled automatically):
-        ax10-luci ─── modern LuCI 21.02 web UI on :8080  (pulls ax10-svc + ax10-wifi)
-        ax10-dropbear ─ native SSH on :22                (pulls ax10-svc)
-        ax10-svc ──── service manager (busybox-init respawn; this box has no procd)
-        ax10-wifi ─── apply /etc/config/wireless to the Broadcom wl driver
+hook in the router's settings (OpenVPN "up", the one thing that persists)
+  ├─ starts the signed copy of ax10.sh saved in flash: allow list, IoT network,
+  │  limits and names are up within seconds, with or without internet
+  └─ downloads boot.sh from the latest release (signature checked), which
+       ├─ mirrors the web-UI admin password to root and starts SSH on :2222
+       ├─ downloads ax10.sh aside (checked), which installs itself, takes over,
+       │  installs the dashboard and saves itself as the copy in flash
+       └─ installs opkg and the packages in boot_pkgs (each checked)
 ```
 
-A working `opkg` + userland is the base and stands on its own (see [ax10-opkg](../../../ax10-opkg));
-LuCI, SSH-on-22, etc. are things you opt into, not things forced on every boot.
+Every download is checked against the release key saved on the router
+(`scripts/signed-hook.sh`).
 
-## Repository layout (umbrella + submodules)
+## Repository
 
-| Repo | What it is |
-|---|---|
-| **archer-ax10** (this) | `boot.sh`, feed builder (`build-repo.sh`), optional CF mirror (`deploy-to-pages.sh`), docs, and the package repos as submodules under `repo-src/`. |
-| [ax10-opkg](../../../ax10-opkg) | **The opkg bootstrap** — a working `opkg` + Entware userland on this RO-root router. Stands alone; no LuCI needed. |
-| [ax10-svc](../../../ax10-svc) | Minimal service manager — registers foreground daemons with busybox-init `respawn`. |
-| [ax10-busybox](../../../ax10-busybox) | Additive busybox 1.31 applet layer + the HTTPS `wget` override opkg needs. |
-| [ax10-dropbear](../../../ax10-dropbear) | Dropbear SSH on :22, supervised by ax10-svc. |
-| [ax10-wifi](../../../ax10-wifi) | Applies `/etc/config/wireless` to the Broadcom `wl` driver; standalone (no web UI needed). |
-| [ax10-luci](../../../ax10-luci) | Modern LuCI web UI (cross-built 19.07 rpcd/uhttpd on the 2013 ubus stack). |
-| [newstack](../../../newstack) | The shared glibc-2.26 ARM cross-build stack (toolchain + sysroot + ABI shims) that builds the glibc binaries. |
+| Path | What |
+| --- | --- |
+| `src/*.sh` | Everything on the router, one file per job; `scripts/build.sh` joins them into `ax10.sh` |
+| `web/` | The dashboard (source in `web/dashboard/`, built into one page) and its LuCI backend `web/ax10.lua` |
+| `helpers/` | DNS-over-HTTPS forwarder, automatic speed limit, CA certificates |
+| `boot.sh` | What the hook runs once the release downloads |
+| `scripts/signed-hook.sh` | Writes the boot hook into the router's settings |
+| `install.sh`, `index.sh`, `bootstrap/` | opkg installer, feed index, SSH lifeline binary |
+| `tests/` | `sh tests/run.sh` runs everything offline |
+| `.github/workflows/` | Tests on every push; `build-feed.yml` builds and signs a release |
 
-## The `opkg` feed (served from GitHub Releases)
+The optional opkg packages (`ax10-busybox`, `ax10-dropbear`, `ax10-luci`, `ax10-svc`,
+`ax10-wifi`) are built in their upstream repos; the release collects their `.ipk`s and
+signs the index.
 
-**Each package repo builds and publishes its own `.ipk`** (its `build-ipk` workflow → that
-repo's `ipk` release). From-source packages (e.g. `ax10-dropbear`) compile in CI and never
-commit the binary; script/vendored packages pack their `data/`. The `build-feed` workflow here
-downloads each package's `.ipk`, runs `index.sh` to build the `Packages(.gz)` index, and
-publishes the index + all `.ipk`s + the boot bootstrap assets as a GitHub **Release**. The
-router points `opkg` at:
+## Docs
 
-```
-src/gz ax10 https://github.com/lee-soft/archer-ax10/releases/latest/download
-```
+- [IOT_NETWORK.md](IOT_NETWORK.md): every feature, and what we learned about the router
+- [ROUTER_SETUP.md](ROUTER_SETUP.md): the boot hook, SSH and release setup
+- [AGENTS.md](AGENTS.md): how to work on this repo (tests, trying changes, releases)
 
-`opkg`/`wget` on this box has no CA bundle, so fetches use `-k` / a no-verify `ssl_client`;
-GitHub's valid TLS + redirect to `objects.githubusercontent.com` works fine with that.
+## Password
 
-## Password (why it's not hardcoded)
+The stock firmware has no root password, so `boot.sh` sets one for SSH by **mirroring the
+router's own web-UI admin password**: TP-Link stores it encrypted in
+`/etc/config/accountmgnt`, and the firmware's own routine
+(`luci.model.accountmgnt.get_localPassword`) decrypts it; it is hashed straight into
+`/etc/shadow`. Change it in the web UI and SSH follows at the next boot. A hash of the
+default `admin` is the only fallback, used if that routine fails.
 
-The stock squashfs ships no `/etc/shadow` (root is passwordless/locked), so `boot.sh` must set
-one for SSH. Rather than baking in a password, it **mirrors the router's own web-GUI admin
-password**: TP-Link stores that AES-encrypted in `/etc/config/accountmgnt`, so `boot.sh` asks
-the firmware's own decrypt routine (`luci.model.accountmgnt.get_localPassword`) for the
-plaintext and hashes it into `/etc/shadow`. Change it in the web GUI and SSH + LuCI follow on
-the next boot. A crypt hash of the default `admin` is the only fallback, used solely if that
-decrypt path fails.
+## Upstream and license
 
-## Build pipeline
-
-- `busybox` — independent static-musl cross-build (public toolchain) in `ax10-busybox`.
-- `dropbear` + the LuCI stack — built with the **newstack** glibc-2.26 toolchain (packaged as
-  a container image so CI, and anyone, can reproduce binaries for this router's architecture).
-- The prebuilt binaries are vendored in the package repos so the feed builds immediately;
-  the from-source CI reproduces them. See each package's `build/` and the `newstack` repo.
-
-## Using it on your own router
-
-1. Fork these repos (or change `lee-soft` in `boot.sh`'s `SRC`/`FEED` to your account).
-2. Let CI publish the feed Release (or run `build-repo.sh` and upload the assets yourself).
-3. Point your boot hook at your `boot.sh`. Override the source at runtime any time:
-   `SRC=https://your.cdn/path sh /tmp/boot.sh`.
-
-## License
-
-MIT for this project's own code (see LICENSE). Bundled third-party binaries keep their own
-licenses — see THIRD-PARTY.md.
+Based on [lee-soft/archer-ax10](https://github.com/lee-soft/archer-ax10) (boot hook,
+opkg feed, packages); rooting groundwork by
+[Waujito/TPLlAX1500GPL](https://github.com/Waujito/TPLlAX1500GPL).
+MIT for this project's own code (see LICENSE); third-party binaries keep their own
+licenses (see THIRD-PARTY.md).

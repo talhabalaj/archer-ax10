@@ -92,6 +92,10 @@ cat > "$T/bin/mount" <<EOF
 #!/bin/sh
 echo "mount \$*" >> "$T/calls"
 EOF
+cat > "$T/bin/umount" <<EOF
+#!/bin/sh
+echo "umount \$*" >> "$T/calls"
+EOF
 printf '%s\n' 'nvram set ${CONFIG_WIFI}_map="3" # BH BSS + FH BSS' 'nvram set ${RTORCFG_WIFI}_dwds="1"' > "$T/tplink_brcm.sh"
 # tc: remembers root htb and ingress qdiscs per device so "qdisc show" works.
 cat > "$T/bin/tc" <<'EOF'
@@ -160,7 +164,7 @@ iot() {
   u="$1"; s="$2"; shift 2
   env WAN_DEV="${WAN_DEV:-none}" UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" DHCP6S_CONF="$T/dhcp6s.conf" DHCP6S_INIT="$T/bin/none" DNSMASQ_HUP=true COMMIT_FLASH="$T/bin/none" DOH_WARMUP=0 DNSMASQ_BIN="$T/bin/dnsmasq-test" DNSMASQ_MAIN="$T/dnsmasq.conf" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
       IPT="$T/bin/iptables" IPT6="$T/bin/ip6tables" TC="$T/bin/tc" \
-      MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" \
+      MOUNT="$T/bin/mount" UMOUNT="$T/bin/umount" PROC_MOUNTS="$T/mounts" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
       NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/ax10.sh" LEGACY_SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" \
       ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true CLIENTS="$T/clients.json" \
@@ -304,7 +308,7 @@ echo "dropbear \$*" >> "$T/calls"
 EOF
 chmod +x "$T/bin/dropbear"
 # boot (as boot.sh runs it: a non-executable copy via sh) starts the network.
-mkdir -p "$T/run/ui/iotNetwork"; : > "$T/run/ui/iot_net.lua"; : > "$T/inittab"; : > "$T/calls"
+mkdir -p "$T/run/files/web"; : > "$T/run/files/web/ax10.lua"; : > "$T/inittab"; : > "$T/calls"
 cp "$ROOT/ax10.sh" "$T/ax10.sh"; chmod 600 "$T/ax10.sh"
 iot "$T/bin/uci" "$T/ax10.sh" boot >/dev/null 2>&1 || true
 [ "$(readlink "$T/net/wl1.4/brport/bridge")" = "../../br-iot" ] || fail "boot did not put wl1.4 in br-iot"
@@ -470,37 +474,32 @@ grep -q "AX10_SHAPE" "$T/rules" "$T/rules6" 2>/dev/null && fail "shape rules lef
 [ ! -f "$T/run/shape.sig" ] || fail "shape.sig left behind after limits off"
 [ ! -f "$T/run/guest.sig" ] || fail "guest.sig left behind"
 
-# --- web-page installer: files copied, JSON edited once even when run twice.
-rm -rf "$T/run/ui" "$T/www" "$T/ctl"
-mkdir -p "$T/run/ui" "$T/www/config" "$T/www/locale/en_US" "$T/www/modules/advanced/wireless" "$T/ctl"
-cp -R "$ROOT/iot-ui/." "$T/run/ui/"
-printf '%s\n' '{"advanced":[{"name":"wireless","children":[{"name":"guestNetworkAdv","text":"GUEST_NETWORK"}]}]}' > "$T/www/config/navigator.json"
-printf '%s\n' '{"guestNetworkAdv":{"controller":"./modules/x/script.js","view":"./modules/x/view.html"}}' > "$T/www/config/modules.json"
-printf '%s\n' '$.su.CHAR.MENU_ITEMS_NAME = {};' > "$T/www/locale/en_US/lan.js"
-printf '%s\n' '.stock-rule { color: red }' > "$T/www/locale/en_US/lan.css"
+# --- web UI installer: the dashboard at /, its backend as ax10.lua, and nothing of
+# TP-Link's own UI touched. An upgrade from a version that patched it (pages, menu,
+# language files, login redirect, the old controller name) takes those down.
+rm -rf "$T/run/files" "$T/run/ui" "$T/run/overlay" "$T/www" "$T/ctl"
+mkdir -p "$T/run/files" "$T/www/config" "$T/www/locale/en_US" "$T/www/modules/advanced/wireless" "$T/ctl" \
+         "$T/run/ui" "$T/run/overlay/wireless" "$T/run/overlay/config" "$T/run/overlay/locale-en_US"
+cp -R "$ROOT/build/ax10-files/." "$T/run/files/"
 printf '%s\n' 'stock root redirect' > "$T/index.html"
-printf '%s\n' 'stock login redirect' > "$T/www/login.html"
-: > "$T/calls"
+printf '%s\n' 'stock login' > "$T/www/login.html"
+: > "$T/ctl/iot_net.lua"                                       # the controller's old name
+printf 'none %s none 0 0\n' "$T/www/modules/advanced/wireless" "$T/www/config" "$T/www/locale/en_US" "$T/www/login.html" > "$T/mounts"
+: > "$T/calls"; : > "$T/run/iot.log"
 run ui >/dev/null 2>&1 || true
+[ -f "$T/ctl/ax10.lua" ] || fail "the backend was not installed as ax10.lua"
+[ ! -e "$T/ctl/iot_net.lua" ] || fail "the old controller (iot_net.lua) was left in place"
+has "mount --bind $T/run/files/web/dashboard.html $T/index.html"
+grep -q "mount --bind .*login.html" "$T/calls" && fail "TP-Link's login page was bound over"
+for d in "$T/www/modules/advanced/wireless" "$T/www/config" "$T/www/locale/en_US" "$T/www/login.html"; do has "umount $d"; done
+[ ! -e "$T/run/ui" ] && [ ! -e "$T/run/overlay/wireless" ] && [ ! -e "$T/run/overlay/config" ] && [ ! -e "$T/run/overlay/locale-en_US" ] || fail "the old UI's RAM copies were left behind"
+grep -q "back to stock" "$T/run/iot.log" || fail "no note that TP-Link's UI is back to stock"
+# Nothing of TP-Link's left to take down: a second run touches none of it.
+: > "$T/mounts"; : > "$T/calls"
 run ui >/dev/null 2>&1 || true
-[ -f "$T/ctl/iot_net.lua" ] || fail "iot_net.lua not installed"
-[ -f "$T/www/modules/advanced/wireless/iotNetwork/script.js" ] || fail "iotNetwork page not installed"
-[ -f "$T/www/modules/advanced/wireless/guestSpeed/script.js" ] || fail "guestSpeed page not installed"
-for f in navigator.json modules.json; do
-  node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/www/config/$f" || fail "$f is not valid JSON"
-done
-[ "$(grep -o '"iotNetwork"' "$T/www/config/navigator.json" | wc -l)" -eq 1 ] || fail "navigator.json: iotNetwork not exactly once"
-[ "$(grep -o '"guestSpeed"' "$T/www/config/navigator.json" | wc -l)" -eq 1 ] || fail "navigator.json: guestSpeed not exactly once"
-[ "$(grep -o '"iotNetwork":{' "$T/www/config/modules.json" | wc -l)" -eq 1 ] || fail "modules.json: iotNetwork not exactly once"
-[ "$(grep -o '"guestSpeed":{' "$T/www/config/modules.json" | wc -l)" -eq 1 ] || fail "modules.json: guestSpeed not exactly once"
-loc="$(head -c 40 "$ROOT/iot-ui/locale.js")"
-[ "$(grep -cF -- "$loc" "$T/www/locale/en_US/lan.js")" -eq 1 ] || fail "lan.js: locale line not exactly once"
-grep -qF 'MENU_ITEMS_NAME = {};' "$T/www/locale/en_US/lan.js" || fail "lan.js lost its original line"
-[ "$(grep -c 'ax10-theme-begin' "$T/www/locale/en_US/lan.css")" -eq 1 ] || fail "lan.css: theme not exactly once"
-grep -qF 'stock-rule' "$T/www/locale/en_US/lan.css" || fail "lan.css lost its original rule"
-[ "$(tail -n 1 "$T/www/locale/en_US/lan.css")" = "$(tail -n 1 "$ROOT/iot-ui/theme.css")" ] || fail "lan.css: theme not at the end"
-has "mount --bind $T/run/ui/dash/index.html $T/index.html"
-has "mount --bind $T/run/ui/dash/login.html $T/www/login.html"
+grep -q "umount $T/www" "$T/calls" && fail "a second install unmounted TP-Link's UI again"
+has "mount --bind $T/run/files/web/dashboard.html $T/index.html"
+grep -q "www/config\|www/locale\|modules/advanced" "$T/calls" && fail "the install touched TP-Link's own pages"
 
 # Lock 1: held by another process -> the run waits, gives up and changes nothing.
 hold_lock; : > "$T/calls"
@@ -773,10 +772,10 @@ grep -q "domain-name-servers" "$T/dhcp6s.conf" && fail "IPv6 DNS servers still a
 grep -q "option x y" "$T/dhcp6s.conf" || fail "other DHCPv6 options lost"
 # DNS over HTTPS: the forwarder runs against the chosen provider; dnsmasq uses only it
 # while it answers, and the plain servers while it doesn't.
-: > "$T/run/ui/doh.lua"; : > "$T/run/ui/cacert.pem"; echo 1 > "$T/doh_on"; : > "$T/doh_healthy"; : > "$T/calls"
+mkdir -p "$T/run/files/helpers"; : > "$T/run/files/helpers/doh.lua"; : > "$T/run/files/helpers/cacert.pem"; echo 1 > "$T/doh_on"; : > "$T/doh_healthy"; : > "$T/calls"
 iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 i=0; while [ $i -lt 30 ] && ! grep -qF "doh.lua 5053" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
-has "doh.lua 5053 9.9.9.9 dns.quad9.net $T/run/ui/cacert.pem"
+has "doh.lua 5053 9.9.9.9 dns.quad9.net $T/run/files/helpers/cacert.pem"
 grep -qxF "server=127.0.0.1#5053" "$T/dnsmasq.conf" || fail "dnsmasq not using the DNS-over-HTTPS forwarder"
 grep -qxF "server=1.1.1.1" "$T/dnsmasq.conf" && fail "plain DNS server still in use next to DNS over HTTPS"
 rm -f "$T/doh_healthy"
@@ -836,7 +835,7 @@ echo 0 > "$T/u/iot_home_lock"; h home
 
 # --- automatic whole-connection limit: the lanes' rates change in place, and the
 # controller runs with the usual speeds and the range.
-: > "$T/run/ui/autorate.lua"; echo 1 > "$T/wan_on"; : > "$T/prio_on"; : > "$T/glow_on"; : > "$T/auto_on"; rm -f "$T/run/shape.sig"; : > "$T/calls"
+mkdir -p "$T/run/files/helpers"; : > "$T/run/files/helpers/autorate.lua"; echo 1 > "$T/wan_on"; : > "$T/prio_on"; : > "$T/glow_on"; : > "$T/auto_on"; rm -f "$T/run/shape.sig"; : > "$T/calls"
 iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
 i=0; while [ $i -lt 30 ] && ! grep -qF "autorate.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
 has "autorate.lua $T/run/rate.sh $T/run/autorate.stat br-lan ifb0 90 40 45 200 20 120"

@@ -1,8 +1,9 @@
 # Isolated IoT Wi-Fi on the stock AX10 firmware
 
 `ax10.sh` adds a separate 2.4 GHz Wi-Fi network for smart devices (the inverter's
-Wi-Fi logger, cameras) to the stock TP-Link firmware, with a settings page in the
-stock web UI. It needs no reflash and no opkg: `boot.sh` fetches it each boot.
+Wi-Fi logger, cameras) to the stock TP-Link firmware, set up on our dashboard. It
+needs no reflash and no opkg: `boot.sh` fetches it each boot. TP-Link's own web UI
+is left as it is.
 
 Status (2026-11-10): tested live with an iPhone, an Apple Watch and the inverter
 logger. Reboot test with release `v21-personal` passed: after a reboot the
@@ -33,8 +34,6 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
   (masquerade out any non-bridge interface).
 - **Watcher:** busybox-init `respawn` runs `ax10.sh watch`, which re-applies every
   15 s whatever TP-Link undoes.
-- **Web page:** Advanced → Wireless → IoT Network (enable, SSID, password, hide,
-  IoT → home exceptions, per-device Internet switch).
 - **Dashboard:** `https://192.168.0.1/` opens our own dashboard (see
   [Dashboard](#dashboard-at-)); the stock UI stays at `/webpages/index.html`.
 
@@ -56,7 +55,8 @@ sh /tmp/ax10.sh stop    # undo everything, give wl1.4 back to TP-Link
 Settings are UCI options `openvpn.archer_boot.iot_*`, saved with
 `uci_commit_flash`. `boot.sh` runs `ax10.sh boot` whenever `iot_enabled` exists
 (0 or 1): that installs the page, and starts the network if the value is 1.
-Release assets: `ax10.sh`, `iot-ui.tar.gz`. `ax10.sh` is built from `src/` by
+Release assets: `ax10.sh`, `ax10-files.tar.gz` (the dashboard, its backend and the
+helpers, built into `build/ax10-files` by `scripts/build.sh`). `ax10.sh` is built from `src/` by
 `scripts/build.sh`. The offline tests are `sh tests/run.sh`; CI runs them before
 publishing.
 
@@ -103,9 +103,9 @@ Pi-hole-style local names, served by the stock dnsmasq (`iot_dns_on=1`):
 - TP-Link's "dnsproxy" DNATs LAN DNS for the router to the ISP's servers
   (`prerouting_rule_dns`), so names never resolved; ACCEPT rules at the top of that
   chain keep queries for the router on the router.
-- **DNS over HTTPS** (`iot_dns_doh=1`): `iot-ui/doh.lua` listens on 127.0.0.1:5053 and
+- **DNS over HTTPS** (`iot_dns_doh=1`): `helpers/doh.lua` listens on 127.0.0.1:5053 and
   POSTs each query (RFC 8484) to the provider over a pool of up to 3
-  `openssl s_client` connections, which check the chain against `iot-ui/cacert.pem`
+  `openssl s_client` connections, which check the chain against `helpers/cacert.pem`
   and the name (`-verify 10 -verify_hostname <name> -verify_return_error`; without
   `-verify 10` this OpenSSL 1.0.2 reports a bad certificate and carries on). luasec
   0.4 on the router can't check names, hence s_client. Health-checked every pass
@@ -114,7 +114,7 @@ Pi-hole-style local names, served by the stock dnsmasq (`iot_dns_on=1`):
 
 ## Automatic speed limit
 
-`iot_wan_auto=1` runs `iot-ui/autorate.lua` while the whole-connection limit is on.
+`iot_wan_auto=1` runs `helpers/autorate.lua` while the whole-connection limit is on.
 Every second it reads the WAN counters and pings two of four reflectors (1.1.1.1,
 8.8.8.8, 9.9.9.9, 1.0.0.1; 16-byte payload). The pings leave from the router itself,
 out the WAN port, so they never pass through our queues (which sit on `br-lan` and
@@ -158,7 +158,7 @@ out the WAN port, so they never pass through our queues (which sit on `br-lan` a
 3 cores), softirq % (network processing), load average, WAN kbit/s down and up; 24
 hours kept. Four passes in a row at 90% or more log one line with the busiest
 processes (by name only: `pppd`'s command line holds the PPPoE login). The
-dashboard's Internet tab shows it (`iot_net.lua` form `load`). `ax10.sh load [n]` prints
+dashboard's Internet tab shows it (`web/ax10.lua` form `load`). `ax10.sh load [n]` prints
 the last readings. The whole-connection limit and device caps take traffic off the
 hardware fast path, so the processor is where a busy router shows first. Typical:
 20-30% busy at a few Mbps with the limit on.
@@ -331,7 +331,7 @@ cloud services the Tether app uses.
   ECDSA key is regenerated each boot (`-R`). Pin the RSA key in known_hosts
   and connect with `-o HostKeyAlgorithms=ssh-rsa` to avoid host-key warnings.
 
-### Speed limits (dashboard Speed tab; Advanced → Wireless → Guest Speed)
+### Speed limits (dashboard: Internet, and Networks → Guest)
 - Three optional caps, all applied by `ax10.sh shape` and kept in sync by the
   watcher: per device (`iot_caps`, `mac=down/up` in Mbps, 0 = no cap that way),
   guests (`iot_guest_limit`, `iot_guest_down`/`iot_guest_up` per device; MACs in
@@ -412,11 +412,13 @@ cloud services the Tether app uses.
   changed row, so list switches save immediately via `ev_grid_custom_change`.
 
 ### Dashboard at /
-- `iot-ui/dash/index.html` is one self-contained page (no build step). `ax10.sh ui`
-  bind-mounts it over `/www/index.html` (what `https://192.168.0.1/` serves) and
-  bind-mounts `dash/login.html`, a redirect to `/`, over `/www/webpages/login.html`
-  (where uhttpd sends every plain-HTTP visit). The stock UI stays at
-  `/webpages/index.html`; `ax10.sh ui-remove` undoes both mounts.
+- One self-contained page, `web/dashboard.html`, built from `web/dashboard/`: `page.html`
+  with `style.css` and `js/*.js` (joined in name order, one script) put in at its two
+  markers. `ax10.sh ui` bind-mounts it over `/www/index.html` (what
+  `https://192.168.0.1/` serves). Nothing else of TP-Link's UI is changed: plain-HTTP
+  visits land on its own login, and it stays at `/webpages/index.html`. (Earlier
+  versions added two pages, a menu entry, a theme and a login redirect to it;
+  `ax10.sh ui` takes those down.) `ax10.sh ui-remove` undoes the mount.
 - Tabs: Devices (every device with name, IP, where it is connected, live traffic;
   rename, cap, block, forget), Networks (Home with the allow list, Guest with its
   limits and join-home page, IoT), Internet (connection, data used, the
@@ -433,7 +435,7 @@ cloud services the Tether app uses.
   `encryptorRsa`), so each side opens the other already logged in. The router
   allows one admin session: a login elsewhere replaces ours, and our replies then
   fail to decrypt, which the page reports as "signed out".
-- **Backend:** `iot_net.lua` forms `devices` (one list with every DHCP lease, the
+- **Backend:** `web/ax10.lua` (LuCI controller at `/admin/ax10`) forms `devices` (one list with every DHCP lease, the
   presence data, block-list and IoT/guest flags), `device` (write name, internet,
   allowed, fast for one MAC) and `summary` (uptime and the PPPoE interface
   `network.interface.internet` from ubus). The page adds names and guest status
@@ -444,9 +446,8 @@ cloud services the Tether app uses.
   `enable=on`), `form=black_list` (`insert` with `new={"name","mac":"AA-BB-…"}`;
   `remove` with `key=<mac>` and `index`). Unblocking the last device switches
   Access Control back off. Tested with a made-up MAC, not a real device.
-- Links to stock pages go to `/webpages/index.html`; the stock UI ignores URL
-  fragments, so the page leaves the target in `sessionStorage` (`ax10-go`) and
-  `locale.js`, which runs inside the stock UI, opens it once the menu is up.
+- Links to TP-Link's settings open `/webpages/index.html` (its home page: the stock
+  UI ignores URL fragments, so it can't be opened on a given page).
 
 ### Mesh satellite (Archer C6, EasyMesh)
 - It joins over `wl1.2` (hidden backhaul) and appears as `wds1.2.1` in `br-lan`;

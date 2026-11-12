@@ -66,8 +66,10 @@ The OpenVPN hook and SSH availability must be verified after an actual reboot.
 
 Upstream: https://github.com/lee-soft/archer-ax10. Rooting groundwork:
 https://github.com/Waujito/TPLlAX1500GPL. Upstream package sources and licenses
-are preserved in the submodules and `THIRD-PARTY.md`.
+are listed in `THIRD-PARTY.md`; the packages' source and build recipes live in the
+upstream repos (github.com/lee-soft/ax10-busybox, ax10-dropbear, ax10-luci,
+ax10-svc, ax10-wifi, ax10-opkg, newstack).
 
-Isolated IoT Wi-Fi network (separate SSID, own subnet, firewalled, with a page in
-the stock web UI): see [IOT_NETWORK.md](IOT_NETWORK.md), which also records what we
+Isolated IoT Wi-Fi network (separate SSID, own subnet, firewalled, set up on the
+dashboard): see [IOT_NETWORK.md](IOT_NETWORK.md), which also records what we
 learned about the router internals along the way.

@@ -16,11 +16,12 @@ upstream licenses**. Nothing here relicenses them.
 | json-c 0.13 | `ax10-luci` | https://github.com/json-c/json-c | MIT |
 | LuCI (Lua + web UI) | `ax10-luci` | https://github.com/openwrt/luci | Apache-2.0 |
 | Entware opkg + loader | boot bootstrap (`opt.tar.gz`) | https://github.com/Entware/Entware | GPL-2.0 / various |
-| GCC / binutils / glibc cross toolchain | `newstack` | https://gcc.gnu.org, https://www.gnu.org/software/libc/ | GPL-3.0 / LGPL-2.1 |
 
-Prebuilt binaries checked into the package repos (and attached to Releases) are provided as a
-convenience. The corresponding source and build recipes are referenced above and, where the
-build is reproduced here, live in each package's `build/` directory and the `newstack` stack.
+Prebuilt binaries attached to Releases are provided as a convenience. This repo builds none of
+them: the packages are built in their upstream repos (github.com/lee-soft/ax10-busybox,
+ax10-dropbear, ax10-luci, ax10-svc, ax10-wifi, ax10-opkg), each with its `build/` directory,
+using the shared glibc cross toolchain in github.com/lee-soft/newstack (GCC, binutils, glibc:
+GPL-3.0 / LGPL-2.1). The corresponding sources are referenced above and pinned in those recipes.
 
 If you redistribute the GPL components (BusyBox, Entware, the toolchain), honour their source
 requirements — links to the exact upstream versions are above and pinned in the build recipes.

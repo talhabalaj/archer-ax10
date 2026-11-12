@@ -15,7 +15,7 @@ status() {
     firewall_ok && echo "firewall:  ok" || echo "firewall:  MISSING/outdated"
     grep -q "^$MARK_BEGIN\$" "$DNSMASQ_CONF" 2>/dev/null && echo "dhcp:      dnsmasq block present" || echo "dhcp:      MISSING"
     grep -q "$TAG" "$INITTAB" 2>/dev/null && echo "watcher:   registered" || echo "watcher:   not registered"
-    mounted "$LUCI_CTL" && echo "web page:  installed" || echo "web page:  not installed"
+    mounted "$LUCI_CTL" && echo "dashboard: installed" || echo "dashboard: not installed"
     echo "--- IoT leases"; grep " $PREFIX\." "$LEASES" 2>/dev/null | awk '{print $2, $3, $4}'
     [ -f "$LOG" ] && { echo "--- last log lines"; tail -n 8 "$LOG"; }
 }

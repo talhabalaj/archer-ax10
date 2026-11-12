@@ -1,6 +1,6 @@
 -- Tests doh.lua's HTTP response framing. The function is cut out of the real file,
 -- since the rest of it needs the router's nixio. Run: lua tests/doh_parse.lua
-local src = assert(io.open(arg[1] or "iot-ui/doh.lua")):read("*a")
+local src = assert(io.open(arg[1] or "helpers/doh.lua")):read("*a")
 local a = assert(src:find("local function parse(buf)", 1, true))
 local b = assert(src:find("-- Read what has arrived", 1, true))
 local parse = assert((loadstring or load)(src:sub(a, b - 1) .. "\nreturn parse"))()

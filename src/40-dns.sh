@@ -58,7 +58,7 @@ dns_block() {   # dnsmasq lines, inside our block in dnsmasq.conf
     elif [ -n "$DNS_UP" ]; then echo "no-resolv"; for u in $DNS_UP; do echo "server=$u"; done; fi
 }
 # DNS over HTTPS (iot_dns_doh=1, needs local names on): the router's upstream lookups
-# go through iot-ui/doh.lua, a small forwarder on 127.0.0.1:$DOH_PORT that sends them
+# go through helpers/doh.lua, a small forwarder on 127.0.0.1:$DOH_PORT that sends them
 # encrypted to one provider, with the server's certificate and name verified. While
 # the forwarder answers, dnsmasq uses only it; while it doesn't (no internet yet, the
 # clock not set at boot so certificates look invalid, provider down), dnsmasq falls
@@ -79,18 +79,18 @@ doh_stop() {
     rm -f "$RUN/doh.ok" "$RUN/doh.sig" "$RUN/doh.stat"
 }
 doh_sync() {
-    if [ "$DNS_ON" != 1 ] || [ "$(cfg dns_doh 0)" != 1 ] || [ ! -f "$UI_SRC/doh.lua" ] || [ ! -f "$UI_SRC/cacert.pem" ]; then
+    if [ "$DNS_ON" != 1 ] || [ "$(cfg dns_doh 0)" != 1 ] || [ ! -f "$UI_SRC/helpers/doh.lua" ] || [ ! -f "$UI_SRC/helpers/cacert.pem" ]; then
         [ -e "$RUN/doh.pid" ] && { doh_stop; log "DNS over HTTPS off"; }
         return 0
     fi
     set -- $(doh_provider)
     if ! doh_running || [ "$1 $2" != "$(cat "$RUN/doh.sig" 2>/dev/null)" ]; then
         doh_stop
-        $LUA "$UI_SRC/doh.lua" "$DOH_PORT" "$1" "$2" "$UI_SRC/cacert.pem" "$RUN/doh.stat" >/dev/null 2>&1 &
+        $LUA "$UI_SRC/helpers/doh.lua" "$DOH_PORT" "$1" "$2" "$UI_SRC/helpers/cacert.pem" "$RUN/doh.stat" >/dev/null 2>&1 &
         pid_save "$RUN/doh.pid" $!; echo "$1 $2" > "$RUN/doh.sig"
         sleep "${DOH_WARMUP:-2}"
     fi
-    if $LUA "$UI_SRC/doh.lua" check "$DOH_PORT" >/dev/null 2>&1; then
+    if $LUA "$UI_SRC/helpers/doh.lua" check "$DOH_PORT" >/dev/null 2>&1; then
         [ -e "$RUN/doh.ok" ] || { : > "$RUN/doh.ok"; log "DNS over HTTPS working ($2)"; }
     elif [ -e "$RUN/doh.ok" ]; then
         rm -f "$RUN/doh.ok"; log "DNS over HTTPS not answering; using the plain DNS servers until it does"

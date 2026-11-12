@@ -1,8 +1,8 @@
--- IoT Network page backend for the stock TP-Link web UI (Archer AX10).
+-- The dashboard's backend (web/dashboard), a LuCI controller at /admin/ax10.
 -- Installed by `ax10.sh ui` into a bind-mounted copy of luci/controller/admin.
 -- Follows the stock controllers' pattern: a dispatch table of form -> operation -> cb,
 -- run through luci.model.controller, which handles the (encrypted) request framing.
-module("luci.controller.admin.iot_net", package.seeall)
+module("luci.controller.admin.ax10", package.seeall)
 
 local uci  = require "luci.model.uci"
 local ctl  = require "luci.model.controller"
@@ -219,65 +219,6 @@ local function presence()
     return at, atif, st, t0
 end
 
--- Rows for one side (IoT subnet or home), named and sorted: the device viewing
--- the page first, then online devices, then offline; alphabetical within.
-local function device_rows(want_iot, extra)
-    local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
-    local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
-    local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
-    local at, nm = (presence()), names()
-    local rows, seen = {}, {}
-    local f = io.open("/tmp/dhcp.leases")
-    if f then
-        for line in f:lines() do
-            local _, mac, ip, host = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-            local is_iot = (ip and prefix and ip:sub(1, #prefix + 1) == prefix .. ".") or false
-            if ip and is_iot == want_iot and not seen[mac:lower()] then
-                mac = mac:lower(); seen[mac] = true
-                rows[#rows + 1] = { key = mac, mac = mac:upper(), ip = ip,
-                                    name = nm[mac] or ((host ~= "*" and host) or "Unknown"),
-                                    status = at[mac] or "Offline", this = (ip == me) }
-            end
-        end
-        f:close()
-    end
-    for _, m in ipairs(extra or {}) do
-        m = m:lower()
-        if not seen[m] then
-            seen[m] = true
-            rows[#rows + 1] = { key = m, mac = m:upper(), ip = "---", name = nm[m] or "Unknown",
-                                status = at[m] or "Offline", this = false }
-        end
-    end
-    local function rank(r) return r.this and 0 or (r.status ~= "Offline" and 1 or 2) end
-    table.sort(rows, function(a, b)
-        if rank(a) ~= rank(b) then return rank(a) < rank(b) end
-        return a.name:lower() < b.name:lower()
-    end)
-    for _, r in ipairs(rows) do
-        if r.this then r.name = r.name .. " (this device)" end
-        r.this = nil
-    end
-    return rows
-end
-
--- A row update from the page: save a changed name; return the row's mac.
-local function apply_rename(new, old)
-    local mac = new and (new.mac or new.key)
-    if type(mac) ~= "string" or not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then return nil end
-    mac = mac:lower()
-    local nn = (new.name or ""):gsub(" %(this device%)$", "")
-    local on = ((old and old.name) or ""):gsub(" %(this device%)$", "")
-    if new.name and nn ~= on then set_name(mac, (nn ~= "Unknown") and nn or "") end
-    return mac
-end
-
-local function decode_row(form)
-    local new = form.new and json.decode(form.new) or form
-    local old = (form.old and form.old ~= "add") and json.decode(form.old) or nil
-    return new, old
-end
-
 local function valid_ssid(s) return s and #s >= 1 and #s <= 32 end
 local function valid_key(s) return s and #s >= 8 and #s <= 63 end
 
@@ -321,49 +262,6 @@ local function write_settings(form)
     return read_settings()
 end
 
------------------------------------------------------------------ clients form
-local function clients()
-    local noinet = words(get("noinet", ""))
-    local rows = device_rows(true)
-    for _, r in ipairs(rows) do r.internet = has(noinet, r.mac) and "off" or "on" end
-    return rows
-end
-
-local function update_client(form)
-    local new, old = decode_row(form)
-    local mac = apply_rename(new, old)
-    if not mac then return false, "-1" end
-    if not old or new.internet ~= old.internet then
-        if not set_entry("noinet", mac, new.internet == "off" and "on" or "off") then return false, "-1" end
-        sync_later()
-    end
-    new.key = mac
-    return new
-end
-
-------------------------------------------------- home devices allowed to reach IoT
--- Home-network devices (DHCP leases outside the IoT subnet), plus allowlisted MACs
--- that are currently offline so they can still be removed. With lan_mode
--- "selected", only allowlisted MACs may open connections to IoT devices.
-local function homes()
-    local allow = words(get("lan_allow", ""))
-    local rows = device_rows(false, allow)
-    for _, r in ipairs(rows) do r.allowed = has(allow, r.mac) and "on" or "off" end
-    return rows
-end
-
-local function update_home(form)
-    local new, old = decode_row(form)
-    local mac = apply_rename(new, old)
-    if not mac then return false, "-1" end
-    if not old or new.allowed ~= old.allowed then
-        if not set_entry("lan_allow", mac, new.allowed == "on" and "on" or "off") then return false, "-1" end
-        sync_later()
-    end
-    new.key = mac
-    return new
-end
-
 ------------------------------------------------------------ guest speed limit
 -- Settings live next to the IoT ones (iot_guest_*); ax10.sh's watcher applies them.
 -- A full sync, not just `shape`: it also registers the watcher, which is what applies
@@ -395,45 +293,9 @@ local function write_guest_settings(form)
     return read_guest_settings()
 end
 
--- Devices connected to TP-Link's guest networks, plus full-speed guests that are
--- offline so they can still be downgraded.
-local function guests()
-    local fast = words(get("guest_fast", ""))
-    local ifs = {}
-    local c = uci.cursor()
-    c:foreach("wireless", "wifi-iface", function(sct)
-        if sct.guest == "on" and sct.ifname then ifs[#ifs + 1] = sct.ifname end
-    end)
-    local on_guest = {}
-    for _, i in ipairs(ifs) do
-        for mac in sh("/usr/sbin/wl -i " .. i .. " assoclist"):gmatch("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)") do
-            on_guest[mac:lower()] = true
-        end
-    end
-    local rows = {}
-    for _, r in ipairs(device_rows(false, fast)) do
-        if on_guest[r.key] or has(fast, r.mac) then
-            r.fast = has(fast, r.mac) and "on" or "off"
-            rows[#rows + 1] = r
-        end
-    end
-    return rows
-end
-
-local function update_guest(form)
-    local new, old = decode_row(form)
-    local mac = apply_rename(new, old)
-    if not mac then return false, "-1" end
-    if not old or new.fast ~= old.fast then
-        if not set_entry("guest_fast", mac, new.fast == "on" and "on" or "off") then return false, "-1" end
-        sync_later()
-    end
-    new.key = mac
-    return new
-end
 
 ---------------------------------------------------------------- dashboard
--- The dashboard at / (iot-ui/dash) asks for everything in one call.
+-- The dashboard at / (web/dashboard) asks for everything in one call.
 local MAC_PAT = "^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$"
 local function normmac(m) return ((m or ""):lower():gsub("-", ":")) end
 
@@ -788,7 +650,7 @@ end
 
 -- Whole-connection shaping: cap all internet traffic a little under the line speed.
 local function read_shaping()
-    -- What the automatic limit is doing right now (iot-ui/autorate.lua), in kbit/s.
+    -- What the automatic limit is doing right now (helpers/autorate.lua), in kbit/s.
     local now = {}
     local f = io.open("/tmp/ax10-iot/autorate.stat")
     if f then for k, v in (f:read("*l") or ""):gmatch("([%a_]+)=(%d+)") do now[k] = tonumber(v) end; f:close() end
@@ -872,12 +734,6 @@ for i in wl[0-9] wl[0-9].[0-9]; do
     [ -d "$i" ] && [ "$(/usr/sbin/wl -i $i ssid)" = "$home" ] && /usr/sbin/wl -i $i deauthenticate ]] .. mac .. [[
 
 done]])
-end
-local function write_kick(form)
-    local mac = normmac(form.mac)
-    if not mac:match(MAC_PAT) then return false, "-1" end
-    kick(mac)
-    return { mac = mac }
 end
 
 -- Our home allow list (ax10.sh home_sync). Every change goes through ax10.sh, which
@@ -1024,7 +880,7 @@ local function read_names()
         local n, ip = e:match("^([^=]+)=(.+)$")
         if n then hosts[#hosts + 1] = { name = n, ip = ip } end
     end
-    -- DNS over HTTPS: on/off, provider, and how the forwarder is doing (iot-ui/doh.lua).
+    -- DNS over HTTPS: on/off, provider, and how the forwarder is doing (helpers/doh.lua).
     local st = {}
     local sf = io.open("/tmp/ax10-iot/doh.stat")
     if sf then for k, v in (sf:read("*l") or ""):gmatch("(%a+)=(%d+)") do st[k] = tonumber(v) end; sf:close() end
@@ -1188,9 +1044,6 @@ local dispatch_tbl = {
     home_open = {
         ["write"] = { cb = write_home_open },
     },
-    kick = {
-        ["write"] = { cb = write_kick },
-    },
     iot_open = {
         ["write"] = { cb = write_open },
     },
@@ -1221,21 +1074,6 @@ local dispatch_tbl = {
         ["read"]  = { cb = read_guest_settings },
         ["write"] = { cb = write_guest_settings },
     },
-    guests = {
-        ["load"]   = { cb = guests },
-        ["read"]   = { cb = guests },
-        ["update"] = { cb = update_guest },
-    },
-    homes = {
-        ["load"]   = { cb = homes },
-        ["read"]   = { cb = homes },
-        ["update"] = { cb = update_home },
-    },
-    clients = {
-        ["load"]   = { cb = clients },
-        ["read"]   = { cb = clients },
-        ["update"] = { cb = update_client },
-    },
 }
 
 function dispatch(http_form)
@@ -1247,5 +1085,5 @@ function _index()
 end
 
 function index()
-    entry({"admin", "iot_net"}, call("_index")).leaf = true
+    entry({"admin", "ax10"}, call("_index")).leaf = true
 end

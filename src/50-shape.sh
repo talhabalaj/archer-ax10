@@ -37,7 +37,7 @@ shape_load() {
     CAPS="$(cfg caps '' | tr 'A-F-' 'a-f:')"
     WS_ON="$(cfg wan_shape 0)"; WS_DOWN="$(cfg wan_down 0)"; WS_UP="$(cfg wan_up 0)"
     PRIO="$(cfg prio 0)"; GLOW="$(cfg guest_low 0)"
-    # Automatic whole-connection limit (iot-ui/autorate.lua): wan_down/up are the
+    # Automatic whole-connection limit (helpers/autorate.lua): wan_down/up are the
     # usual speeds it starts from; it stays between the min and max.
     WS_AUTO="$(cfg wan_auto 0)"
     WS_MIN_D="$(cfg wan_min_down '')"; WS_MAX_D="$(cfg wan_max_down '')"
@@ -88,7 +88,7 @@ auto_stop() {   # auto_stop [keep]: "keep" leaves the last rates for a restart t
 # Keep the controller running while the automatic limit is on (called after the
 # lanes are in place). It restarts from the usual speeds whenever the lanes were rebuilt.
 auto_sync() {   # auto_sync <wan 0|1> <rebuilt 0|1>
-    if [ "$1" != 1 ] || [ "$WS_AUTO" != 1 ] || [ ! -f "$UI_SRC/autorate.lua" ] || [ ! -f "$RUN/rate.sh" ]; then
+    if [ "$1" != 1 ] || [ "$WS_AUTO" != 1 ] || [ ! -f "$UI_SRC/helpers/autorate.lua" ] || [ ! -f "$RUN/rate.sh" ]; then
         if [ -e "$RUN/autorate.pid" ]; then
             auto_stop; log "automatic speed limit off"
             # The lanes still carry whatever rate it had reached: back to the fixed
@@ -103,7 +103,7 @@ auto_sync() {   # auto_sync <wan 0|1> <rebuilt 0|1>
     asig="$WS_DOWN $WS_UP $2 $3 $4 $5"
     if [ "$1" = 1 ] || ! auto_running || [ "$asig" != "$(cat "$RUN/autorate.sig" 2>/dev/null)" ]; then
         if [ "$asig" = "$(cat "$RUN/autorate.sig" 2>/dev/null)" ]; then auto_stop keep; else auto_stop; fi
-        $LUA "$UI_SRC/autorate.lua" "$RUN/rate.sh" "$RUN/autorate.stat" "$LANBR" "$IFB" "$WS_DOWN" "$WS_UP" "$2" "$3" "$4" "$5" >/dev/null 2>&1 &
+        $LUA "$UI_SRC/helpers/autorate.lua" "$RUN/rate.sh" "$RUN/autorate.stat" "$LANBR" "$IFB" "$WS_DOWN" "$WS_UP" "$2" "$3" "$4" "$5" >/dev/null 2>&1 &
         pid_save "$RUN/autorate.pid" $!; echo "$asig" > "$RUN/autorate.sig"
         log "automatic speed limit on: download $2-$3 Mbps, upload $4-$5 Mbps, starting at $WS_DOWN/$WS_UP"
     fi

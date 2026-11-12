@@ -28,11 +28,11 @@
 #   IoT       -> internet   allowed, except MACs listed in iot_noinet
 #
 # Settings are UCI options on openvpn.archer_boot (next to the SSH host key), the one
-# place this router persists. They can be edited from the stock web UI page this
-# script installs (Advanced > Wireless > IoT Network) or with `ax10.sh set`.
+# place this router persists. They are edited on the dashboard (https://192.168.0.1/)
+# or with `ax10.sh set`.
 #
-#   ax10.sh boot       what boot.sh runs: install the web page; start if enabled
-#   ax10.sh ui         install the IoT Network page into the stock web UI
+#   ax10.sh boot       what boot.sh runs: install the dashboard; start if enabled
+#   ax10.sh ui         install the dashboard (at /) and its backend
 #   ax10.sh ui-remove  remove the page again
 #   ax10.sh start      apply now and register the watcher with busybox-init (respawn)
 #   ax10.sh stop       unregister, tear down br-iot, hand the Wi-Fi slot back to TP-Link
