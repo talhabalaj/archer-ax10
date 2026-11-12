@@ -1,6 +1,6 @@
 # Isolated IoT Wi-Fi on the stock AX10 firmware
 
-`iot.sh` adds a separate 2.4 GHz Wi-Fi network for smart devices (the inverter's
+`ax10.sh` adds a separate 2.4 GHz Wi-Fi network for smart devices (the inverter's
 Wi-Fi logger, cameras) to the stock TP-Link firmware, with a settings page in the
 stock web UI. It needs no reflash and no opkg: `boot.sh` fetches it each boot.
 
@@ -31,33 +31,34 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
   `192.168.50.100–200`, plus static leases.
 - **Firewall:** the chains `AX10_IOT_FWD`, `AX10_IOT_IN` and `AX10_IOT_NAT`
   (masquerade out any non-bridge interface).
-- **Watcher:** busybox-init `respawn` runs `iot.sh watch`, which re-applies every
+- **Watcher:** busybox-init `respawn` runs `ax10.sh watch`, which re-applies every
   15 s whatever TP-Link undoes.
 - **Web page:** Advanced → Wireless → IoT Network (enable, SSID, password, hide,
   IoT → home exceptions, per-device Internet switch).
-- **Dashboard:** `https://192.168.0.1/` opens our own dark dashboard (see
+- **Dashboard:** `https://192.168.0.1/` opens our own dashboard (see
   [Dashboard](#dashboard-at-)); the stock UI stays at `/webpages/index.html`.
 
 ## Usage
 
 ```sh
-sh /tmp/iot.sh set ssid "wifi-iot"
-sh /tmp/iot.sh set key  "<8-63 chars>"
-sh /tmp/iot.sh set static "ec:64:c9:d9:e0:b7,192.168.50.10"   # inverter logger
-sh /tmp/iot.sh set allow_lan "tcp:8899@192.168.50.10"          # inverter-link callback
-sh /tmp/iot.sh set noinet "<camera-mac>"                       # optional
-sh /tmp/iot.sh set enabled 1
-sh /tmp/iot.sh ui      # install the web page
-sh /tmp/iot.sh start   # apply + register the watcher
-sh /tmp/iot.sh status
-sh /tmp/iot.sh stop    # undo everything, give wl1.4 back to TP-Link
+sh /tmp/ax10.sh set ssid "wifi-iot"
+sh /tmp/ax10.sh set key  "<8-63 chars>"
+sh /tmp/ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"   # inverter logger
+sh /tmp/ax10.sh set allow_lan "tcp:8899@192.168.50.10"          # inverter-link callback
+sh /tmp/ax10.sh set noinet "<camera-mac>"                       # optional
+sh /tmp/ax10.sh set enabled 1
+sh /tmp/ax10.sh ui      # install the web page
+sh /tmp/ax10.sh start   # apply + register the watcher
+sh /tmp/ax10.sh status
+sh /tmp/ax10.sh stop    # undo everything, give wl1.4 back to TP-Link
 ```
 
 Settings are UCI options `openvpn.archer_boot.iot_*`, saved with
-`uci_commit_flash`. `boot.sh` runs `iot.sh boot` whenever `iot_enabled` exists
+`uci_commit_flash`. `boot.sh` runs `ax10.sh boot` whenever `iot_enabled` exists
 (0 or 1): that installs the page, and starts the network if the value is 1.
-Release assets: `iot.sh`, `iot-ui.tar.gz`. The offline test is `sh tests/iot.sh`;
-CI runs it before publishing.
+Release assets: `ax10.sh`, `iot-ui.tar.gz`. `ax10.sh` is built from `src/` by
+`scripts/build.sh`. The offline tests are `sh tests/run.sh`; CI runs them before
+publishing.
 
 inverter-link: the phone is on another subnet, so automatic discovery won't find
 the logger. Add it by IP (192.168.50.10). The logger connects back to the phone
@@ -65,7 +66,7 @@ on TCP 8899, which is what the `allow_lan` exception permits.
 
 ## Home allow list and join-home page
 
-Our own allow list for the home network, run by the watcher (`iot.sh home`), edited on
+Our own allow list for the home network, run by the watcher (`ax10.sh home`), edited on
 the dashboard's Wi-Fi tab. TP-Link's Access Control stays off: in allow-list mode it
 also filters the guest Wi-Fi, and its guest exemption uses `-m physdev`, which this
 kernel lacks, so guests silently lose internet.
@@ -74,10 +75,10 @@ kernel lacks, so guests silently lose internet.
   (`wl macmode 2`); unlisted clients are disconnected.
 - Unlisted home clients the radios can't see (behind the mesh satellite, wired) are
   dropped by MAC in the raw table (`AX10_HOME`). Guests are never dropped.
-- `iot.sh home-open [s]` lets new devices in for a while; they are added as they appear.
+- `ax10.sh home-open [s]` lets new devices in for a while; they are added as they appear.
 - Last-seen times are saved daily; `iot_home_expire=N` removes entries unseen for N
   days, except pinned ones (`iot_home_keep`).
-- Edits go through `iot.sh home-allow` / `home-set` under the run lock. Turning the
+- Edits go through `ax10.sh home-allow` / `home-set` under the run lock. Turning the
   lock on pins the requesting device (resolved on the router), and refuses an empty list.
 - A listed device that joins the guest Wi-Fi gets the join-home page instead of
   internet: its DNS answers every name with the router (no IPv6), HTTP gets a 302 to
@@ -85,6 +86,120 @@ kernel lacks, so guests silently lose internet.
   server serves it (a second uhttpd can't start on TP-Link's build).
 - Apple devices change their private MAC when the network's security changes (e.g.
   WPA2/WPA3 to WPA3-only): add the new MACs before such a change, or they are locked out.
+
+## Local names and DNS over HTTPS
+
+Pi-hole-style local names, served by the stock dnsmasq (`iot_dns_on=1`):
+
+- Every device gets `<hostname>.<suffix>` (suffix `iot_dns_domain`, default `home`,
+  editable on the dashboard's Internet tab), the router gets the names in
+  `iot_dns_router` (e.g. `router`), and `iot_dns_hosts` adds fixed ones
+  (`name=ip`). dnsmasq runs with `domain=`, `local=/<suffix>/`,
+  `addn-hosts=$RUN/hosts`, `no-resolv` and our `server=` lines; the config is checked
+  with `dnsmasq --test` before use and rolled back if it fails.
+- DHCP hands out the router as DNS: option 6 in the stock `dhcp.lan.dhcp_option`
+  (the previous value is kept in `iot_dns_prev6` and restored when switched off),
+  and the DNS servers are stripped from `/etc/dhcp6s.conf` for DHCPv6.
+- TP-Link's "dnsproxy" DNATs LAN DNS for the router to the ISP's servers
+  (`prerouting_rule_dns`), so names never resolved; ACCEPT rules at the top of that
+  chain keep queries for the router on the router.
+- **DNS over HTTPS** (`iot_dns_doh=1`): `iot-ui/doh.lua` listens on 127.0.0.1:5053 and
+  POSTs each query (RFC 8484) to the provider over a pool of up to 3
+  `openssl s_client` connections, which check the chain against `iot-ui/cacert.pem`
+  and the name (`-verify 10 -verify_hostname <name> -verify_return_error`; without
+  `-verify 10` this OpenSSL 1.0.2 reports a bad certificate and carries on). luasec
+  0.4 on the router can't check names, hence s_client. Health-checked every pass
+  (`doh.lua check`); `$RUN/doh.ok` decides whether dnsmasq uses it or the plain
+  servers.
+
+## Automatic speed limit
+
+`iot_wan_auto=1` runs `iot-ui/autorate.lua` while the whole-connection limit is on.
+Every second it reads the WAN counters and pings two of four reflectors (1.1.1.1,
+8.8.8.8, 9.9.9.9, 1.0.0.1; 16-byte payload). The pings leave from the router itself,
+out the WAN port, so they never pass through our queues (which sit on `br-lan` and
+`ifb0`): they see the line.
+
+- Full (over 90% of the limit) and delay normal: raise that direction 4% a second.
+- Delay up by 15 ms or more (both reflectors agree): drop to just under what got
+  through, hold 5 s.
+- Raised but the traffic didn't follow and holds steady (this ISP polices instead of
+  queueing, so no delay shows): that's the ceiling; sit 3% under it for a minute.
+- Idle: drift back to the usual speed. Calm (under 20% both ways): ping every 10th
+  second only.
+- Rates change in place (`$RUN/rate.sh`, `tc class change`); nothing is rebuilt.
+  Range `iot_wan_min_*`/`iot_wan_max_*` (default half to three times the usual).
+  State in `$RUN/autorate.stat`; restarts carry on from it for a minute.
+- The thresholds are first guesses; this line tops out around 35 Mbps.
+
+## Data usage
+
+`usage_sync` (every watcher pass, `iot_usage_on`, on by default):
+
+- Totals per day and month from the WAN interface's counters: exact.
+- Per device per month from two sources: devices on this router's Wi-Fi from
+  `wl sta_info` (all their traffic, IPv6 included, plus traffic between devices at
+  home); every other device (mesh satellite, cable) from TP-Link's `tfstats`
+  (`ubus call tfstats get '{"page":0,"pagesize":200}'`, at most 200; `rx` is what the
+  device received). tfstats counts IPv4 only, and only traffic that passes through
+  Linux: complete while the whole-connection limit is on (it takes everything off
+  the fast path), mostly missed when it is off. Its readings are taken every pass and
+  added only for devices the radios don't list, so a device moving between router
+  and satellite is not counted twice. What neither source sees shows as "not matched
+  to a device".
+- `$RUN/usage` (bytes), saved to flash every 4 hours in MB (`iot_usage_days`,
+  `_months`, `_devs`); 62 days, 24 months, devices for this month and the last.
+  `iot_usage_boot` vs `/proc/sys/kernel/random/boot_id` decides whether a first
+  reading is new traffic (a new boot) or only a baseline.
+
+## Router load
+
+`load_guard` (every watcher pass) appends to `$RUN/load.log`: uptime, busy % (all
+3 cores), softirq % (network processing), load average, WAN kbit/s down and up; 24
+hours kept. Four passes in a row at 90% or more log one line with the busiest
+processes (by name only: `pppd`'s command line holds the PPPoE login). The
+dashboard's Internet tab shows it (`iot_net.lua` form `load`). `ax10.sh load [n]` prints
+the last readings. The whole-connection limit and device caps take traffic off the
+hardware fast path, so the processor is where a busy router shows first. Typical:
+20-30% busy at a few Mbps with the limit on.
+
+## Boot from the saved copy
+
+The boot hook starts a copy of `ax10.sh` saved in flash first, if its signature
+verifies with the release key, so the home allow list and the IoT network are up
+within seconds of every boot, with or without internet (before, the home Wi-Fi took
+anyone with the password until the release had downloaded). The release is then the
+update: the hook downloads `boot.sh` and retries every 30 s until it can; `boot.sh`
+runs in full, saves the release's `ax10.sh` if it changed, and restarts on it.
+
+- `ax10.sh boot` (`save_copy`, given the signature by `boot.sh` in `SAVE_COPY_SIG`)
+  saves the copy whenever the release's `ax10.sh` changes, under the run lock, after
+  stopping the watcher that was running (it may be an older version's):
+  gzip + base64 (about 54 KB) as a UCI list `openvpn.archer_boot.cache_iot` in 4000
+  character chunks, the release's own signature in `cache_iot_sig`, its md5 in
+  `cache_iot_sum`. It refuses if the settings would pass ~90 KB, and reads the copy
+  back before committing.
+- `SAVED_COPY=1 ax10.sh boot` runs everything ax10.sh does by itself (IoT network, home
+  allow list, speed limits at the usual speeds, local names with plain DNS, usage,
+  load) and skips the web UI, DNS over HTTPS and the automatic limit, whose files come
+  with the release.
+- No SSH until the release downloads: the lifeline binary (`dropbear_vanilla`, 106 KB
+  gzipped) doesn't fit, and the stock dropbear has a TP-Link MAC-based pre-auth lockout.
+- The hook command lives in `openvpn.archer_boot.boot_cmd`; `scripts/signed-hook.sh
+  update` rewrites it from the script (key kept). Tested in `tests/signing.sh`; the
+  save/restore through TP-Link's own settings format was checked on the router (67 KB
+  encrypted with the copy, of 128 KB).
+
+## Packages at boot
+
+`boot.sh` installs opkg and the packages in `openvpn.archer_boot.boot_pkgs` (e.g.
+`ax10-busybox`; empty = none) after the IoT step. `install.sh` and its payload are
+checked by signature; the package index (`Packages`) is signed in CI, and each `.ipk`
+must match its SHA-256 there before `opkg install` runs on the local file (opkg's own
+downloads use a wget that doesn't check certificates). The release pulls the latest
+upstream opkg payload and packages on every build. ax10-debloat is not in our feed:
+it stops `sync-server` (which copies Wi-Fi settings to the mesh satellite) and the
+cloud services the Tether app uses.
 
 ## What we learned about this router
 
@@ -94,6 +209,13 @@ kernel lacks, so guests silently lose internet.
 - `uci commit` writes only to RAM. TP-Link's `/sbin/uci_commit_flash <config>`
   (its patched `luci.model.uci`; plain commit is `commit_without_write_flash`)
   writes the config to flash. That's how `openvpn.archer_boot.*` persists.
+- Flash is one 16 MB chip (`nvrammanager -s` lists the partitions); the only one we
+  write is `user-config` (128 KB). A save turns every file in `/etc/config` into one
+  XML file (`luci.sys.config.convertFileToXml`), compresses and encrypts it
+  (`luci.model.crypto.enc_file_entry`) and writes it with `nvrammanager -w`; boot
+  reads it back the same way. About 26 KB is used by the settings alone. A save
+  that fails would lose every setting, the boot hook included, so anything large
+  is tried through that pipeline into `/tmp` first.
 - Read-only files can be changed for the current boot with a RAM copy plus
   `mount --bind` (works for directories and single files). Network namespaces and
   veth pairs are not supported.
@@ -205,7 +327,7 @@ kernel lacks, so guests silently lose internet.
   and connect with `-o HostKeyAlgorithms=ssh-rsa` to avoid host-key warnings.
 
 ### Speed limits (dashboard Speed tab; Advanced → Wireless → Guest Speed)
-- Three optional caps, all applied by `iot.sh shape` and kept in sync by the
+- Three optional caps, all applied by `ax10.sh shape` and kept in sync by the
   watcher: per device (`iot_caps`, `mac=down/up` in Mbps, 0 = no cap that way),
   guests (`iot_guest_limit`, `iot_guest_down`/`iot_guest_up` per device; MACs in
   `iot_guest_fast` exempt; a per-device cap wins), and the whole connection
@@ -260,10 +382,22 @@ kernel lacks, so guests silently lose internet.
 - The stock firmware has a hidden per-device limit (`smart_network?form=client_speed_limit`,
   `write` with `mac`, `enableLimit`, kbps limits; the UI hides it unless
   `supportSpeedLimit`). It accepts settings and enforces nothing on this unit.
-- Live updates: `iot.sh` runs take turns through a lock (`/tmp/ax10-iot/lock`),
-  so a rebuild by hand, the watcher and the web page cannot interleave. A
-  command that cannot get the lock within 60 s exits with an error; the
-  watcher skips that pass and tries again 15 s later.
+- Live updates: one lock, `$RUN/run.lock`, is held by every `ax10.sh` command except
+  `status`, by each watcher pass, and by the dashboard backend around its own settings
+  writes. It's the kernel's `lockf` (through nixio): owned by one process, not passed
+  to the daemons a run starts, and released the moment the holder exits or is killed,
+  so nothing stale is ever left (tested on the router: across `exec`, after `kill -9`,
+  and with a child outliving the holder). A shell can't hold `lockf` itself, so a
+  command re-runs itself through `$RUN/lockrun.lua` (written by `ax10.sh`), which
+  takes the lock and `exec`s the shell: same process, lock held until it exits.
+  busybox's `flock` is unusable here (its lock is inherited by every daemon a run
+  starts). The dashboard saves, then asks for `ax10.sh kick`: that leaves a note
+  (`$RUN/sync.want`) and waits for the lock; whoever holds it applies notes until
+  none is left, so a burst of changes is one or two passes and the last change always
+  lands. The watcher holds `$RUN/watch.lock` for its lifetime (a second one stands
+  down) and runs each pass as `ax10.sh pass`. An earlier version used Lamport bakery
+  locks on ticket directories; most review findings were in deciding when those were
+  stale.
 
 ### Device lists on the pages
 - Rows show where a device is now (Wi-Fi SSID and band from `wl assoclist`,
@@ -273,14 +407,16 @@ kernel lacks, so guests silently lose internet.
   changed row, so list switches save immediately via `ev_grid_custom_change`.
 
 ### Dashboard at /
-- `iot-ui/dash/index.html` is one self-contained page (no build step). `iot.sh ui`
+- `iot-ui/dash/index.html` is one self-contained page (no build step). `ax10.sh ui`
   bind-mounts it over `/www/index.html` (what `https://192.168.0.1/` serves) and
   bind-mounts `dash/login.html`, a redirect to `/`, over `/www/webpages/login.html`
   (where uhttpd sends every plain-HTTP visit). The stock UI stays at
-  `/webpages/index.html`; `iot.sh ui-remove` undoes both mounts.
-- Tabs: Devices (every device with name, IP, where it is connected; rename, block,
-  and the IoT/guest switches), IoT, Guests, Wi-Fi (passwords with copy and a join
-  QR code). It refreshes every 10 s while visible.
+  `/webpages/index.html`; `ax10.sh ui-remove` undoes both mounts.
+- Tabs: Devices (every device with name, IP, where it is connected, live traffic;
+  rename, cap, block, forget), Networks (Home with the allow list, Guest with its
+  limits and join-home page, IoT), Internet (connection, data used, the
+  whole-connection limit, capped devices, router load, local names). Light by
+  default with a dark theme. It refreshes every 10 s while visible.
 - **Login and encryption:** every LuCI request is AES-encrypted and RSA-signed. The
   page loads the stock scripts (`jquery`, `cryptoJS`, `encrypt.js`, `tpEncrypt.js`)
   and repeats the stock login: `login?form=keys` (RSA key for the password),
@@ -306,6 +442,40 @@ kernel lacks, so guests silently lose internet.
 - Links to stock pages go to `/webpages/index.html`; the stock UI ignores URL
   fragments, so the page leaves the target in `sessionStorage` (`ax10-go`) and
   `locale.js`, which runs inside the stock UI, opens it once the menu is up.
+
+### Mesh satellite (Archer C6, EasyMesh)
+- It joins over `wl1.2` (hidden backhaul) and appears as `wds1.2.1` in `br-lan`;
+  its clients keep their own MACs (4-address frames), so the raw-table MAC drop
+  catches them. The mesh doesn't carry a separate guest network
+  (`meshd.primvlanid=0`) and the C6 broadcasts only the home SSID.
+- TP-Link's Access Control does not reach it, in either mode. Tested: with the allow
+  list on (in RAM, then restored), an unknown device joined the C6 two minutes
+  later and stayed. The stock page only saves and runs
+  `/etc/init.d/access_control reload` locally. TP-Link staff describe syncing
+  features to satellites as future work.
+- `/tmp/easymesh_client_list` (written by `easymesh-controller`) lists the C6's
+  stations with signal and rates, no byte counters.
+
+### Device-to-device isolation (tested in a separate experiment)
+- `wl ap_isolate 1` on a home radio blocks all client-to-client traffic on that
+  radio, allowed devices included: Broadcom's `should_deliver()` drops a frame whose
+  in and out port are the same before it looks at `hairpin_mode`.
+- ebtables can be built for this kernel (TP-Link GCC 5.5, MAP off, `sk_buff` padding,
+  sockopt base moved to 0x1E00) and filters per MAC between ports (Wi-Fi to
+  satellite, wired, other band); not between two clients of one radio. The recipe is
+  in the separate toolchain folder, not in this repo.
+- The Wi-Fi driver offers no AP/VLAN interfaces, so per-password VLANs on one SSID
+  (hostapd `sae_password=...|vlanid=`) are not possible.
+
+### busybox 1.19 and other shell traps
+- `sh -n -c "<cmd>"` **runs** the command (only `sh -n <file>` parses without running).
+- No `fold`, `paste`, `diff`; `grep` has no `-x`; `tar` warns on macOS extended headers
+  (`tar --no-xattrs` or ignore).
+- `$( ... case x in a) ... esac ... )`: the pattern's `)` ends the substitution in some
+  shells; use `if` inside command substitutions.
+- Arithmetic is 64-bit, so byte counters are fine.
+- `ps w` shows full command lines, and `pppd`'s holds the PPPoE login: filter it out
+  of anything printed or logged.
 
 ### Known trade-offs
 - While the IoT network runs, OneMesh onboarding of a **new** satellite over

@@ -1,7 +1,7 @@
 // IoT Network page for the stock TP-Link web UI (Archer AX10), written against the
 // stock $.su framework the same way the built-in pages are.
 (function ($) {
-    // Labels are added to the locale file by `iot.sh ui` (iot-ui/locale.js).
+    // Labels are added to the locale file by `ax10.sh ui` (iot-ui/locale.js).
     $.su.CHAR.IOT_NETWORK = $.su.CHAR.IOT_NETWORK || {};
     var T = $.su.CHAR.IOT_NETWORK;
 

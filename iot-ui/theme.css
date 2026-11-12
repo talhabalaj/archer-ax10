@@ -1,4 +1,4 @@
-/* ax10-theme: restyles the stock TP-Link web UI (Archer AX10). Installed by `iot.sh ui`,
+/* ax10-theme: restyles the stock TP-Link web UI (Archer AX10). Installed by `ax10.sh ui`,
    which appends this file to the UI's per-language stylesheet (locale/<lang>/lan.css);
    that sheet loads after the stock ones, so these rules win without !important in most
    places. Colours only touch backgrounds, borders and text: the stock icons are sprite

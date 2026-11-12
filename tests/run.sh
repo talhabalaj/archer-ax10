@@ -3,9 +3,13 @@
 set -e
 cd "$(dirname "$0")/.."
 
+echo "== build ax10.sh from src/"
+sh scripts/build.sh
+[ -x ax10.sh ] || { echo "ERROR: the built ax10.sh is not executable" >&2; exit 1; }
+
 echo "== shell syntax"
-for f in boot.sh install.sh iot.sh index.sh build-repo.sh deploy-to-pages.sh \
-         scripts/signed-hook.sh scripts/ci-install-lua.sh tests/iot.sh tests/signing.sh tests/run.sh; do
+for f in boot.sh install.sh ax10.sh src/*.sh index.sh build-repo.sh deploy-to-pages.sh \
+         scripts/build.sh scripts/signed-hook.sh scripts/ci-install-lua.sh tests/ax10.sh tests/signing.sh tests/run.sh; do
   sh -n "$f"
 done
 
@@ -47,8 +51,8 @@ if (!code) { console.error("no inline script in " + process.argv[1]); process.ex
 new (require("vm").Script)(code, { filename: process.argv[1] });
 ' iot-ui/dash/index.html
 
-echo "== tests/iot.sh"
-sh tests/iot.sh
+echo "== tests/ax10.sh"
+sh tests/ax10.sh
 
 echo "== tests/signing.sh"
 sh tests/signing.sh

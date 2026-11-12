@@ -1,10 +1,12 @@
 #!/bin/sh
 # ============================================================
-# MINIMAL LIFELINE-ONLY boot.sh — fetched by the openvpn up-hook after WAN is up.
-# Sets the root password (mirrors the web-GUI admin password) and starts a dropbear
-# SSH lifeline on :2222. NOTHING ELSE — no opkg, no packages, no LuCI, no hardening.
-# Use this to reboot into a bare factory router that we can still SSH into, then
-# deploy the real stack by hand from the GitHub feed.
+# boot.sh — fetched by the openvpn up-hook after WAN is up (scripts/signed-hook.sh).
+# Sets the root password (mirrors the web-GUI admin password), starts a dropbear SSH
+# lifeline on :2222, starts our add-ons (ax10.sh: IoT network, home allow list, speed
+# limits, names, dashboard) and saves a copy of ax10.sh in flash (the hook starts that
+# copy first at the next boot), then installs the packages listed in
+# openvpn.archer_boot.boot_pkgs.
+# Every download is checked against the release key.
 # ============================================================
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 SSH_PORT="${SSH_PORT:-2222}"
@@ -76,15 +78,51 @@ start_lifeline() {
 }
 start_lifeline
 
-# Optional isolated IoT Wi-Fi (see iot.sh). Once set up (any iot_enabled value is
-# saved), install its web UI page every boot; iot.sh starts the network if enabled.
+# Optional isolated IoT Wi-Fi (see ax10.sh). Once set up (any iot_enabled value is
+# saved), install its web UI page every boot; ax10.sh starts the network if enabled.
 if [ -n "$(/sbin/uci -q get openvpn.archer_boot.iot_enabled)" ]; then
     echo "Starting IoT network..."
-    fetch iot.sh /tmp/iot.sh && SRC="$SRC" SIGN_PUB="$SIGN_PUB" /bin/sh /tmp/iot.sh boot
+    # ax10.sh boot also keeps this ax10.sh as the copy in flash the hook starts first at
+    # the next boot (src/75-saved-copy.sh), with its signature from the release.
+    # Downloaded aside, never over /tmp/ax10.sh: the saved copy's watcher is already
+    # running that file, and would run a half-downloaded or unverified one. `boot`
+    # (holding the run lock, after stopping that watcher) renames it into place.
+    if fetch ax10.sh /tmp/ax10.sh.dl; then
+        SRC="$SRC" SIGN_PUB="$SIGN_PUB" SAVE_COPY_SIG=/tmp/ax10.sh.dl.sig /bin/sh /tmp/ax10.sh.dl boot
+    fi
 fi
 
 # The IoT step reconfigures Wi-Fi/dnsmasq at boot; make sure SSH survived it.
 sleep 2
 lifeline_up || { echo "SSH lifeline not running after IoT step; restarting it"; start_lifeline; }
 
-echo "lifeline-only boot done."
+# Packages from our feed at every boot: opkg itself plus openvpn.archer_boot.boot_pkgs
+# (e.g. "ax10-busybox"; empty = none). Everything is checked: install.sh and the opkg
+# payload by signature, each package by the SHA-256 in the signed package index, and
+# then installed from the local file: opkg's own downloads go through a wget that
+# does not check certificates, so it is never left to fetch anything.
+boot_pkgs() {    # boot_pkgs <packages>
+    OPKG="${PKG_OPKG:-/tmp/opt/opkg}"; P="${PKG_DIR:-/tmp/ax10-pkgs}"
+    fetch Packages "$P.index" || { echo "packages: no signed index; skipped"; return 0; }
+    if [ ! -x "$OPKG" ]; then
+        fetch install.sh "$P.install.sh" || { echo "packages: no signed install.sh; skipped"; return 0; }
+        SRC="$SRC" FEED="$SRC" SIGN_PUB="$SIGN_PUB" NO_UPDATE=1 /bin/sh "$P.install.sh" > "$P.install.log" 2>&1 ||
+            { echo "packages: opkg did not install (see $P.install.log)"; return 0; }
+    fi
+    mkdir -p "$P"
+    for p in $1; do
+        f="$(awk -v p="$p" '$1 == "Package:" { c = $2 } c == p && $1 == "Filename:" { print $2; exit }' "$P.index")"
+        sha="$(awk -v p="$p" '$1 == "Package:" { c = $2 } c == p && $1 == "SHA256sum:" { print $2; exit }' "$P.index")"
+        case "$f" in ""|*/*|.*) echo "$p: not in the feed"; continue ;; esac
+        $GET -m 120 "$SRC/$f" -o "$P/$f" || { echo "$p: download failed"; continue; }
+        if [ "$(/usr/bin/openssl dgst -sha256 "$P/$f" | awk '{ print $NF }')" != "$sha" ]; then
+            echo "$p: CHECKSUM MISMATCH, not installing"; rm -f "$P/$f"; continue
+        fi
+        "$OPKG" install "$P/$f" >/dev/null 2>&1 && echo "$p installed" || echo "$p: install failed"
+    done
+    rm -rf "$P" "$P.index" "$P.install.sh"
+}
+PKGS="$(/sbin/uci -q get openvpn.archer_boot.boot_pkgs)"
+[ -n "$PKGS" ] && { echo "Installing packages: $PKGS"; boot_pkgs "$PKGS"; }
+
+echo "boot done."

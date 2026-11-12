@@ -4,8 +4,11 @@ This fork follows the SSH-first setup at https://archer-boot.pages.dev/.
 
 `boot.sh` mirrors the TP-Link web-GUI admin password and starts SSH on port
 2222. It binds to the router's LAN address and allows the LAN bridge, so a
-client's DHCP address can change. It does not install packages or debloat the
-router. The upstream password fallback behavior is retained.
+client's DHCP address can change. It then starts `ax10.sh` (see
+[IOT_NETWORK.md](IOT_NETWORK.md)), saves a copy of it in flash (the hook starts that
+copy first at every boot, before anything is downloaded), and installs the packages listed in `openvpn.archer_boot.boot_pkgs`
+(none unless set; see "Packages at boot" in IOT_NETWORK.md). The upstream password
+fallback behavior is retained.
 
 A separate, loopback-only OpenVPN instance with interface and route configuration disabled supplies the persistent
 `up` hook. Its hook waits for network access, downloads this repository's boot
@@ -39,7 +42,8 @@ openssl dgst -sha256 -verify /tmp/archer-sign.pub -signature /tmp/install.sh.sig
 sh /tmp/install.sh
 ```
 
-LuCI and debloat remain separate package choices, as on the upstream site.
+LuCI remains a separate package choice, as on the upstream site. ax10-debloat is
+not in this feed: it stops services the mesh satellite and the Tether app need.
 
 The personal feed patches LuCI's Wi-Fi client tables for the stock AX10
 `iwinfo` response: flat `rx_rate` / `tx_rate` fields are normalized before

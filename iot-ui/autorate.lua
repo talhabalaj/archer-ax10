@@ -1,5 +1,5 @@
 -- autorate.lua: keeps the whole-connection limit just under what the line can carry
--- right now (started by iot.sh while iot_wan_auto=1).
+-- right now (started by ax10.sh while iot_wan_auto=1).
 --
 --   lua autorate.lua <rate script> <state file> <down dev> <up dev> \
 --                    <base down> <base up> <min down> <max down> <min up> <max up>     (Mbps)
@@ -21,7 +21,7 @@
 --
 -- The pings leave from the router itself, so they don't pass through our own
 -- queues: what they see is the line. Rates are applied by <rate script> (written by
--- iot.sh shape_sync: `tc class change` on the lanes, nothing is rebuilt).
+-- ax10.sh shape_sync: `tc class change` on the lanes, nothing is rebuilt).
 local nixio = require "nixio"
 
 local script, statef, ddev, udev = arg[1], arg[2], arg[3], arg[4]
@@ -88,11 +88,20 @@ end
 local usual = {}              -- reflector -> its usual delay (ms)
 local applied = { 0, 0 }
 
+-- The rate classes are ax10.sh's too: its runs rebuild them, under its run lock
+-- (src/10-lock.sh, next to our state file). A rate is changed only while holding that
+-- lock, so it can never land in the middle of a rebuild, or on the classes of a
+-- rebuild that has stopped us (a run stops us while it holds the lock, and then no
+-- rate change of ours can be under way). Lock busy: try again next second.
+local runlock = nixio.open((statef:match("^(.*)/[^/]*$") or ".") .. "/run.lock", "w")
 local function apply()
     local d, u = math.floor(D.rate), math.floor(U.rate)
     -- skip changes under 1%: each one costs a few process starts on this CPU
     if math.abs(d - applied[1]) < applied[1] * 0.01 and math.abs(u - applied[2]) < applied[2] * 0.01 then return end
-    if os.execute("sh " .. script .. " " .. d .. " " .. u .. " >/dev/null 2>&1") == 0 then applied = { d, u } end
+    if runlock and not runlock:lock("tlock") then return end
+    local ok = os.execute("sh " .. script .. " " .. d .. " " .. u .. " >/dev/null 2>&1") == 0
+    if runlock then runlock:lock("ulock") end
+    if ok then applied = { d, u } end
 end
 local function save(extra, usual_ms)
     local f = io.open(statef .. ".new", "w"); if not f then return end

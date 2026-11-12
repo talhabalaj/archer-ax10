@@ -20,6 +20,9 @@ case "\$1" in
   get) v=\$(grep "^\$2=" "\$db" | head -1 | cut -d= -f2-); [ -n "\$v" ] && printf '%s\n' "\$v" || exit 1 ;;
   set) k="\${2%%=*}"; v="\${2#*=}"; grep -v "^\$k=" "\$db" > "\$db.n" || true; printf '%s=%s\n' "\$k" "\$v" >> "\$db.n"; mv "\$db.n" "\$db" ;;
   delete) grep -v "^\$2=" "\$db" > "\$db.n" || true; mv "\$db.n" "\$db" ;;
+  add_list) k="\${2%%=*}"; v="\${2#*=}"; o=\$(grep "^\$k=" "\$db" | head -1 | cut -d= -f2-); grep -v "^\$k=" "\$db" > "\$db.n" || true
+            printf '%s=%s\n' "\$k" "\${o:+\$o }\$v" >> "\$db.n"; mv "\$db.n" "\$db" ;;
+  revert) exit 1 ;;
   commit) : ;;
 esac
 EOF
@@ -82,6 +85,87 @@ run_ifetch "$T/run-sign.pub" && fail "install fetch accepted an asset with no si
 [ ! -e "$T/iout" ] || fail "install fetch kept an unsigned asset although a key is present"
 run_ifetch "$T/nokey" || fail "install fetch without a key (old hook) should still work"
 grep -q "NOT verified" "$T/ierr" || fail "install fetch did not warn about the unverified download"
+
+# 2b. The hook starts the copy of ax10.sh that `ax10.sh boot` saved (save_copy,
+#     src/75-saved-copy.sh) first, only if its signature verifies, and then downloads
+#     boot.sh as before.
+sh "$ROOT/scripts/build.sh"
+cfuncs="$(awk '/^save_copy\(\)/{p=1} p{print} p&&/^}$/{exit}' "$ROOT/ax10.sh")"
+[ -n "$cfuncs" ] || fail "ax10.sh has no save_copy"
+mkdir -p "$T/conf"; echo "config x" > "$T/conf/network"; grep -v cache_iot "$T/uci.db" > "$T/conf/openvpn" || true
+cache() { sh -c "$cfuncs
+  save_copy $1 $2" 2>&1; }
+export CACHE_UCI="$U" CACHE_CONF="$T/conf" CACHE_COMMIT=/nonexistent
+printf '#!/bin/sh\necho "SAVED=$SAVED_COPY ARG=$1" > "%s/offmarker"\n' "$T" > "$T/ax10.sh"
+i=0; while [ $i -lt 400 ]; do echo "# padding line $i so the copy needs several chunks $(echo $i | openssl dgst -sha256)" >> "$T/ax10.sh"; i=$((i + 1)); done
+sign "$T/ax10.sh"
+cache "$T/ax10.sh" "$T/ax10.sh.sig" | grep -q "saved to flash" || fail "save_copy did not save the copy"
+[ "$($U get openvpn.archer_boot.cache_iot | wc -w)" -ge 2 ] || fail "save_copy did not split the copy into chunks"
+cache "$T/ax10.sh" "$T/ax10.sh.sig" | grep -q "saved" && fail "save_copy wrote flash again for the same release"
+head -c 120000 /dev/urandom | openssl base64 > "$T/conf/big"
+cp "$T/ax10.sh" "$T/iot2.sh"; echo "# changed" >> "$T/iot2.sh"; sign "$T/iot2.sh"
+cache "$T/iot2.sh" "$T/iot2.sh.sig" | grep -q "would fill" || fail "save_copy did not refuse a copy that would fill the settings partition"
+rm -f "$T/conf/big"
+# A save that fails is reported as failed, leaves nothing staged, and leaves no checksum
+# claiming the release is saved (so the next boot tries again).
+printf '#!/bin/sh\nexit 1\n' > "$T/bin/failcommit"; chmod +x "$T/bin/failcommit"
+out="$(CACHE_COMMIT="$T/bin/failcommit" cache "$T/iot2.sh" "$T/iot2.sh.sig")" && fail "save_copy returned success after a failed save: $out"
+echo "$out" | grep -q "not saved" || fail "save_copy did not report the failed save ($out)"
+[ "$($U get openvpn.archer_boot.cache_iot_sum)" = "$(md5sum < "$T/iot2.sh" | cut -d' ' -f1)" ] && fail "save_copy left the new checksum after a failed save"
+# (the stand-in uci can't tell staged from saved, so its "revert" cleared the good copy
+# too; the router's uci revert drops only what was staged. Save the good copy again.)
+cache "$T/ax10.sh" "$T/ax10.sh.sig" | grep -q "saved to flash" || fail "save_copy did not save the copy again"
+# boot.sh never downloads over the ax10.sh that is running: aside, then ax10.sh boot renames it in.
+grep -q 'fetch ax10.sh /tmp/ax10.sh;' "$ROOT/boot.sh" && fail "boot.sh downloads over the running /tmp/ax10.sh"
+grep -q 'fetch ax10.sh /tmp/ax10.sh.dl' "$ROOT/boot.sh" || fail "boot.sh does not download ax10.sh aside"
+ocmd="$(printf '%s' "$($U get openvpn.archer_boot.boot_cmd)" | sed -e "s#B=https://[^;]*;#B=file://$T/norel;#" -e "s#/sbin/uci#$U#g" \
+       -e "s#/usr/bin/openssl#openssl#g" -e "s#/usr/bin/curl#curl#g" -e "s#/bin/gzip#gzip#g" -e "s#/tmp/archer-#$T/run-#g" \
+       -e "s#/tmp/iot.sh#$T/run-iot.sh#g" -e 's#sleep 30#exit 4#')"
+set +e; sh -c "$ocmd" >/dev/null 2>&1; rc=$?; set -e
+[ "$(cat "$T/offmarker" 2>/dev/null)" = "SAVED=1 ARG=boot" ] || fail "the saved copy of ax10.sh did not start first ($(cat "$T/offmarker" 2>/dev/null))"
+[ $rc = 4 ] || fail "no internet: the hook did not go on to try the download after the saved copy (rc=$rc)"
+# with the release reachable: the saved copy first, then boot.sh
+rm -f "$T/offmarker" "$T/marker"; printf 'echo RAN > "%s/marker"\n' "$T" > "$T/rel/boot.sh"; sign "$T/rel/boot.sh"
+rcmd="$(printf '%s' "$ocmd" | sed "s#file://$T/norel#file://$T/rel#")"
+sh -c "$rcmd" >/dev/null 2>&1 || true
+[ -e "$T/offmarker" ] && [ "$(cat "$T/marker" 2>/dev/null)" = RAN ] || fail "with internet: the saved copy and then boot.sh did not both run"
+# a copy that doesn't match its signature never runs
+rm -f "$T/offmarker"; good="$($U get openvpn.archer_boot.cache_iot_sig)"
+$U set "openvpn.archer_boot.cache_iot_sig=$(openssl base64 -A < "$T/iot2.sh.sig")"
+set +e; sh -c "$ocmd" >/dev/null 2>&1; set -e
+[ ! -e "$T/offmarker" ] || fail "a saved copy with the wrong signature ran"
+$U set "openvpn.archer_boot.cache_iot_sig=$good"
+$U delete openvpn.archer_boot.cache_iot
+set +e; sh -c "$ocmd" >/dev/null 2>&1; rc=$?; set -e
+[ ! -e "$T/offmarker" ] && [ $rc = 4 ] || fail "no saved copy: the hook did not go on to the download (rc=$rc)"
+# update rewrites the command and keeps the key
+$U set "openvpn.archer_boot.boot_cmd=old"
+UCI="$U" COMMIT=/nonexistent sh "$ROOT/scripts/signed-hook.sh" update >/dev/null
+case "$($U get openvpn.archer_boot.boot_cmd)" in *cache_iot*) ;; *) fail "update did not rewrite the hook command" ;; esac
+$U get openvpn.archer_boot.sign_pub | openssl base64 -d -A | cmp -s - "$T/pub.pem" || fail "update changed the key"
+
+# 3c. boot_pkgs(): installs only packages whose file matches the SHA-256 in the
+#     signed index, from the local file.
+pfuncs="$(awk '/^SIGN_PUB=/{p=1} p{print} p&&/^fetch\(\)/{f=1} f&&/^}$/{exit}' "$ROOT/boot.sh")
+$(awk '/^boot_pkgs\(\)/{p=1} p{print} p&&/^}$/{exit}' "$ROOT/boot.sh")"
+mkdir -p "$T/prel"; printf 'good package\n' > "$T/prel/good_1_all.ipk"; printf 'bad package\n' > "$T/prel/bad_1_all.ipk"
+{ printf 'Package: ax10-good\nFilename: good_1_all.ipk\nSHA256sum: %s\n\n' "$(openssl dgst -sha256 "$T/prel/good_1_all.ipk" | awk '{print $NF}')"
+  printf 'Package: ax10-bad\nFilename: bad_1_all.ipk\nSHA256sum: %s\n\n' "$(printf 'what the index promised\n' | openssl dgst -sha256 | awk '{print $NF}')"; } > "$T/prel/Packages"
+sign "$T/prel/Packages"
+printf '#!/bin/sh\necho "$*" >> "%s/opkg.log"\n' "$T" > "$T/bin/opkg"; chmod +x "$T/bin/opkg"
+out="$(sh -c "SRC=file://$T/prel; GET='curl -fs'; $pfuncs
+  SIGN_PUB=$T/run-sign.pub; PKG_OPKG=$T/bin/opkg; PKG_DIR=$T/pkgs
+  boot_pkgs 'ax10-good ax10-bad ax10-missing'" 2>&1)" || true
+grep -q "/good_1_all.ipk" "$T/opkg.log" || fail "boot_pkgs did not install a package that matches the index ($out)"
+grep -q "bad_1_all" "$T/opkg.log" && fail "boot_pkgs installed a package whose checksum does not match"
+echo "$out" | grep -q "CHECKSUM MISMATCH" || fail "boot_pkgs did not report the mismatch"
+echo "$out" | grep -q "ax10-missing: not in the feed" || fail "boot_pkgs did not report a package missing from the feed"
+[ ! -e "$T/pkgs" ] || fail "boot_pkgs left its downloads behind"
+printf 'Package: ax10-good\n' > "$T/prel/Packages"          # an index whose signature no longer matches
+out="$(sh -c "SRC=file://$T/prel; GET='curl -fs'; $pfuncs
+  SIGN_PUB=$T/run-sign.pub; PKG_OPKG=$T/bin/opkg; PKG_DIR=$T/pkgs
+  boot_pkgs 'ax10-good'" 2>&1)" || true
+echo "$out" | grep -q "no signed index" || fail "boot_pkgs used an index with a bad signature ($out)"
 
 # 4. revert restores the previous hook.
 UCI="$T/bin/uci" COMMIT=/nonexistent sh "$ROOT/scripts/signed-hook.sh" revert >/dev/null

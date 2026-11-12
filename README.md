@@ -27,7 +27,6 @@ openvpn "up" hook  (the ONE flash-persisted boot-exec, survives reboots)
         │  waits for WAN, then fetches over HTTPS
         ▼
 boot.sh (this repo) ── fetched from GitHub Releases
-        ├─ self-heal CGNAT DDNS (TP-Link debloat/hardening is opt-in now: opkg install ax10-debloat)
         ├─ set root password = the router's OWN web-GUI password (see "Password" below)
         ├─ start a lifeline dropbear on :2222
         ├─ bootstrap busybox 1.31 + a real HTTPS wget (stock 1.19 wget has no SSL)
@@ -42,7 +41,6 @@ boot.sh (this repo) ── fetched from GitHub Releases
         ax10-dropbear ─ native SSH on :22                (pulls ax10-svc)
         ax10-svc ──── service manager (busybox-init respawn; this box has no procd)
         ax10-wifi ─── apply /etc/config/wireless to the Broadcom wl driver
-        ax10-debloat ─ stop TP-Link cloud/phone-home junk (tiered, persistent)
 ```
 
 A working `opkg` + userland is the base and stands on its own (see [ax10-opkg](../../../ax10-opkg));
@@ -59,7 +57,6 @@ LuCI, SSH-on-22, etc. are things you opt into, not things forced on every boot.
 | [ax10-dropbear](../../../ax10-dropbear) | Dropbear SSH on :22, supervised by ax10-svc. |
 | [ax10-wifi](../../../ax10-wifi) | Applies `/etc/config/wireless` to the Broadcom `wl` driver; standalone (no web UI needed). |
 | [ax10-luci](../../../ax10-luci) | Modern LuCI web UI (cross-built 19.07 rpcd/uhttpd on the 2013 ubus stack). |
-| [ax10-debloat](../../../ax10-debloat) | Stops TP-Link cloud/phone-home/remote-mgmt junk (tiered); disarms the monit/cron keepalives so it sticks. |
 | [newstack](../../../newstack) | The shared glibc-2.26 ARM cross-build stack (toolchain + sysroot + ABI shims) that builds the glibc binaries. |
 
 ## The `opkg` feed (served from GitHub Releases)

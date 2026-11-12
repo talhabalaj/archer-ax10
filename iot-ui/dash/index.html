@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2312181c'/%3E%3Cpath d='M8 21.5a11 11 0 0 1 16 0M11 17.8a6.5 6.5 0 0 1 10 0' stroke='%232dd4bf' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='24' r='1.9' fill='%232dd4bf'/%3E%3C/svg%3E">
 <title>Talha's network</title>
-<!-- Dashboard for the Archer AX10, served at / by `iot.sh ui` (bind mount over /www/index.html).
+<!-- Dashboard for the Archer AX10, served at / by `ax10.sh ui` (bind mount over /www/index.html).
      Talks to the same encrypted LuCI API as the stock UI, with the stock encryption scripts,
      and shares its login (token + keys in localStorage), so "Full settings" opens logged in. -->
 <style>
@@ -555,7 +555,7 @@ async function loadDevices() {
   // A device on the block list is only blocked while Access Control is on, in block-list mode.
   const live = r.block.enable === "on" && r.block.mode === "black";
   r.list.forEach(d => { d.listed = d.blocked; d.blocked = d.blocked && live; });
-  // Our home allow list (iot.sh home_sync).
+  // Our home allow list (ax10.sh home_sync).
   // The router's JSON encoder turns an empty list into {}.
   if (home) { ["list", "dropped", "mesh_macs"].forEach(k => { if (!Array.isArray(home[k])) home[k] = []; }); }
   r.home = home; S.homeAt = Date.now();
@@ -585,6 +585,7 @@ async function loadSummary() {
 async function loadIot() { S.iot = await iot("settings"); S.iotLoadedAt = Date.now(); }
 async function loadGuest() { S.guest = await iot("guest_settings"); }
 async function loadShaping() { S.shaping = await iot("shaping"); }
+async function loadLoad() { const l = await iot("load"); if (!Array.isArray(l.buckets)) l.buckets = []; S.load = l; }
 async function loadUsage() { const u = await iot("usage"); ["days", "months", "devices"].forEach(k => { if (!Array.isArray(u[k])) u[k] = []; }); S.usage = u; }
 async function loadNames() { const n = await iot("names"); if (!Array.isArray(n.hosts)) n.hosts = []; S.names = n; }
 async function loadWifi() {
@@ -593,7 +594,7 @@ async function loadWifi() {
   if (!S.iot) await loadIot();
   S.wifi = { w2, w5, g2, g5, smart: sc && sc.smart_enable === "on" };
 }
-const NEEDS = { devices: [loadDevices, loadSummary], networks: [loadWifi, loadDevices, loadIot, loadGuest, loadSummary], internet: [loadDevices, loadShaping, loadNames, loadUsage, loadSummary] };
+const NEEDS = { devices: [loadDevices, loadSummary], networks: [loadWifi, loadDevices, loadIot, loadGuest, loadSummary], internet: [loadDevices, loadShaping, loadNames, loadUsage, loadLoad, loadSummary] };
 async function refresh(quiet) {
   const tab = S.tab;
   try { await Promise.all(NEEDS[tab].map(f => f())); if (tab === S.tab) render(); }
@@ -1126,7 +1127,33 @@ function viewInternet() {
     ${wDirty ? `<div class="card-f"><button class="btn" data-act="w-reset">Discard</button><button class="btn primary" data-act="w-save">Save changes</button></div>` : ""}
   </div>
   ${sectionList("Capped devices", capped.map(d => simpleRow(d, `<span class="tag cap">${capText(d.cap)}</span><button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove</button>`)), "No device has its own cap. Open a device on the Devices tab and choose Cap speed.")}
+  ${loadCard()}
   ${namesCard()}`;
+}
+// Is the router keeping up? Its processor over the last 24 hours (ax10.sh load_guard).
+function loadCard() {
+  const L = S.load; if (!L) return "";
+  if (!L.now) return `<h2>Router load</h2><div class="card"><div class="card-b" style="border:0;padding:18px 20px">Measuring. The first reading appears within a minute.</div></div>`;
+  const pk = L.peak || L.now, mins = Math.round((L.full_s || 0) / 60);
+  const mbps = k => (k / 1000).toFixed(k < 10000 ? 1 : 0);
+  const ago = s => s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " min ago" : Math.round(s / 3600) + " h ago";
+  const W = 600, H = 64, n = L.buckets.length || 96, bw = (W - 4) / n - 1.5, y90 = H - 0.9 * (H - 4);
+  const bars = L.buckets.map((b, i) => !b.n ? "" : `<rect x="${(2 + i * (bw + 1.5)).toFixed(1)}" y="${(H - Math.max(2, b.busy / 100 * (H - 4))).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(2, b.busy / 100 * (H - 4)).toFixed(1)}" rx="1.5" style="fill:var(${b.busy >= 90 ? "--bad" : b.busy >= 70 ? "--warn" : "--signal"})"><title>${(n - i) * 15 > 60 ? Math.round((n - i) / 4) + " h" : (n - i) * 15 + " min"} ago: up to ${b.busy}% busy, up to ${b.mbps} Mbps</title></rect>`).join("");
+  const verdict = mins === 0 ? "It has kept up: never nearly full in the last 24 hours."
+    : `Nearly full for ${mins} min in the last 24 hours. At those times the router, not your line, may be what limits speed.`;
+  return `<h2>Router load</h2>
+  <div class="card"><div class="now" style="border:0;box-shadow:none;margin:0;background:none">
+    <div class="nums"><div class="num"><span>Processor now</span><b>${L.now.busy}<small>%</small></b></div>
+      <div class="num"><span>Busiest, last 24 h</span><b>${pk.busy}<small>%</small></b></div>
+      <div class="num"><span>Nearly full</span><b>${mins}<small>min</small></b></div></div>
+    <svg class="flow" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Processor load over the last 24 hours">
+      <line x1="0" x2="${W}" y1="${y90.toFixed(1)}" y2="${y90.toFixed(1)}" style="stroke:var(--line-2);stroke-dasharray:4 4"/>${bars}</svg>
+    <div class="legend"><span>Last 24 hours, busiest moment per quarter hour. Dashed line: 90%.</span></div></div>
+    <div class="card-b"><p style="margin:0">${verdict} The busiest moment was ${ago(pk.ago)}: ${pk.busy}% (network ${pk.net}%) while moving ${mbps(pk.down)} Mbps down and ${mbps(pk.up)} up.
+      Now: network ${L.now.net}%, load ${esc(String(L.now.load))} across ${L.cores || 3} cores.</p></div>
+    ${L.event ? `<div class="note">Last noted ${ago(L.event.ago)}: ${esc(L.event.text.replace(/^router processor /, "processor "))}.</div>` : ""}
+    <div class="note">The speed limit and device caps run on the processor, not the hardware fast path, so this is where a busy router shows first.</div>
+  </div>`;
 }
 // Data used: this month and today, a bar per day, and who used it.
 const gb = b => b >= 1073741824 * 100 ? Math.round(b / 1073741824) + " GB" : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GB" : Math.round(b / 1048576) + " MB";
@@ -1148,14 +1175,14 @@ function usageCard() {
   const row = (name, sub, d, up, total) => `<div class="row"><div style="min-width:0;grid-column:1 / 3"><div class="nm"><span>${name}</span></div><div class="meta">${sub}</div>
       <div class="ubar"><i style="width:${Math.min(100, share(total))}%"></i></div></div><div class="right" style="text-align:right"><div><b style="color:var(--ink)">${gb(total)}</b><br><span style="font-size:12.5px">${gb(d)} down, ${gb(up)} up</span></div></div></div>`;
   const rows = u.devices.filter(d => d.down + d.up >= 1048576).slice(0, 12).map(d => row(esc(d.name || d.mac), esc(d.mac), d.down, d.up, d.down + d.up));
-  if (other > 52428800) rows.push(row("Other devices", "On the mesh satellite or a cable. They can't be told apart here.", 0, 0, other).replace(/<br>.*?<\/span>/, ""));
+  if (other > 52428800) rows.push(row("Not matched to a device", "Mostly IPv6 traffic of devices on the mesh satellite or a cable, which the router only counts in the total.", 0, 0, other).replace(/<br>.*?<\/span>/, ""));
   return `<h2>Data used</h2>
   <div class="card"><div class="now" style="border:0;box-shadow:none;margin:0;background:none">
     <div class="nums"><div class="num"><span>${esc(monthName)} so far</span><b>${gb(m.down + m.up).replace(" ", "<small>")}</small></b></div>
       <div class="num"><span>Today</span><b>${gb(t.down + t.up).replace(" ", "<small>")}</small></b></div></div>
     <svg class="flow" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Data used per day">${bars}</svg>
     <div class="legend"><span><i style="background:var(--signal)"></i>Download ${gb(m.down)}</span><span><i style="background:var(--ink-3)"></i>Upload ${gb(m.up)}</span><span>Counted since ${dayLabel(first)}</span></div></div></div>
-  ${rows.length ? sectionList(`Who used it in ${esc(monthName)}`, rows, "") + '<p class="muted" style="font-size:13px;margin:10px 2px 0;max-width:76ch">Per-device figures come from the Wi-Fi radio and include traffic between devices at home, so they are approximate. The totals above are exact.</p>' : ""}`;
+  ${rows.length ? sectionList(`Who used it in ${esc(monthName)}`, rows, "") + '<p class="muted" style="font-size:13px;margin:10px 2px 0;max-width:76ch">Devices on this router&rsquo;s Wi-Fi are counted at the radio, which includes traffic between devices at home. Devices on the mesh satellite or a cable are counted at the internet connection, IPv4 only. So per-device figures are approximate; the totals above are exact.</p>' : ""}`;
 }
 // What the automatic limit is doing: "Now 41 Mbps down, 28 up."
 function autoNow(w) {
@@ -1287,7 +1314,7 @@ function guestPage() {
   <p class="muted" style="font-size:13px;margin:12px 2px 0;max-width:72ch">To let a guest use the home Wi-Fi, open them on the Devices page and choose Allow on home Wi-Fi. While they stay on the guest Wi-Fi, they see a page with the home Wi-Fi name and password.</p>`;
 }
 
-// Who can join the home network: our own allow list (iot.sh home_sync). The home
+// Who can join the home network: our own allow list (ax10.sh home_sync). The home
 // Wi-Fi radios take only listed devices; unlisted ones behind the mesh satellite or
 // on a cable are cut off by the firewall. The guest Wi-Fi is never touched.
 const ago = (now, t) => { if (!t) return "Not seen yet"; const s = Math.max(0, now - t);
@@ -1505,14 +1532,14 @@ document.addEventListener("submit", ev => {
   S.editing = null; setDevice(mac, "name", v);
 });
 
-/* home allow list (iot.sh home_sync) */
+/* home allow list (ax10.sh home_sync) */
 const MESH_RE = /archer|deco|tp-?link|mesh|extender|repeater/i;
 function meshUnits(D) { return D.mesh.filter(m => MESH_RE.test(devName(m))); }
 async function acBusy(fn) {
   S.busy.ac = true; render();
   try { await fn(); } catch (e) { fail(e); }
   delete S.busy.ac;
-  await new Promise(r => setTimeout(r, 800));                    // let iot.sh home finish
+  await new Promise(r => setTimeout(r, 800));                    // let ax10.sh home finish
   try { await loadDevices(); } catch (e) { if (e instanceof AuthError) fail(e); }
   render();
 }

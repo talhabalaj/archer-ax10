@@ -35,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p feed
-          for p in ax10-svc ax10-busybox ax10-dropbear ax10-wifi ax10-luci ax10-debloat; do
+          for p in ax10-svc ax10-busybox ax10-dropbear ax10-wifi ax10-luci; do
             echo "== $p =="
             gh release download ipk --repo lee-soft/$p --pattern '*.ipk' --dir feed
           done
@@ -80,7 +80,7 @@ jobs:
           sh scripts/ci-install-lua.sh
           sh tests/run.sh
           tar --owner=0 --group=0 -czf dist/iot-ui.tar.gz -C iot-ui .
-          cp boot.sh install.sh iot.sh dist/
+          cp boot.sh install.sh ax10.sh dist/
           (cd dist && sha256sum * > manifest.sha256)
           ls -l dist
 
@@ -94,7 +94,7 @@ jobs:
         run: |
           [ -n "$RELEASE_SIGNING_KEY" ] || { echo "RELEASE_SIGNING_KEY secret is not set"; exit 1; }
           umask 077; printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/sign.pem"
-          for f in boot.sh install.sh iot.sh iot-ui.tar.gz dropbear_vanilla busybox-armv7l opt.tar.gz; do
+          for f in boot.sh install.sh ax10.sh iot-ui.tar.gz dropbear_vanilla busybox-armv7l opt.tar.gz Packages; do
             openssl dgst -sha256 -sign "$RUNNER_TEMP/sign.pem" -out "dist/$f.sig" "dist/$f"
             openssl dgst -sha256 -verify signing.pub.pem -signature "dist/$f.sig" "dist/$f"
           done

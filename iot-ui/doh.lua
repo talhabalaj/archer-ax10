@@ -1,4 +1,4 @@
--- doh.lua: a small DNS-over-HTTPS forwarder for the Archer AX10 (started by iot.sh).
+-- doh.lua: a small DNS-over-HTTPS forwarder for the Archer AX10 (started by ax10.sh).
 --
 --   lua doh.lua <port> <server ip> <server name> <ca file> [stat file]
 --   lua doh.lua check <port>      exit 0 if the forwarder answers a lookup

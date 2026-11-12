@@ -9,3 +9,7 @@ Packages.gz
 *.swp
 *~
 .DS_Store
+
+# built from src/ by scripts/build.sh
+/ax10.sh
+/ax10.sh.tmp

@@ -1,5 +1,5 @@
 -- IoT Network page backend for the stock TP-Link web UI (Archer AX10).
--- Installed by `iot.sh ui` into a bind-mounted copy of luci/controller/admin.
+-- Installed by `ax10.sh ui` into a bind-mounted copy of luci/controller/admin.
 -- Follows the stock controllers' pattern: a dispatch table of form -> operation -> cb,
 -- run through luci.model.controller, which handles the (encrypted) request framing.
 module("luci.controller.admin.iot_net", package.seeall)
@@ -8,9 +8,14 @@ local uci  = require "luci.model.uci"
 local ctl  = require "luci.model.controller"
 local json = require "luci.json"
 local http = require "luci.http"
+local nixio = require "nixio"
 
 local SEC  = "archer_boot"
-local IOT  = "/tmp/iot.sh"
+-- Through sh: a freshly installed or rebuilt /tmp/ax10.sh may not be executable.
+local IOT  = "/bin/sh /tmp/ax10.sh"
+-- What to say when an ax10.sh command could not run: almost always it gave up waiting
+-- for the run lock (exit 75) because a long change was being applied.
+local BUSY = "the router is busy applying an earlier change; try again in a moment"
 
 local function get(k, d)
     local v = uci.cursor():get("openvpn", SEC, "iot_" .. k)
@@ -29,15 +34,39 @@ local function has(list, v)
     return false
 end
 
+-- ax10.sh's run lock (src/10-lock.sh): the kernel's lockf on /tmp/ax10-iot/run.lock,
+-- held around every settings write made here, so ax10.sh never saves between our read
+-- and our write (or we between its). Only around our own writes: ax10.sh commands
+-- called from here take the lock themselves, and would wait for us forever.
+-- Closing the file lets the lock go; so does this process ending.
+local function locked(fn)
+    nixio.fs.mkdir("/tmp/ax10-iot")
+    local f = nixio.open("/tmp/ax10-iot/run.lock", "w")
+    if not f then return false, "-1" end
+    local deadline = os.time() + 30
+    while not f:lock("tlock") do
+        if os.time() >= deadline then f:close(); return false, "-1" end
+        nixio.nanosleep(0, 200000000)
+    end
+    local ok, a, b = pcall(fn)
+    f:close()
+    if not ok then error(a, 0) end
+    return a, b
+end
+
 -- Save options. TP-Link's cursor:commit also writes the config to flash.
 local function save(opts)
     local c = uci.cursor()
-    for k, v in pairs(opts) do c:set("openvpn", SEC, "iot_" .. k, v) end
-    c:commit("openvpn")
-    -- Saved; the one sync worker does the rest (it brings the IoT network up, or takes
+    if not locked(function()
+        for k, v in pairs(opts) do c:set("openvpn", SEC, "iot_" .. k, v) end
+        c:commit("openvpn")
+        return true
+    end) then return false end
+    -- Saved; `ax10.sh kick` does the rest (it brings the IoT network up, or takes
     -- it down if it was switched off). "up" lifts a stop made by hand on the router.
     local on = c:get("openvpn", SEC, "iot_enabled") == "1"
     os.execute(IOT .. (on and " kick up" or " kick") .. " >/dev/null 2>&1 &")
+    return true
 end
 
 ------------------------------------------------------------------ device info
@@ -54,19 +83,27 @@ local function names()
     return t
 end
 
-local function set_name(mac, name)
-    local t = names()
-    name = (name or ""):gsub("[\r\n]", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    t[mac] = (name ~= "" and #name <= 40) and name or nil
-    local list = {}
-    for m, n in pairs(t) do list[#list + 1] = m .. "=" .. n end
-    local c = uci.cursor()
-    if #list > 0 then c:set("openvpn", SEC, "iot_names", list) else c:delete("openvpn", SEC, "iot_names") end
-    c:commit("openvpn")
+-- set_names({ [mac] = name or "" }): one read and one save for any number of names
+-- ("" clears a name). False if the lock stayed busy and nothing was saved.
+local function set_names(changes)
+    return locked(function()      -- the list is read and written back under the lock
+        local t = names()
+        for mac, name in pairs(changes) do
+            name = (name or ""):gsub("[\r\n]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            t[mac] = (name ~= "" and #name <= 40) and name or nil
+        end
+        local list = {}
+        for m, n in pairs(t) do list[#list + 1] = m .. "=" .. n end
+        local c = uci.cursor()
+        if #list > 0 then c:set("openvpn", SEC, "iot_names", list) else c:delete("openvpn", SEC, "iot_names") end
+        c:commit("openvpn")
+        return true
+    end)
 end
+local function set_name(mac, name) return set_names({ [mac] = name or "" }) end
 
 -- One device's entry in a per-device list (caps, noinet, guest_fast, lan_allow),
--- changed by iot.sh under its settings lock, so the watcher and other requests never
+-- changed by ax10.sh under its run lock, so the watcher and other requests never
 -- write a stale copy of the list. Every writer of these lists goes through here.
 local function set_entry(key, mac, value)
     return os.execute(IOT .. " entry " .. key .. " " .. mac .. " " .. value .. " >/dev/null 2>&1") == 0
@@ -280,7 +317,7 @@ local function write_settings(form)
     if form.allow_lan ~= nil then opts.allow_lan = form.allow_lan end
     if form.lan_mode == "all" or form.lan_mode == "selected" then opts.lan_mode = form.lan_mode end
     if form.lock == "on" or form.lock == "off" then opts.lock = form.lock == "on" and "1" or "0" end
-    save(opts)
+    if not save(opts) then return false, BUSY end
     return read_settings()
 end
 
@@ -328,7 +365,7 @@ local function update_home(form)
 end
 
 ------------------------------------------------------------ guest speed limit
--- Settings live next to the IoT ones (iot_guest_*); iot.sh's watcher applies them.
+-- Settings live next to the IoT ones (iot_guest_*); ax10.sh's watcher applies them.
 -- A full sync, not just `shape`: it also registers the watcher, which is what applies
 -- the guest limit to a guest who joins later.
 local function guest_apply() os.execute(IOT .. " kick >/dev/null 2>&1 &") end
@@ -346,11 +383,14 @@ local function write_guest_settings(form)
     if form.enable == "on" and (not d or not u or d < 1 or u < 1 or d > 1000 or u > 1000) then
         return false, "-1"
     end
-    local c = uci.cursor()
-    c:set("openvpn", SEC, "iot_guest_limit", form.enable == "on" and "1" or "0")
-    if d then c:set("openvpn", SEC, "iot_guest_down", tostring(math.floor(d))) end
-    if u then c:set("openvpn", SEC, "iot_guest_up", tostring(math.floor(u))) end
-    c:commit("openvpn")
+    if not locked(function()
+        local c = uci.cursor()
+        c:set("openvpn", SEC, "iot_guest_limit", form.enable == "on" and "1" or "0")
+        if d then c:set("openvpn", SEC, "iot_guest_down", tostring(math.floor(d))) end
+        if u then c:set("openvpn", SEC, "iot_guest_up", tostring(math.floor(u))) end
+        c:commit("openvpn")
+        return true
+    end) then return false, BUSY end
     guest_apply()
     return read_guest_settings()
 end
@@ -473,7 +513,7 @@ local function devices()
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
     local rows, seen = {}, {}
-    -- Last seen (iot.sh home_seen, wall-clock seconds) and devices forgotten on the
+    -- Last seen (ax10.sh home_seen, wall-clock seconds) and devices forgotten on the
     -- dashboard (hidden while offline).
     local last, hidden = {}, {}
     local lf = io.open("/tmp/ax10-iot/home_seen")
@@ -693,7 +733,7 @@ end
 local requester_mac
 local function write_device(form)
     if form.forget then
-        -- form.forget: one MAC or a comma-separated list (at most 64). iot.sh checks
+        -- form.forget: one MAC or a comma-separated list (at most 64). ax10.sh checks
         -- and saves the whole batch; names (which Lua owns) go only once that worked.
         local list, me = {}, requester_mac()
         for raw in tostring(form.forget):gmatch("[^,]+") do
@@ -706,13 +746,16 @@ local function write_device(form)
         if os.execute(IOT .. " forget-device " .. table.concat(list, ",") .. " >/dev/null 2>&1") ~= 0 then
             return false, "nothing was changed: that would empty the home allow list while the lock is on"
         end
-        for _, m in ipairs(list) do set_name(m, "") end
+        local clear = {}
+        for _, m in ipairs(list) do clear[m] = "" end
+        local named = set_names(clear)
         sync_later()
+        if not named then return false, "forgotten, but their names are still saved (" .. BUSY .. ")" end
         return { forgot = #list }
     end
     local mac = normmac(form.mac)
     if not mac:match(MAC_PAT) then return false, "-1" end
-    if form.name ~= nil then set_name(mac, form.name) end
+    if form.name ~= nil and not set_name(mac, form.name) then return false, BUSY end
     local changed = false
     for field, key in pairs({ internet = "noinet", allowed = "lan_allow", fast = "guest_fast" }) do
         local v = form[field]
@@ -724,7 +767,7 @@ local function write_device(form)
         end
     end
     if form.pin == "off" then
-        -- Through iot.sh, under the lock autopin runs under, so the watcher can't
+        -- Through ax10.sh, under the lock autopin runs under, so the watcher can't
         -- save a stale pin list over it. iot_forget keeps it from being re-pinned.
         if os.execute(IOT .. " forget " .. mac .. " >/dev/null 2>&1") ~= 0 then return false, "-1" end
         changed = true
@@ -764,24 +807,33 @@ end
 local function write_shaping(form)
     local d, u = tonumber(form.down), tonumber(form.up)
     if form.enable == "on" and (not d or not u or d < 1 or u < 1 or d > 1000 or u > 1000) then return false, "-1" end
-    local c = uci.cursor()
-    c:set("openvpn", SEC, "iot_wan_shape", form.enable == "on" and "1" or "0")
-    if form.prio == "on" or form.prio == "off" then c:set("openvpn", SEC, "iot_prio", form.prio == "on" and "1" or "0") end
-    if form.guest_low == "on" or form.guest_low == "off" then c:set("openvpn", SEC, "iot_guest_low", form.guest_low == "on" and "1" or "0") end
-    if d then c:set("openvpn", SEC, "iot_wan_down", tostring(math.floor(d))) end
-    if u then c:set("openvpn", SEC, "iot_wan_up", tostring(math.floor(u))) end
-    if form.auto == "on" or form.auto == "off" then c:set("openvpn", SEC, "iot_wan_auto", form.auto == "on" and "1" or "0") end
-    -- The range for the automatic limit: whole Mbps, or empty for "half to three times the usual speed".
+    -- The range for the automatic limit: whole Mbps, or empty for "half to three times
+    -- the usual speed". Checked before anything is set: a change set and then left
+    -- behind by an early return would be saved by the next commit, ours or ax10.sh's.
+    local range = {}
     for _, k in ipairs({ "min_down", "max_down", "min_up", "max_up" }) do
         local v = form[k]
         if v ~= nil then
             local nv = tonumber(v)
-            if v == "" then c:delete("openvpn", SEC, "iot_wan_" .. k)
-            elseif nv and nv >= 1 and nv <= 1000 then c:set("openvpn", SEC, "iot_wan_" .. k, tostring(math.floor(nv)))
+            if v == "" then range[k] = ""
+            elseif nv and nv >= 1 and nv <= 1000 then range[k] = tostring(math.floor(nv))
             else return false, "-1" end
         end
     end
-    c:commit("openvpn")
+    if not locked(function()
+        local c = uci.cursor()
+        c:set("openvpn", SEC, "iot_wan_shape", form.enable == "on" and "1" or "0")
+        if form.prio == "on" or form.prio == "off" then c:set("openvpn", SEC, "iot_prio", form.prio == "on" and "1" or "0") end
+        if form.guest_low == "on" or form.guest_low == "off" then c:set("openvpn", SEC, "iot_guest_low", form.guest_low == "on" and "1" or "0") end
+        if d then c:set("openvpn", SEC, "iot_wan_down", tostring(math.floor(d))) end
+        if u then c:set("openvpn", SEC, "iot_wan_up", tostring(math.floor(u))) end
+        if form.auto == "on" or form.auto == "off" then c:set("openvpn", SEC, "iot_wan_auto", form.auto == "on" and "1" or "0") end
+        for k, v in pairs(range) do
+            if v == "" then c:delete("openvpn", SEC, "iot_wan_" .. k) else c:set("openvpn", SEC, "iot_wan_" .. k, v) end
+        end
+        c:commit("openvpn")
+        return true
+    end) then return false, BUSY end
     guest_apply()
     return read_shaping()
 end
@@ -806,7 +858,7 @@ local function write_open(form)
     local s = tonumber(form.seconds) or 600
     s = math.max(0, math.min(math.floor(s), 3600))
     -- recorded before we answer (so open-then-close can't land the other way round); applied in the background
-    os.execute(IOT .. (s > 0 and (" open " .. s) or " close") .. " later >/dev/null 2>&1")
+    if os.execute(IOT .. (s > 0 and (" open " .. s) or " close") .. " later >/dev/null 2>&1") ~= 0 then return false, BUSY end
     sync_later()
     return { open_left = s }
 end
@@ -828,7 +880,7 @@ local function write_kick(form)
     return { mac = mac }
 end
 
--- Our home allow list (iot.sh home_sync). Every change goes through iot.sh, which
+-- Our home allow list (ax10.sh home_sync). Every change goes through ax10.sh, which
 -- edits the list under its run lock, so it never races the 15 s watcher.
 local function home_cmd(args) return os.execute(IOT .. " " .. args .. " >/dev/null 2>&1") == 0 end
 -- The MAC of the device making this request, from the neighbour tables (IPv4 or
@@ -950,12 +1002,12 @@ end
 local function write_home_open(form)
     local s = tonumber(form.seconds) or 600
     s = math.max(0, math.min(math.floor(s), 3600))
-    os.execute(IOT .. (s > 0 and (" home-open " .. s) or " home-close") .. " later >/dev/null 2>&1")
+    if os.execute(IOT .. (s > 0 and (" home-open " .. s) or " home-close") .. " later >/dev/null 2>&1") ~= 0 then return false, BUSY end
     sync_later()
     return { open_left = s }
 end
 
--- Local names (iot.sh dns_sync): <name>.<suffix> for the router and the devices.
+-- Local names (ax10.sh dns_sync): <name>.<suffix> for the router and the devices.
 local function dns_label(v)
     v = tostring(v or ""):lower():gsub("[%s_%.]", "-"):gsub("[^a-z0-9-]", ""):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")
     return v:sub(1, 63)
@@ -983,7 +1035,7 @@ local function read_names()
              doh_ok = okf ~= nil, doh_answered = st.answered or 0, doh_failed = st.failed or 0, doh_ms = st.ms or 0 }
 end
 -- form.hosts: "name=ip name=ip" (the dashboard builds it). Everything is checked
--- here; iot.sh checks again before anything reaches dnsmasq.
+-- here; ax10.sh checks again before anything reaches dnsmasq.
 local function write_names(form)
     local domain = dns_label(form.domain)
     if domain == "" or domain == "local" or #domain > 30 then return false, "the suffix needs letters or digits, and can't be \"local\"" end
@@ -1004,20 +1056,23 @@ local function write_names(form)
         hosts[#hosts + 1] = l .. "=" .. ip
     end
     if #hosts > 64 then return false, "at most 64 custom names" end
-    local c = uci.cursor()
-    local function put(k, v) if v == "" then c:delete("openvpn", SEC, "iot_" .. k) else c:set("openvpn", SEC, "iot_" .. k, v) end end
     local provider = form.provider
     if provider ~= "google" and provider ~= "quad9" then provider = "cloudflare" end
-    put("dns_doh", form.doh == "on" and "1" or "0"); put("dns_doh_provider", provider)
-    put("dns_on", form.enable == "on" and "1" or "0")
-    put("dns_domain", domain); put("dns_router", table.concat(router, " "))
-    put("dns_upstream", table.concat(up, " ")); put("dns_hosts", table.concat(hosts, " "))
-    c:commit("openvpn")
+    if not locked(function()
+        local c = uci.cursor()
+        local function put(k, v) if v == "" then c:delete("openvpn", SEC, "iot_" .. k) else c:set("openvpn", SEC, "iot_" .. k, v) end end
+        put("dns_doh", form.doh == "on" and "1" or "0"); put("dns_doh_provider", provider)
+        put("dns_on", form.enable == "on" and "1" or "0")
+        put("dns_domain", domain); put("dns_router", table.concat(router, " "))
+        put("dns_upstream", table.concat(up, " ")); put("dns_hosts", table.concat(hosts, " "))
+        c:commit("openvpn")
+        return true
+    end) then return false, BUSY end
     sync_later()
     return read_names()
 end
 
--- Data used (iot.sh usage_sync): totals per day and month, devices for this month.
+-- Data used (ax10.sh usage_sync): totals per day and month, devices for this month.
 local function read_usage()
     local days, months, devs = {}, {}, {}
     local month = os.date("%Y-%m")
@@ -1065,9 +1120,59 @@ local function read_usage()
     return { today = os.date("%Y-%m-%d"), month = month, days = days, months = months, devices = devs }
 end
 
+-- Router load (ax10.sh load_guard): the processor over the last 24 hours, in 96
+-- quarter-hours (busiest reading and busiest throughput in each), the busiest
+-- moment, minutes spent nearly full, and the last "nearly full" note from the log.
+local function read_load()
+    local up = 0
+    local uf = io.open("/proc/uptime")
+    if uf then up = math.floor(tonumber((uf:read("*l") or ""):match("^([%d.]+)") or 0) or 0); uf:close() end
+    local B, SPAN = 96, 900
+    local buckets = {}
+    for i = 1, B do buckets[i] = { busy = 0, mbps = 0, n = 0 } end
+    local out = { buckets = buckets, cores = 3, full_s = 0 }
+    local f = io.open("/tmp/ax10-iot/load.log")
+    if not f then return out end
+    local last, peak, prev
+    for line in f:lines() do
+        local t, b, q, l, d, u = line:match("^(%d+) (%d+) (%d+) (%S+) (%d+) (%d+)$")
+        t, b, d, u = tonumber(t), tonumber(b), tonumber(d), tonumber(u)
+        if t and t <= up and up - t < 86400 then
+            local r = { t = t, busy = b, net = tonumber(q), load = tonumber(l) or 0, down = d, up = u }
+            last = r
+            if not peak or b > peak.busy then peak = r end
+            if b >= 90 and prev then out.full_s = out.full_s + math.min(t - prev, 60) end
+            prev = t
+            local k = B - math.floor((up - t) / SPAN)
+            if k >= 1 and k <= B then
+                local x = buckets[k]
+                if b > x.busy then x.busy = b end
+                local m = math.floor((d + u) / 100) / 10      -- Mbps, one decimal
+                if m > x.mbps then x.mbps = m end
+                x.n = x.n + 1
+            end
+        end
+    end
+    f:close()
+    local function view(r) return { busy = r.busy, net = r.net, load = r.load, down = r.down, up = r.up, ago = up - r.t } end
+    if last then out.now = view(last); out.peak = view(peak) end
+    local lf = io.open("/tmp/ax10-iot/iot.log")
+    if lf then
+        for line in lf:lines() do
+            local t, text = line:match("^(%d+)s (router processor .*)$")
+            if t and tonumber(t) <= up then out.event = { text = text, ago = up - tonumber(t) } end
+        end
+        lf:close()
+    end
+    return out
+end
+
 local dispatch_tbl = {
     usage = {
         ["read"]  = { cb = read_usage },
+    },
+    load = {
+        ["read"]  = { cb = read_load },
     },
     names = {
         ["read"]  = { cb = read_names },
