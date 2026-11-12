@@ -987,7 +987,9 @@ ticket "$T/run/locks" "1.$$"; LOCK_WAIT=1 h kick
 rm -rf "$T/run/locks/1.$$"; h kick
 [ ! -e "$T/run/sync.want" ] || fail "the kept request was not applied by the next worker"
 # Another process's pid file is never removed by a worker on its way out.
-sleep 30 & other=$!; echo "$other " > "$T/run/sync.pid"; h kick
+# (pid and start time, as pid_save writes it: where /proc exists a bare pid is only
+# trusted if its command line looks like ours, and this stand-in is a `sleep`)
+sleep 30 & other=$!; echo "$other $(awk '{print $22}' "/proc/$other/stat" 2>/dev/null)" > "$T/run/sync.pid"; h kick
 [ "$(cut -d' ' -f1 "$T/run/sync.pid" 2>/dev/null)" = "$other" ] || fail "a request removed another worker's pid file"
 [ -e "$T/run/sync.want" ] || fail "a request next to a live worker left no note"
 kill "$other" 2>/dev/null; wait "$other" 2>/dev/null || true; rm -f "$T/run/sync.pid" "$T/run/sync.want"
