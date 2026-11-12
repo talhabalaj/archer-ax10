@@ -885,6 +885,23 @@ wanc 12 6; [ "$(usage "T:$day")" = "312/46" ] || fail "usage: counting did not c
 rm -f "$T/run/usage" "$T/run/usage.last" "$T/run/usage.saved"; BOOTID=boot2; wanc 7 3
 # (From the last save, 310/45: what came after it went with the RAM.)
 [ "$(usage "T:$day")" = "317/48" ] || fail "usage: log not carried over a reboot, or the new boot's traffic not counted ($(usage "T:$day"))"
+# TP-Link's own scheduled reboot (cron): the log is saved in the 5 minutes before it.
+cat > "$T/bin/uci11" <<EOF
+#!/bin/sh
+case "\$*" in
+  "-q get autoreboot.reboot.enable") echo on ;;
+  "-q get autoreboot.reboot.time") echo 03:00 ;;
+  "-q get autoreboot.reboot.cycle") echo week ;;
+  "-q get autoreboot.reboot.day") echo Mon ;;
+  *) exec "$T/bin/uci7" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci11"
+ar() { AUTOREBOOT_NOW="$1" WAN_DEV=wan0 USAGE_BOOT="$BOOTID" iot "$T/bin/uci11" "$ROOT/ax10.sh" usage >/dev/null 2>&1; }
+echo $(( $(date +%s) - 1200 )) > "$T/run/usage.saved"; wanc 15 7
+ar "Mon 02:40"; grep -q "$day=325/52" "$T/u/iot_usage_days" && fail "usage: saved long before TP-Link's scheduled reboot"
+ar "Tue 02:57"; grep -q "$day=325/52" "$T/u/iot_usage_days" && fail "usage: saved for a weekly reboot on the wrong day"
+ar "Mon 02:57"; grep -q "$day=325/52" "$T/u/iot_usage_days" || fail "usage: not saved before TP-Link's scheduled reboot ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
 # `ax10.sh reboot` saves the log first, so a planned reboot loses nothing.
 wanc 20 9; REBOOT=true WAN_DEV=wan0 USAGE_BOOT="$BOOTID" iot "$T/bin/uci7" "$ROOT/ax10.sh" reboot >/dev/null 2>&1 || true
 grep -q "$day=330/54" "$T/u/iot_usage_days" || fail "usage: reboot did not save the log first ($(cat "$T/u/iot_usage_days" 2>/dev/null))"

@@ -151,7 +151,10 @@ out the WAN port, so they never pass through our queues (which sit on `br-lan` a
   entry each (`iot_usage_days`, `_months`, `_devs`: one long value would be cut at
   2465 characters by TP-Link's startup); 62 days, 24 months, devices for this month and
   the last. Not saved at the first reading after a start (flash holds that already). A
-  reboot loses what came since the last save: `ax10.sh reboot` saves first. (Four
+  reboot loses what came since the last save: `ax10.sh reboot` saves first (the
+  dashboard's Reboot button uses it, falling back to TP-Link's reboot), and the watcher
+  saves in the 5 minutes before TP-Link's own scheduled reboot (`autoreboot.reboot`,
+  run by cron; here Mondays 03:00). (Four
   reboots in under 4 hours on 12 Nov lost that day's per-device figures this way.)
   `iot_usage_boot` vs `/proc/sys/kernel/random/boot_id` decides whether a first
   reading is new traffic (a new boot) or only a baseline.

@@ -1024,7 +1024,18 @@ local function read_load()
     return out
 end
 
+-- Reboot from the dashboard: `ax10.sh reboot` saves the usage log first (it is only
+-- saved every 4 hours). In the background, so this answers before the router goes;
+-- if ax10.sh can't run (it gave up waiting for the run lock), a plain reboot follows.
+local function write_reboot()
+    os.execute("(" .. IOT .. " reboot || /sbin/reboot) >/dev/null 2>&1 &")
+    return { rebooting = true }
+end
+
 local dispatch_tbl = {
+    reboot = {
+        ["write"] = { cb = write_reboot },
+    },
     usage = {
         ["read"]  = { cb = read_usage },
     },

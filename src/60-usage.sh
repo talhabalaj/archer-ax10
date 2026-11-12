@@ -61,6 +61,19 @@ usage_save() {   # $RUN/usage -> flash, in whole MB
     commit_cfg >/dev/null
 }
 usage_on() { [ "$(cfg usage_on 1)" = 1 ]; }       # counting is on unless iot_usage_on=0
+# TP-Link's own scheduled reboot (System Tools > Reboot Schedule: settings
+# autoreboot.reboot, run by cron) doesn't go through us: is it due in the next 5
+# minutes? (AUTOREBOOT_NOW="Mon 02:57" stands in for the clock in the tests.)
+usage_reboot_due() {
+    [ "$($UCI -q get autoreboot.reboot.enable)" = on ] || return 1
+    at="$($UCI -q get autoreboot.reboot.time)"
+    case "$at" in [0-2][0-9]:[0-5][0-9]) ;; *) return 1 ;; esac
+    nw="${AUTOREBOOT_NOW:-$(date '+%a %H:%M')}"; dw="${nw% *}"; hm="${nw#* }"
+    [ "$($UCI -q get autoreboot.reboot.cycle)" = week ] && [ "$dw" != "$($UCI -q get autoreboot.reboot.day)" ] && return 1
+    m() { h="${1%:*}"; mi="${1#*:}"; echo $(( ${h#0} * 60 + ${mi#0} )); }
+    d=$(( $(m "$at") - $(m "$hm") ))
+    [ "$d" -ge 0 ] && [ "$d" -le 5 ]
+}
 usage_sync() {
     usage_on || return 0
     [ -n "$(epoch)" ] || return 0                 # no clock yet: nothing to file a reading under
@@ -133,5 +146,8 @@ usage_sync() {
     # holds then is what flash holds, plus seconds.
     last="$(cat "$RUN/usage.saved" 2>/dev/null)"
     if [ -z "$last" ]; then echo "$now" > "$RUN/usage.saved"
-    elif [ $((now - last)) -ge "${USAGE_SAVE_EVERY:-14400}" ]; then usage_save; echo "$now" > "$RUN/usage.saved"; fi
+    elif [ $((now - last)) -ge "${USAGE_SAVE_EVERY:-14400}" ]; then usage_save; echo "$now" > "$RUN/usage.saved"
+    elif [ $((now - last)) -ge 600 ] && usage_reboot_due; then
+        usage_save; echo "$now" > "$RUN/usage.saved"; log "usage log saved before TP-Link's scheduled reboot"
+    fi
 }

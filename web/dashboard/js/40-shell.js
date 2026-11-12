@@ -49,7 +49,15 @@ function go(tab, net) {
 }
 async function reboot() {
   if (!await confirmBox("Reboot the router?", "Everything goes offline for about two minutes, then reconnects by itself.", "Reboot", true)) return;
-  try { await API.call("/admin/system?form=reboot", { operation: "write" }); } catch (e) { if (!(e instanceof AuthError)) return fail(e); }
+  // Through our backend: it saves the usage log first (ax10.sh reboot). If that call
+  // fails, TP-Link's own reboot still restarts the router.
+  // (A reply that can't be read, or a session gone, means it is already going down.)
+  try { await iot("reboot", { operation: "write" }); }
+  catch (e) {
+    if (!(e instanceof AuthError)) {
+      try { await API.call("/admin/system?form=reboot", { operation: "write" }); } catch (e2) { if (!(e2 instanceof AuthError)) return fail(e2); }
+    }
+  }
   clearInterval(timer);
   $id("app").innerHTML = `<div class="login"><div><div class="busy"><span class="spin"></span><b>Rebooting…</b></div>
     <p class="muted" style="margin-top:10px">This page reloads when the router is back.</p></div></div>`;
