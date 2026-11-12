@@ -3,8 +3,10 @@
 # so the home allow list and the IoT network are up within seconds of every boot,
 # with or without internet. The router keeps no files
 # across a reboot, only its settings (a 128 KB flash partition, about a fifth used),
-# so the copy is a setting: ax10.sh gzipped and base64'd (about 54 KB), in chunks, with
-# the release's own signature. The boot hook (scripts/signed-hook.sh) checks that
+# so the copy is a setting: ax10.sh gzipped and base64'd (about 57 KB), in chunks of
+# 1000 characters, with the release's own signature. (TP-Link's startup cuts every
+# list value to 2465 characters as it loads the settings: 4000-character chunks came
+# back cut short after a reboot, and the copy no longer verified. Seen on the router.) The boot hook (scripts/signed-hook.sh) checks that
 # signature with the release key before it runs the copy. Written only when
 # the release changed, since each write rewrites the settings in flash; skipped if it
 # would fill the partition past ~90 KB (TP-Link's own format adds ~8%), and read
@@ -18,7 +20,7 @@ save_copy() {    # save_copy <ax10.sh> <ax10.sh.sig>: under the run lock (ax10.s
     rest="$(for f in "${CACHE_CONF:-/etc/config}"/*; do if [ "${f##*/}" = openvpn ]; then grep -v cache_iot "$f"; else cat "$f"; fi; done 2>/dev/null | gzip -9 | wc -c)"
     if [ $((rest + ${#gz})) -ge 90000 ]; then echo "offline copy of ax10.sh not saved: it would fill the settings partition"; return 0; fi
     $C -q delete $K.cache_iot
-    echo "$gz" | awk '{ for (i = 1; i <= length($0); i += 4000) print substr($0, i, 4000) }' |
+    echo "$gz" | awk '{ for (i = 1; i <= length($0); i += 1000) print substr($0, i, 1000) }' |
         while read -r c; do $C add_list "$K.cache_iot=$c"; done
     $C set "$K.cache_iot_sig=$(/usr/bin/openssl base64 -A < "$2")"
     $C set "$K.cache_iot_sum=$sum"

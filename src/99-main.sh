@@ -112,6 +112,11 @@ case "$1" in
         run_all; watcher_sync
         lifeline_guard ;;
     status) status ;;
+    save-copy)   # save-copy <ax10.sh> <ax10.sh.sig>: keep a release's ax10.sh as the copy in flash (checked first)
+        [ -s "$2" ] && [ -s "$3" ] || { echo "usage: ax10.sh save-copy <ax10.sh> <ax10.sh.sig>" >&2; exit 1; }
+        /usr/bin/openssl dgst -sha256 -verify "${SIGN_PUB:-/tmp/archer-sign.pub}" -signature "$3" "$2" >/dev/null 2>&1 ||
+            { echo "ax10.sh: $2 does not verify with the release key; not saved" >&2; exit 1; }
+        save_copy "$2" "$3" ;;
     guard) mkdir -p "$RUN"; lifeline_guard; ipv6_guard ;;   # what the watcher checks besides the rules
     load)    # a load reading now (two, 2 s apart, on a first run), then the last few
         load_guard; [ -f "$RUN/load.log" ] || { sleep 2; load_guard; }

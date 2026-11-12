@@ -175,8 +175,9 @@ runs in full, saves the release's `ax10.sh` if it changed, and restarts on it.
 - `ax10.sh boot` (`save_copy`, given the signature by `boot.sh` in `SAVE_COPY_SIG`)
   saves the copy whenever the release's `ax10.sh` changes, under the run lock, after
   stopping the watcher that was running (it may be an older version's):
-  gzip + base64 (about 54 KB) as a UCI list `openvpn.archer_boot.cache_iot` in 4000
-  character chunks, the release's own signature in `cache_iot_sig`, its md5 in
+  gzip + base64 (about 57 KB) as a UCI list `openvpn.archer_boot.cache_iot` in 1000
+  character chunks (TP-Link's startup cuts list values to 2465 characters: 4000-character
+  chunks came back short after a reboot and the copy failed verification), the release's own signature in `cache_iot_sig`, its md5 in
   `cache_iot_sum`. It refuses if the settings would pass ~90 KB, and reads the copy
   back before committing.
 - `SAVED_COPY=1 ax10.sh boot` runs everything ax10.sh does by itself (IoT network, home
@@ -213,7 +214,11 @@ cloud services the Tether app uses.
   write is `user-config` (128 KB). A save turns every file in `/etc/config` into one
   XML file (`luci.sys.config.convertFileToXml`), compresses and encrypts it
   (`luci.model.crypto.enc_file_entry`) and writes it with `nvrammanager -w`; boot
-  reads it back the same way. About 26 KB is used by the settings alone. A save
+  reads it back the same way. About 26 KB is used by the settings alone. Something in
+  TP-Link's startup cuts each UCI value (list items too) to **2465 characters** as the
+  settings load; the XML conversion alone keeps longer ones, so a check in RAM passes and
+  only a reboot shows it. Keep every saved value well under that (the SSH host key is
+  565, the boot hook 1058). A save
   that fails would lose every setting, the boot hook included, so anything large
   is tried through that pipeline into `/tmp` first.
 - Read-only files can be changed for the current boot with a RAM copy plus

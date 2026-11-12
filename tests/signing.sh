@@ -101,6 +101,8 @@ i=0; while [ $i -lt 400 ]; do echo "# padding line $i so the copy needs several 
 sign "$T/ax10.sh"
 cache "$T/ax10.sh" "$T/ax10.sh.sig" | grep -q "saved to flash" || fail "save_copy did not save the copy"
 [ "$($U get openvpn.archer_boot.cache_iot | wc -w)" -ge 2 ] || fail "save_copy did not split the copy into chunks"
+# TP-Link's startup cuts every saved value to 2465 characters: chunks must stay well under.
+[ "$($U get openvpn.archer_boot.cache_iot | tr ' ' '\n' | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" -le 1000 ] || fail "save_copy wrote a chunk longer than 1000 characters"
 cache "$T/ax10.sh" "$T/ax10.sh.sig" | grep -q "saved" && fail "save_copy wrote flash again for the same release"
 head -c 120000 /dev/urandom | openssl base64 > "$T/conf/big"
 cp "$T/ax10.sh" "$T/iot2.sh"; echo "# changed" >> "$T/iot2.sh"; sign "$T/iot2.sh"
