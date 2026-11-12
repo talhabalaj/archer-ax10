@@ -387,7 +387,17 @@ cloud services the Tether app uses.
   destination; IPv6 is printed zero-padded there).
 - htb's default burst (a few KB) under-delivers here, so classes get ~20 ms of
   traffic at their rate (at least 15 KB). Queue limits: `sfq limit` = 3 packets
-  per Mbps, 20–127.
+  per Mbps, 20–127; the priority lane always 127 (at 90, a video call's bursts of
+  frames were dropped).
+- Guests come and go all day, and each one changes the per-device part (a guest's
+  own cap, its filter into the guest lane). Rebuilding everything for that emptied
+  every queue and restarted the automatic limit: in a load test during a Meet call,
+  incoming video fell from about 2.3 to 0.8 Mbit/s after each rebuild, and the log
+  showed 35 rebuilds in 2.6 hours. Now a device change only redoes the per-device
+  part: `tc filter del ... prio 1` removes every device filter at once (the
+  calls-and-games filters are at prio 2 and 3), then the classes 1:11 and up go
+  (a class can't be deleted while a filter points at it), and they are added back.
+  If any device class stays, everything is rebuilt as before.
 - Kernel 4.1.52 queueing: `htb`, `sfq`, `prio` are present; `fq_codel`, `codel`,
   `cake`, `pie`, `fq`, `tbf`, `red`, `hfsc`, `drr`, `netem` are not. An earlier
   note here said `sfq` was missing; it isn't.

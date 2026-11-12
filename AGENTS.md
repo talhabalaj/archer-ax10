@@ -34,7 +34,7 @@ the log at `$RUN/iot.log`.
    and `node`; locally it skips the Lua checks if none is found, CI fails instead). Every behaviour change gets a test in `tests/ax10.sh` or `tests/signing.sh`.
    macOS has no `/proc`, so some code paths differ from Linux: before a release, also
    run the suite in a Linux container, as CI does:
-   `docker run --rm -v "$PWD":/src:ro ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq lua5.1 nodejs openssl procps gawk curl >/dev/null; cp -r /src /w && cd /w && sh tests/run.sh'`
+   `docker run --rm -v "$PWD":/src:ro ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq lua5.1 nodejs openssl procps gawk curl python3 >/dev/null; cp -r /src /w && cd /w && sh tests/run.sh'`
 2. **On the router, from the working tree** (no release needed): run
    `sh scripts/build.sh`, then copy `ax10.sh` and
    the contents of `build/ax10-files/` over SSH (port 2222), put those in

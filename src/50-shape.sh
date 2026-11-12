@@ -187,6 +187,65 @@ shape_class() {   # shape_class <dev> <minor> <Mbps> [parent]: capped class with
     $TC class add dev "$1" parent "${4:-1:1}" classid "1:$2" htb rate "${3}mbit" ceil "${3}mbit" $(htb_burst "$3") prio 1
     $TC qdisc add dev "$1" parent "1:$2" handle "$2:" sfq perturb 10 limit "$(sfq_limit "$3")"
 }
+# The lanes come in two parts. The frame: the whole-connection cap, the priority lane,
+# the normal lane, the guest lane, and the filters that sort calls and games. The
+# devices: one class per capped device (1:11 and up), every filter at prio 1 (device
+# caps, and guests into the guest lane), and, without the whole-connection cap, the
+# marks that keep capped devices' connections out of hardware acceleration.
+# Guests come and go all day, and each one changes the devices part. Rebuilding the
+# frame for that emptied every queue, a call's too, and restarted the automatic limit
+# from the usual speeds: calls lost quality for a minute every time a guest's phone
+# joined or left. So a change of devices replaces only the devices part.
+shape_devs_list() {   # shape_devs_list <dev>: the per-device classes on <dev>
+    $TC class show dev "$1" 2>/dev/null | awk '$1 == "class" && $2 == "htb" { split($3, c, ":"); if (c[1] == "1" && c[2] + 0 >= 11) print $3 }'
+}
+shape_devs_clear() {
+    for dev in "$LANBR" "$IFB"; do
+        # Every filter at prio 1 at once (the calls-and-games filters are at 2 and 3);
+        # a class can't be deleted while a filter still points at it.
+        $TC filter del dev "$dev" parent 1: prio 1 2>/dev/null
+        for c in $(shape_devs_list "$dev"); do $TC class del dev "$dev" classid "$c" 2>/dev/null; done
+    done
+    for c in "$IPT" "$IPT6"; do $c -t mangle -F $CH_SHAPE_IN 2>/dev/null; done
+    # All gone? Otherwise the caller rebuilds everything.
+    [ -z "$(shape_devs_list "$LANBR")$(shape_devs_list "$IFB")" ]
+}
+shape_devs_add() {   # shape_devs_add <wan 0|1> <low 0|1> <guests in the guest lane>, the caps in $list
+    if [ "$1" != 1 ]; then
+        for c in "$IPT" "$IPT6"; do
+            echo "$list" | while read m d u; do
+                [ -n "$m" ] && $c -t mangle -A $CH_SHAPE_IN -i "$LANBR" -m mac --mac-source "$m" -j CONNMARK --set-xmark $CT_BIT/$CT_BIT
+            done
+        done
+    fi
+    # Device caps match first (prio 1), so a capped device stays within its cap.
+    n=11
+    echo "$list" | while read m d u; do
+        [ -n "$m" ] || continue
+        par=1:1; [ "$2" = 1 ] && case " $3 " in *" $m "*) par=1:3 ;; esac
+        if [ "$d" -gt 0 ]; then
+            shape_class "$LANBR" "$n" "$d" "$par"
+            $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid "1:$n"
+        fi
+        if [ "$u" -gt 0 ]; then
+            shape_class "$IFB" "$n" "$u" "$par"
+            $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid "1:$n"
+        fi
+        n=$((n + 1))
+    done
+    # Guests last: whatever a guest's own cap does not catch lands in the bottom lane.
+    # Added after the cap filters, so within prio 1 those match first.
+    for m in $3; do
+        $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid 1:4
+        $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid 1:4
+    done
+    # Without the whole-connection cap, a newly capped device's connections may be in
+    # the hardware's fast path already: flush it so they come back through the queues.
+    [ "$1" != 1 ] && command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+    return 0
+}
+# Bump when the frame's layout changes, so the next sync rebuilds it once.
+SHAPE_LAYOUT=2
 shape_sync() {
     shape_load
     list="$(shape_list | awk 'NF == 3 && $1 ~ /^[0-9a-f:]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && ($2 > 0 || $3 > 0)' | sort -u)"
@@ -201,12 +260,26 @@ shape_sync() {
         auto_sync 0 0
         return 0
     fi
-    sig="$wan|$WS_DOWN|$WS_UP|$prio|$low|$gl|$(echo $list)"
-    if [ "$(cat "$RUN/shape.sig" 2>/dev/null)" = "$sig" ] && shape_ok; then
+    frame="L$SHAPE_LAYOUT|$wan|$WS_DOWN|$WS_UP|$prio|$low"
+    sig="$frame|$gl|$(echo $list)"
+    old="$(cat "$RUN/shape.sig" 2>/dev/null)"
+    if [ "$old" = "$sig" ] && shape_ok; then
         # Lanes built by an older version have no rate script yet.
         [ "$wan" = 1 ] && [ ! -f "$RUN/rate.sh" ] && rate_script "$prio" "$low"
         auto_sync "$wan" 0; return 0
     fi
+    # Only the devices changed (a guest came or went, a cap was edited): the frame, its
+    # queues and the automatic limit carry on untouched.
+    case "$old" in
+        "$frame|"*)
+            if shape_ok && shape_devs_clear; then
+                shape_devs_add "$wan" "$low" "$gl"
+                echo "$sig" > "$RUN/shape.sig"
+                auto_sync "$wan" 0
+                log "speed limits: $(echo "$list" | grep -c .) device(s) capped (only the devices' own limits changed)"
+                return 0
+            fi ;;
+    esac
     shape_clear
     lsmod 2>/dev/null | grep -q '^xt_BLOGSKIP' || insmod /lib/modules/iplatform/xt_BLOGSKIP.ko 2>/dev/null
     for c in "$IPT" "$IPT6"; do
@@ -217,9 +290,6 @@ shape_sync() {
         else
             $c -t mangle -N $CH_SHAPE_IN 2>/dev/null
             $c -t mangle -I PREROUTING 1 -j $CH_SHAPE_IN
-            echo "$list" | while read m d u; do
-                $c -t mangle -A $CH_SHAPE_IN -i "$LANBR" -m mac --mac-source "$m" -j CONNMARK --set-xmark $CT_BIT/$CT_BIT
-            done
             $c -t mangle -A $CH_SHAPE -m connmark --mark $CT_BIT/$CT_BIT -j BLOGSKIP
         fi
     done
@@ -238,7 +308,9 @@ shape_sync() {
             lo=$((t - hi - gs)); [ "$lo" -ge 1 ] || lo=1
             if [ "$prio" = 1 ]; then
                 $TC class add dev "$dev" parent 1:1 classid 1:2 htb rate "${hi}mbit" ceil "$r" $(htb_burst "$t") prio 0
-                $TC qdisc add dev "$dev" parent 1:2 handle 2: sfq perturb 10 limit "$q"
+                # The longest queue sfq allows: calls are light, but a video call's
+                # frames arrive as bursts of packets, and a short queue dropped them.
+                $TC qdisc add dev "$dev" parent 1:2 handle 2: sfq perturb 10 limit 127
             fi
             $TC class add dev "$dev" parent 1:1 classid 1:10 htb rate "${lo}mbit" ceil "$r" $(htb_burst "$t") prio 1
             if [ "$low" = 1 ]; then
@@ -253,30 +325,11 @@ shape_sync() {
         fi
         $TC qdisc add dev "$dev" parent 1:10 handle 10: sfq perturb 10 limit "$q"
     done
-    # Device caps match first (prio 1), so a capped device stays within its cap.
     [ "$prio" = 1 ] && { prio_filters "$LANBR" sport; prio_filters "$IFB" dport; }
     $TC qdisc add dev "$LANBR" ingress
     $TC filter add dev "$LANBR" parent ffff: protocol all prio 10 u32 match u32 0 0 action mirred egress redirect dev "$IFB"
-    n=11
-    echo "$list" | while read m d u; do
-        par=1:1; [ "$low" = 1 ] && case " $gl " in *" $m "*) par=1:3 ;; esac
-        if [ "$d" -gt 0 ]; then
-            shape_class "$LANBR" "$n" "$d" "$par"
-            $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid "1:$n"
-        fi
-        if [ "$u" -gt 0 ]; then
-            shape_class "$IFB" "$n" "$u" "$par"
-            $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid "1:$n"
-        fi
-        n=$((n + 1))
-    done
-    # Guests last: whatever a guest's own cap does not catch lands in the bottom lane.
-    # Added after the cap filters, so within prio 1 those match first.
-    for m in $gl; do
-        $TC filter add dev "$LANBR" parent 1: protocol all prio 1 u32 match ether dst "$m" flowid 1:4
-        $TC filter add dev "$IFB" parent 1: protocol all prio 1 u32 match ether src "$m" flowid 1:4
-    done
-    command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+    shape_devs_add "$wan" "$low" "$gl"
+    [ "$wan" = 1 ] && command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
     echo "$sig" > "$RUN/shape.sig"
     if [ "$wan" = 1 ]; then rate_script "$prio" "$low"; else rm -f "$RUN/rate.sh"; fi
     auto_sync "$wan" 1

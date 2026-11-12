@@ -97,15 +97,22 @@ cat > "$T/bin/umount" <<EOF
 echo "umount \$*" >> "$T/calls"
 EOF
 printf '%s\n' 'nvram set ${CONFIG_WIFI}_map="3" # BH BSS + FH BSS' 'nvram set ${RTORCFG_WIFI}_dwds="1"' > "$T/tplink_brcm.sh"
-# tc: remembers root htb and ingress qdiscs per device so "qdisc show" works.
+# tc: remembers root htb and ingress qdiscs per device so "qdisc show" works, and
+# classes so "class show" does (a root qdisc's removal takes its classes with it).
+# $T/tc_keep: "class del" fails, as the kernel's does while a filter points at the class.
 cat > "$T/bin/tc" <<'EOF'
 #!/bin/sh
 echo "tc $*" >> "@T@/calls"
 case "$1 $2" in
   "qdisc add") case "$*" in *" root handle 1: htb"*) echo "$4 htb" >> "@T@/qdiscs" ;; *" ingress") echo "$4 ingress" >> "@T@/qdiscs" ;; esac ;;
   "qdisc del") k=htb; [ "$5" = ingress ] && k=ingress
-               grep -vx "$4 $k" "@T@/qdiscs" > "@T@/q2" 2>/dev/null; mv "@T@/q2" "@T@/qdiscs" 2>/dev/null ;;
+               grep -vx "$4 $k" "@T@/qdiscs" > "@T@/q2" 2>/dev/null; mv "@T@/q2" "@T@/qdiscs" 2>/dev/null
+               [ "$k" = htb ] && { grep -v "^$4 " "@T@/classes" > "@T@/c2" 2>/dev/null; mv "@T@/c2" "@T@/classes" 2>/dev/null; } ;;
   "qdisc show") grep "^$4 " "@T@/qdiscs" 2>/dev/null | sed "s/^$4 htb/qdisc htb 1: root/; s/^$4 ingress/qdisc ingress ffff:/" ;;
+  "class add") echo "$4 $8" >> "@T@/classes" ;;
+  "class del") [ -e "@T@/tc_keep" ] && exit 2
+               grep -vx "$4 $6" "@T@/classes" > "@T@/c2" 2>/dev/null; mv "@T@/c2" "@T@/classes" 2>/dev/null ;;
+  "class show") grep "^$4 " "@T@/classes" 2>/dev/null | while read d c; do echo "class htb $c parent 1:1 prio 1 rate 2000Kbit"; done ;;
 esac
 exit 0
 EOF
@@ -153,7 +160,7 @@ while True:
 os.set_inheritable(f.fileno(), True)
 os.execv(sys.argv[3], sys.argv[3:])
 EOF
-PY="$(command -v python3)"
+PY="$(command -v python3)"; [ -n "$PY" ] || { echo "FAIL: python3 is needed (the lock tests stand in for lockrun.lua with it)"; exit 1; }
 # hold_lock: something else holds the run lock (a sleeper under lockrun.py); free_lock lets it go.
 hold_lock() { mkdir -p "$T/run"; "$PY" "$T/lockrun.py" "$T/run/run.lock" 5 /bin/sleep 300 & HOLDER=$!; sleep 1; }
 free_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true; }
@@ -461,7 +468,29 @@ has "tc filter add dev br-lan parent 1: protocol all prio 1 u32 match ether dst 
 has "tc filter add dev ifb0 parent 1: protocol all prio 1 u32 match ether src aa:bb:cc:00:00:06 flowid 1:4"
 has "tc class add dev br-lan parent 1:3 classid 1:4 htb rate 9mbit ceil 90mbit"
 grep -q "match ether dst aa:bb:cc:00:00:07 flowid 1:4" "$T/calls" && fail "home device put in the guest lane"
-rm -f "$T/glow_on" "$T/prio_on"
+has "tc qdisc add dev br-lan parent 1:2 handle 2: sfq perturb 10 limit 127"
+# A guest leaves: only the devices' part is redone. The lanes, their queues (a call's
+# among them) and the automatic limit carry on.
+cp "$T/clients.json" "$T/clients.keep"; sed 's/"AA-BB-CC-00-00-06","connect_status":1/"AA-BB-CC-00-00-06","connect_status":0/' "$T/clients.keep" > "$T/clients.json"
+: > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
+grep -q "qdisc del dev br-lan root\|qdisc add dev br-lan root\|classid 1:2 \|classid 1:10 " "$T/calls" && fail "a guest leaving rebuilt the lanes"
+for d in br-lan ifb0; do has "tc filter del dev $d parent 1: prio 1"; done
+for c in 11 12 13; do has "tc class del dev br-lan classid 1:$c"; done
+for c in 11 13; do has "tc class del dev ifb0 classid 1:$c"; done   # 1:12's cap is download-only
+grep -q "aa:bb:cc:00:00:06" "$T/calls" && fail "a guest that left is still capped"
+has "match ether dst aa:bb:cc:00:00:08 flowid 1:4"
+has "tc class add dev br-lan parent 1:1 classid 1:11 htb rate 10mbit"
+[ "$(grep -c "^br-lan 1:1[1-9]" "$T/classes")" = 2 ] || fail "device classes not replaced one for one: $(grep "^br-lan" "$T/classes" | tr '\n' ' ')"
+grep -q "aa:bb:cc:00:00:06" "$T/run/shape.sig" && fail "shape.sig still lists the guest that left"
+grep -q "only the devices' own limits changed" "$T/run/iot.log" || fail "device-only change not logged"
+# A device class that won't go away: the lanes are rebuilt instead.
+cp "$T/clients.keep" "$T/clients.json"; : > "$T/tc_keep"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
+rm -f "$T/tc_keep"
+has "tc qdisc add dev br-lan root handle 1: htb default 10"
+has "match ether dst aa:bb:cc:00:00:06"
+rm -f "$T/glow_on" "$T/prio_on" "$T/clients.keep"
 # Everything off: cleared, including the old guest-only limit's leftovers.
 echo 0 > "$T/wan_on"; echo 0 > "$T/guest_on"; rm -f "$T/caps"
 echo "mangle PREROUTING -j AX10_GUEST" >> "$T/rules"; : > "$T/run/guest.sig"; : > "$T/calls"
@@ -850,6 +879,13 @@ has "tc class change dev br-lan parent 1:1 classid 1:10 htb rate 30000kbit ceil 
 has "tc class change dev br-lan parent 1:3 classid 1:4 htb rate 6000kbit ceil 60000kbit burst 150000 cburst 150000 prio 2"
 has "tc class change dev ifb0 parent 1: classid 1:1 htb rate 20000kbit ceil 20000kbit burst 50000 cburst 50000"
 sh "$T/run/rate.sh" "1;reboot" 20000 2>/dev/null && fail "rate script accepted a bad rate"
+# A guest coming or going leaves the controller running (it carries on from where the line is).
+cp "$T/clients.json" "$T/clients.keep"; sed 's/"AA-BB-CC-00-00-06","connect_status":1/"AA-BB-CC-00-00-06","connect_status":0/' "$T/clients.keep" > "$T/clients.json"
+: > "$T/calls"; iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
+grep -q "autorate.lua" "$T/calls" && fail "controller restarted when a guest left"
+grep -q "qdisc add dev br-lan root" "$T/calls" && fail "lanes rebuilt when a guest left"
+mv "$T/clients.keep" "$T/clients.json"; : > "$T/calls"; iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
+grep -q "autorate.lua" "$T/calls" && fail "controller restarted when a guest came back"
 # Unchanged on the next run; stopped when automatic is switched off.
 : > "$T/calls"; iot "$T/bin/uci3" "$ROOT/ax10.sh" shape >/dev/null 2>&1 || true
 grep -q "autorate.lua" "$T/calls" && fail "controller restarted with no change"
