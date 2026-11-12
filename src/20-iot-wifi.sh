@@ -76,6 +76,24 @@ wds_guard() {
 
 live_ssid() { $WL -i "$VIF" ssid 2>/dev/null | sed -n 's/.*"\(.*\)".*/\1/p'; }
 vif_sig() { echo "$VIF|$SSID|$KEY|$HIDDEN|$(pidof hostapd 2>/dev/null)"; }
+# Is TP-Link's hostapd running the IoT slot? Until it is, the slot is left exactly as
+# TP-Link made it. At boot the copy in flash starts before TP-Link's own Wi-Fi setup;
+# a slot we had already moved and reconfigured made hostapd fail on it ("Could not set
+# interface wl1.4 hwaddr"), and that failure took down the whole 2.4 GHz hostapd: the
+# guest Wi-Fi off the air, the 2.4 GHz home Wi-Fi refusing new devices, and the IoT
+# slot broadcasting without encryption. Seen on the router.
+wifi_ready() { $HAPD_CLI -i "$VIF" ping 2>/dev/null | grep -q PONG; }
+# A slot on the air without encryption while hostapd isn't running it: off the air.
+# Only when seen twice in a row, so hostapd's own start (up a moment before its keys)
+# is never caught.
+vif_open_guard() {
+    if [ "$($WL -i "$VIF" bss 2>/dev/null)" = up ] && [ "$($WL -i "$VIF" wsec 2>/dev/null)" = 0 ]; then
+        if [ -e "$RUN/vif.open" ]; then
+            $WL -i "$VIF" bss down; rm -f "$RUN/vif.open" "$RUN/vif.sig"
+            log "$VIF was on the air without encryption and hostapd wasn't running it; took it off the air"
+        else : > "$RUN/vif.open"; fi
+    else rm -f "$RUN/vif.open"; fi
+}
 vif_sync() {
     [ -d "$NET/$VIF" ] || { log "no interface $VIF"; return 1; }
     [ "$(live_ssid)" = "$SSID" ] && [ "$($WL -i "$VIF" bss 2>/dev/null)" = up ] &&

@@ -35,6 +35,7 @@ case "\$1" in
   assoclist) if [ "\$i" = wl1.3 ]; then echo "assoclist AA:BB:CC:00:00:08"; echo "assoclist AA:BB:CC:00:00:09"; fi
              if [ "\$i" = wl1.1 ]; then echo "assoclist AA:BB:CC:00:00:20"; echo "assoclist AA:BB:CC:00:00:21"; fi ;;
   macmode) if [ -n "\$2" ]; then echo "\$2" > "$T/run/macmode.\$i"; else cat "$T/run/macmode.\$i" 2>/dev/null; fi ;;
+  wsec) cat "$T/run/wsec.\$i" 2>/dev/null || echo 4 ;;
   sta_info) cat "$T/sta.\$2" 2>/dev/null ;;
   map) if [ -n "\$2" ]; then [ "\$2" = 0 ] && echo "0x0:" > "$T/map" || echo "0x\$2:" > "$T/map"; else cat "$T/map" 2>/dev/null || echo "0x0:"; fi ;;
 esac
@@ -42,6 +43,8 @@ EOF
 cat > "$T/bin/hostapd_cli" <<EOF
 #!/bin/sh
 echo "hostapd_cli \$*" >> "$T/calls"
+# not running (yet) while \$T/hapd_down exists
+case "\$*" in *ping*) [ -e "$T/hapd_down" ] && exit 1; echo PONG; exit 0 ;; esac
 echo OK
 EOF
 cat > "$T/bin/brctl" <<EOF
@@ -220,7 +223,7 @@ done || exit 1
 # Second pass is a no-op: nothing moved, firewall not rebuilt.
 : > "$T/calls"
 run apply || true
-grep -q "brctl\|-F AX10\|dnsmasq\|hostapd_cli" "$T/calls" && fail "second apply was not idempotent"
+grep -v "hostapd_cli .* ping" "$T/calls" | grep -q "brctl\|-F AX10\|dnsmasq\|hostapd_cli" && fail "second apply was not idempotent"   # (the ping that asks whether hostapd runs the slot is only a question)
 
 # Something re-enables IPv6 on the bridge: the next pass turns it off again.
 echo 0 > "$T/sys6/br-iot/disable_ipv6"
@@ -938,6 +941,25 @@ full 3 50; [ "$(grep -c "router processor" "$LG")" = 1 ] || fail "load: noted mo
 full 1 900; full 4 50; [ "$(grep -c "router processor" "$LG")" = 2 ] || fail "load: a new busy spell after it eased off not noted"
 grep "router processor" "$LG" | grep -qi "pppd\|password" && fail "load: a command line got into the log"
 rm -rf "$T/proc" "$T/run/load."* "$T/net/wan0"
+
+# --- The IoT slot waits for TP-Link's hostapd (at boot the copy in flash starts first):
+# until hostapd answers, the slot is left alone; everything else still goes ahead.
+: > "$T/hapd_down"; rm -f "$T/run/wifi.wait" "$T/run/fw.sig" "$T/run/vif.open"; : > "$T/calls"; : > "$T/run/iot.log"
+run apply >/dev/null 2>&1 || true
+grep -q "brctl addif br-iot wl1.4\|hostapd_cli -i wl1.4 set ssid\|wl -i wl1 down" "$T/calls" && fail "the IoT slot was touched before hostapd was running"
+grep -q "waiting for TP-Link's Wi-Fi" "$T/run/iot.log" || fail "no note that the IoT slot waits for hostapd"
+grep -q "AX10_IOT_FWD" "$T/rules" || fail "the firewall waited for hostapd too"
+# A slot on the air without encryption while hostapd isn't running it: off the air on the second look.
+echo up > "$T/run/bss.wl1.4"; echo 0 > "$T/run/wsec.wl1.4"; : > "$T/calls"
+run apply >/dev/null 2>&1 || true
+grep -q "wl -i wl1.4 bss down" "$T/calls" && fail "an open slot was taken down on the first look (hostapd may be starting)"
+run apply >/dev/null 2>&1 || true
+grep -q "wl -i wl1.4 bss down" "$T/calls" || fail "an open IoT slot without hostapd was left on the air"
+# hostapd up: the slot is set up as usual.
+rm -f "$T/hapd_down" "$T/run/wsec.wl1.4"; : > "$T/calls"
+run apply >/dev/null 2>&1 || true
+grep -q "hostapd_cli -i wl1.4 set ssid" "$T/calls" || fail "the IoT slot was not set up once hostapd answered"
+grep -q "TP-Link's Wi-Fi is up" "$T/run/iot.log" || fail "no note that the wait for hostapd ended"
 
 # --- IPv6 client guard: restarted only after two misses, and only if its config is there.
 cat > "$T/bin/dhcp6c" <<EOF
