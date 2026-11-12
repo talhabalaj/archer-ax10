@@ -9,16 +9,31 @@ for f in boot.sh install.sh iot.sh index.sh build-repo.sh deploy-to-pages.sh \
   sh -n "$f"
 done
 
+echo "== lua: no local named like a LuCI dispatcher function"
+# index() is cached with string.dump, which drops upvalues: a file-level local called
+# entry/call/node/alias makes index() call nil and every page of the router's web
+# UI, the stock login included, answer 500.
+if grep -nE '^[[:space:]]*local[[:space:]]+(function[[:space:]]+)?(entry|call|node|alias|assign)\b' iot-ui/iot_net.lua; then
+  echo "ERROR: iot_net.lua shadows a LuCI dispatcher function" >&2; exit 1
+fi
 echo "== lua syntax"
 LUAC="$(command -v luac5.1 || command -v luac || true)"
 if [ -n "$LUAC" ]; then
   "$LUAC" -p iot-ui/iot_net.lua
+  "$LUAC" -p iot-ui/doh.lua
+  "$LUAC" -p iot-ui/autorate.lua
 elif [ -n "$CI" ]; then
   echo "ERROR: no luac found in CI" >&2
   exit 1
 else
   echo "SKIP: no luac found"
 fi
+
+echo "== doh.lua HTTP parser"
+LUA_BIN="$(command -v lua5.1 || command -v lua || true)"
+if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/doh_parse.lua iot-ui/doh.lua
+elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
+else echo "SKIP: no lua found"; fi
 
 echo "== js syntax"
 for f in iot-ui/iotNetwork/script.js iot-ui/guestSpeed/script.js iot-ui/locale.js; do

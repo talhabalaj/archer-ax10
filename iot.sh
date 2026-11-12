@@ -40,6 +40,10 @@
 #   iot.sh home-close     end that window now
 #   iot.sh home-allow add|remove|keep|unkeep <mac>   edit the list (under the lock)
 #   iot.sh home-set lock 0|1 / home-set expire <days>
+#   iot.sh forget-device <mac>[,<mac>...]  forget devices: all their settings, hidden while offline
+#   iot.sh usage        data used: per day, per month, per device this month
+#   iot.sh sync         apply everything now (after forget-device / entry, which only save)
+#   iot.sh entry caps|noinet|guest_fast|lan_allow <mac> <value|on|off>   one device's setting
 #   iot.sh forget <mac>   drop an IoT device's fixed address (not re-pinned from its lease)
 #   iot.sh set caps "aa:bb:cc:dd:ee:03=5/2"   cap a device at 5 Mbps down, 2 up
 #   iot.sh set <key> <value>   save a setting (iot_ prefix optional), e.g.
@@ -104,39 +108,107 @@ trim_log() { [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ] && tail -n 200 "
 # One iot.sh at a time may change the router. The watcher, `start` from the web
 # page (once per saved switch) and a shell can all overlap; interleaved rebuilds
 # would leave iptables rules in the wrong order. mkdir is atomic on every
-# filesystem here (no flock in this busybox). The holder's pid is stored so a
-# lock left by a killed process (watcher_restart kills the watcher) is taken over.
-LOCK="$RUN/lock"
+# filesystem here, and this busybox's flock has no timeout and leaks the lock to
+# every daemon a run starts, so the lock is built from directories.
+# The lock is Lamport's bakery algorithm on a directory of tickets, $LOCK/<n>.<pid>:
+# a run takes the next number and goes ahead once no live run holds a lower one
+# (ties: lower pid first). While it picks its number it holds $LOCK/c.<pid>, and
+# others wait for that, so two runs can never both think they are first.
+# A ticket whose process is gone is simply ignored and removed: there is no "take
+# over a stale lock" step, which is where mkdir-style locks let two holders through.
+#
+# Two locks:
+#   LOCK     the run lock: one run at a time rebuilds rules (apply, sync, watch...);
+#   CFGLOCK  the settings lock: held only while a list in the config is read,
+#            changed and saved (a second or so). The dashboard's edits take just
+#            this one, so they don't wait for a rebuild in progress; the watcher
+#            takes it around its own list changes (new IoT pins, allow-list
+#            enrollment and expiry, un-hiding), re-reading the list inside it.
+LOCK="$RUN/locks"
+CFGLOCK="$RUN/cfglocks"
 LOCK_WAIT="${LOCK_WAIT:-60}"
-lock() {   # lock [seconds to wait, default $LOCK_WAIT]; returns 1 if still held
-    w="${1:-$LOCK_WAIT}"; mkdir -p "$RUN"
+lock_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+# A ticket (or choosing marker) belongs to a live run if its pid is alive and is the
+# same process that wrote it: the start time inside must match the pid's. Where
+# there is no /proc both are empty and the pid alone decides.
+lock_alive() {   # lock_alive <pid> <ticket dir>
+    kill -0 "$1" 2>/dev/null || return 1
+    [ "$(cat "$2/start" 2>/dev/null)" = "$(lock_start "$1")" ]
+}
+# Create <dir>/<name> with its start file already inside (built aside, then renamed:
+# nobody ever sees a ticket without its identity).
+lock_put() {   # lock_put <dir> <name>
+    rm -rf "$1/.new.$$"; mkdir "$1/.new.$$" || return 1
+    lock_start "$$" > "$1/.new.$$/start"
+    mv "$1/.new.$$" "$1/$2"
+}
+lock_at() {   # lock_at <dir> <seconds to wait>; returns 1 if others are still ahead
+    L_d="$1"; L_w="$2"; mkdir -p "$L_d"
+    rm -rf "$L_d"/*."$$" 2>/dev/null            # leftovers of an earlier process that had my pid
+    lock_put "$L_d" "c.$$" || return 1
+    L_max=0
+    for L_e in "$L_d"/[0-9]*.*; do
+        [ -d "$L_e" ] || continue
+        L_b="${L_e##*/}"; L_n="${L_b%%.*}"; L_p="${L_b#*.}"
+        lock_alive "$L_p" "$L_e" || { rm -rf "$L_e"; continue; }
+        [ "$L_n" -gt "$L_max" ] 2>/dev/null && L_max="$L_n"
+    done
+    L_mine=$((L_max + 1)); L_me="$L_d/$L_mine.$$"
+    lock_put "$L_d" "$L_mine.$$" || { rm -rf "$L_d/c.$$"; return 1; }
+    rm -rf "$L_d/c.$$"                           # my ticket is out before the marker goes
     while :; do
-        if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
-        p="$(cat "$LOCK/pid" 2>/dev/null)"
-        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then
-            # Holder is gone. Take its lock over, one waiter at a time ($LOCK.gc):
-            # two waiters that both saw the dead holder must not both remove a
-            # lock, or the second removes the one the first has just taken.
-            if mkdir "$LOCK.gc" 2>/dev/null; then
-                [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$p" ] && rm -rf "$LOCK"
-                rmdir "$LOCK.gc"
-            else
-                # Another waiter is taking it over; a .gc left by a dead waiter goes at the end of the wait.
-                [ "$w" -le 0 ] && rmdir "$LOCK.gc" 2>/dev/null
-                w=$((w - 1)); sleep 1
-            fi
-            continue
+        # 1. Is anyone picking a number? Their ticket may not be out yet, so nothing
+        #    can be decided now. A marker that was listed but is gone by the time we
+        #    look counts too: its owner has just put a ticket out, which a list taken
+        #    before that moment would miss. So look again from the start.
+        L_ahead=0
+        for L_e in "$L_d"/c.*; do
+            L_p="${L_e##*/c.}"
+            [ "$L_p" = "$$" ] || [ "$L_p" = "*" ] && continue
+            if [ ! -d "$L_e" ]; then L_ahead=2
+            elif lock_alive "$L_p" "$L_e"; then [ "$L_ahead" = 2 ] || L_ahead=1
+            else rm -rf "$L_e"; L_ahead=2; fi
+        done
+        # 2. Nobody was: every run that could be ahead of me has its ticket out, and
+        #    this list is taken after that was established.
+        if [ "$L_ahead" = 0 ]; then
+            for L_e in "$L_d"/[0-9]*.*; do
+                [ -d "$L_e" ] || continue
+                L_b="${L_e##*/}"; L_n="${L_b%%.*}"; L_p="${L_b#*.}"
+                [ "$L_p" = "$$" ] && continue
+                lock_alive "$L_p" "$L_e" || { rm -rf "$L_e"; continue; }
+                if [ "$L_n" -lt "$L_mine" ] 2>/dev/null; then L_ahead=1
+                elif [ "$L_n" -eq "$L_mine" ] 2>/dev/null && [ "$L_p" -lt "$$" ] 2>/dev/null; then L_ahead=1; fi
+            done
+            [ "$L_ahead" = 0 ] && return 0
         fi
-        if [ "$w" -le 0 ]; then
-            # No pid after the whole wait: the holder died between mkdir and
-            # writing its pid. Take the lock over.
-            [ -z "$p" ] && { rm -rf "$LOCK"; continue; }
-            return 1
-        fi
-        w=$((w - 1)); sleep 1
+        [ "$L_ahead" = 2 ] && continue           # something changed under us: look again at once
+        [ "$L_w" -le 0 ] && { rm -rf "$L_me"; return 1; }
+        L_w=$((L_w - 1)); sleep 1
     done
 }
-unlock() { [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"; return 0; }
+# Pid files for the helpers we start (join page, DNS over HTTPS, automatic limit):
+# the pid plus its start time, so a recycled pid is never mistaken for our process.
+# A file holding only a pid was written by a version before that (it is still
+# running across an upgrade without a reboot): then the process counts as ours if
+# its command line contains <hint>, so it is stopped and not left holding its port.
+# Is the IoT network meant to be up? The setting says so, unless `iot.sh stop` took it
+# down by hand ($RUN/iot.stopped): then it stays down until `start` or a reboot, even
+# though the watcher keeps running for the features that don't depend on it.
+iot_on() { [ "$(cfg enabled 0)" = 1 ] && [ ! -e "$RUN/iot.stopped" ]; }
+pid_save() { echo "$2 $(lock_start "$2")" > "$1"; }                # pid_save <file> <pid>
+pid_live() {                                                       # pid_live <file> [hint]
+    pl_hint="$2"; set -- $(cat "$1" 2>/dev/null)
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+    if [ -n "$2" ]; then [ "$2" = "$(lock_start "$1")" ]; return; fi
+    [ -z "$(lock_start "$1")" ] && return 0                        # no /proc here: the pid is all there is
+    [ -n "$pl_hint" ] && tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q -- "$pl_hint"
+}
+pid_kill() { pid_live "$1" "$2" && kill "$(cut -d' ' -f1 "$1")" 2>/dev/null; rm -f "$1"; }   # pid_kill <file> [hint]
+lock() { lock_at "$LOCK" "${1:-$LOCK_WAIT}"; }   # lock [seconds to wait]
+cfg_lock() { lock_at "$CFGLOCK" "${1:-30}"; }
+cfg_unlock() { rm -rf "$CFGLOCK"/*."$$" 2>/dev/null; return 0; }
+unlock() { rm -rf "$LOCK"/*."$$" "$CFGLOCK"/*."$$" 2>/dev/null; return 0; }
 
 bridge_of() { m="$(readlink "$NET/$1/brport/bridge" 2>/dev/null)"; echo "${m##*/}"; }
 
@@ -254,14 +326,19 @@ MARK_BEGIN="# ax10-iot begin"; MARK_END="# ax10-iot end"
 # Lock (iot_lock=1): only pinned devices may join the IoT Wi-Fi (Broadcom MAC allow
 # list, macmode 2), and unknown ones already connected are dropped. `iot.sh open`
 # lets new devices join for a while; they are pinned as they get an address.
-commit_cfg() {   # /etc is ramfs: TP-Link's uci_commit_flash also writes flash
-    if [ -x "${COMMIT_FLASH:-/sbin/uci_commit_flash}" ]; then "${COMMIT_FLASH:-/sbin/uci_commit_flash}" openvpn
-    else $UCI commit openvpn; fi
+commit_cfg() {   # commit_cfg [config]; /etc is ramfs: TP-Link's uci_commit_flash also writes flash
+    if [ -x "${COMMIT_FLASH:-/sbin/uci_commit_flash}" ]; then "${COMMIT_FLASH:-/sbin/uci_commit_flash}" "${1:-openvpn}"
+    else $UCI commit "${1:-openvpn}"; fi
 }
 # Devices removed with "Forget" (iot_forget) are not pinned again from their old
 # lease; only the "allow new devices" window takes them back.
 autopin() {
     [ -f "$LEASES" ] || return 0
+    cfg_lock || return 0
+    STATIC="$(cfg static '')"            # fresh: the dashboard may have changed it
+    autopin_locked; cfg_unlock
+}
+autopin_locked() {
     new=""; back=""; forget="$(cfg forget '' | tr A-F a-f)"
     while read -r _exp mac ip _rest; do
         case "$ip" in "$PREFIX".*) ;; *) continue ;; esac
@@ -322,8 +399,8 @@ lock_sync() {
 CH_HOME=AX10_HOME
 home_load() {
     H_LOCK="$(cfg home_lock 0)"
-    H_ALLOW="$(cfg home_allow '' | tr A-F a-f)"
-    H_KEEP="$(cfg home_keep '' | tr A-F a-f)"
+    H_ALLOW="$(cfg home_allow '' | tr 'A-F-' 'a-f:')"
+    H_KEEP="$(cfg home_keep '' | tr 'A-F-' 'a-f:')"
     H_EXPIRE="$(cfg home_expire 0)"
     H_IFS=""; for i in $(cfg home_ifs 'wl0.1 wl1.1'); do [ -d "$NET/$i" ] && H_IFS="$H_IFS $i"; done
 }
@@ -353,7 +430,9 @@ home_seen_sync() {   # home_seen_sync <connected macs>
       for m in $H_ALLOW; do grep -q "^$m " "$f" || echo "$m $now"; done   # first sight starts the clock
       cat "$f"; } | sort -k1,1 -k2,2nr | awk '!s[$1]++' > "$f.new" && mv "$f.new" "$f"
     # Expire entries not seen for H_EXPIRE days.
-    if [ "$H_EXPIRE" -gt 0 ] 2>/dev/null; then
+    # Only while the lock is on: with it off the list is not in use, and a list
+    # nobody is using must not shrink behind the owner's back.
+    if [ "$H_LOCK" = 1 ] && [ "$H_EXPIRE" -gt 0 ] 2>/dev/null; then
         old=""; for m in $H_ALLOW; do
             case " $H_KEEP " in *" $m "*) continue ;; esac
             t="$(awk -v m="$m" '$1==m{print $2}' "$f")"
@@ -391,16 +470,22 @@ home_fw_clear() {
 }
 home_sync() { home_sync_lists; portal_sync; }
 home_sync_lists() {
-    home_load; mkdir -p "$RUN"
+    mkdir -p "$RUN"
+    # The watcher's own list changes (last seen, expiry, un-hiding, enrollment),
+    # under the settings lock and on a copy of the lists read inside it.
+    cfg_lock || { home_load; return 0; }
+    home_load
     conn="$(home_clients | sort -u | tr '\n' ' ')"
-    home_seen_sync "$conn"
-    [ "$H_LOCK" = 1 ] || { home_unlock; return 0; }
-    if home_open_now; then
-        g=" $(guest_macs | sort -u | tr '\n' ' ') "
-        new=""; for m in $conn; do home_listed "$m" || case "$g" in *" $m "*) ;; *) new="$new $m" ;; esac; done
+    gnow="$(guest_macs | sort -u | tr '\n' ' ')"
+    home_seen_sync "$conn $gnow"
+    unhide "$conn $gnow $(load 2>/dev/null; $WL -i "$VIF" assoclist 2>/dev/null | awk '{print tolower($2)}' | tr '\n' ' ')"
+    if [ "$H_LOCK" = 1 ] && home_open_now; then
+        new=""; for m in $conn; do home_listed "$m" || case " $gnow " in *" $m "*) ;; *) new="$new $m" ;; esac; done
         if [ -n "$new" ]; then H_ALLOW="$(echo $H_ALLOW $new)"; sed_seen_del $new; home_save_allow; log "added to the home allow list:$new"; fi
-        home_unlock "window open"; return 0
     fi
+    cfg_unlock
+    [ "$H_LOCK" = 1 ] || { home_unlock; return 0; }
+    if home_open_now; then home_unlock "window open"; return 0; fi
     # On with an empty list would lock out everyone, including whoever manages it.
     if [ -z "$(echo $H_ALLOW $H_KEEP)" ]; then home_unlock "the allow list is empty"; return 0; fi
     want="$(echo $H_ALLOW $H_KEEP | tr ' ' '\n' | tr a-f A-F | sort -u | tr '\n' ' ')"
@@ -620,7 +705,7 @@ while true do
 end
 EOF
 }
-portal_running() { p="$(cat "$RUN/portal.pid" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+portal_running() { pid_live "$RUN/portal.pid" portal/server.lua; }
 portal_clear() {
     while $IPT -D FORWARD -i "$LANBR" -j $CH_PORTAL 2>/dev/null; do :; done
     while $IPT6 -D FORWARD -i "$LANBR" -j $CH_PORTAL 2>/dev/null; do :; done
@@ -632,8 +717,7 @@ portal_clear() {
     $IPT -t nat -F $CH_PORTAL_NAT 2>/dev/null; $IPT -t nat -X $CH_PORTAL_NAT 2>/dev/null
     $IPT -F $CH_PORTAL_IN 2>/dev/null; $IPT -X $CH_PORTAL_IN 2>/dev/null
     $IPT6 -F $CH_PORTAL_IN6 2>/dev/null; $IPT6 -X $CH_PORTAL_IN6 2>/dev/null
-    portal_running && kill "$(cat "$RUN/portal.pid")" 2>/dev/null
-    rm -f "$RUN/portal.pid"
+    pid_kill "$RUN/portal.pid" portal/server.lua
 }
 # A phone checks for a captive portal only right after it joins. The watcher sees a
 # new guest up to 15 s later, by when the check has passed and the phone thinks the
@@ -695,7 +779,7 @@ portal_sync() {
     $IPT -t nat -I PREROUTING 1 -i "$LANBR" -j $CH_PORTAL_NAT
     $IPT -I INPUT 1 -i "$LANBR" -j $CH_PORTAL_IN; $IPT6 -I INPUT 1 -i "$LANBR" -j $CH_PORTAL_IN6
     $LUA "$PORTAL/server.lua" "$PORTAL" "$lan" "$PORTAL_PORT" "$PORTAL_DNS" >/dev/null 2>&1 &
-    echo $! > "$RUN/portal.pid"
+    pid_save "$RUN/portal.pid" $!
     echo "$pm" > "$RUN/portal_macs"
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
     log "guest Wi-Fi: showing the join-home page to $pm"
@@ -707,7 +791,245 @@ portal_sync() {
         done
     done
 }
-watcher_wanted() { [ "$(cfg enabled 0)" = 1 ] || [ "$(cfg home_lock 0)" = 1 ]; }
+# Devices forgotten on the dashboard are listed in iot_hidden_devices and stay off
+# its lists while offline. (iot_hidden is something else: "hide the IoT network name".)
+valid_mac() { echo "$1" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; }
+# forget_devices <mac>[,<mac>...]: drop everything we keep for those devices: allow
+# list entry and pin, speed cap, internet/speed/IoT-access settings, IoT fixed
+# address (and block re-pinning), last seen. Checked as a whole before anything is
+# written, saved with one commit. Custom names are cleared by the dashboard backend.
+forget_devices() {
+    macs=""
+    for m in $(echo "$1" | tr ',A-F-' ' a-f:'); do
+        valid_mac "$m" || { echo "iot.sh: bad MAC '$m'" >&2; return 1; }
+        macs="$macs $m"
+    done
+    [ -n "$macs" ] || { echo "usage: iot.sh forget-device <mac>[,<mac>...]" >&2; return 1; }
+    home_load
+    a=""; for m in $H_ALLOW; do case " $macs " in *" $m "*) ;; *) a="$a $m" ;; esac; done
+    k=""; for m in $H_KEEP; do case " $macs " in *" $m "*) ;; *) k="$k $m" ;; esac; done
+    if [ "$H_LOCK" = 1 ] && [ -z "$(echo $a $k)" ]; then
+        echo "iot.sh: that would empty the home allow list; turn the lock off first" >&2; return 1
+    fi
+    $UCI set "$SEC.iot_home_allow=$(echo $a)" && $UCI set "$SEC.iot_home_keep=$(echo $k)" || return 1
+    # Space-separated lists whose entries start with the MAC ("mac", "mac=...", "mac,...").
+    pinned=""
+    for key in caps noinet guest_fast lan_allow static; do
+        v="$(cfg "$key" '')"; [ -n "$v" ] || continue
+        out=""; for e in $v; do
+            em="$(echo "${e%%[=,]*}" | tr 'A-F-' 'a-f:')"
+            case " $macs " in *" $em "*) [ "$key" = static ] && pinned="$pinned $em"; continue ;; esac
+            out="$out $e"
+        done
+        $UCI set "$SEC.iot_$key=$(echo $out)" || return 1
+    done
+    fg="$(cfg forget '' | tr 'A-F-' 'a-f:')"
+    for m in $pinned; do case " $fg " in *" $m "*) ;; *) fg="$fg $m" ;; esac; done
+    [ -n "$pinned" ] && $UCI set "$SEC.iot_forget=$(echo $fg)"
+    hd="$(cfg hidden_devices '' | tr 'A-F-' 'a-f:')"
+    for m in $macs; do case " $hd " in *" $m "*) ;; *) hd="$hd $m" ;; esac; done
+    $UCI set "$SEC.iot_hidden_devices=$(echo $hd)" || return 1
+    sed_seen_del $macs
+    commit_cfg >/dev/null || { echo "iot.sh: could not save" >&2; return 1; }
+    log "forgot device(s):$macs"
+}
+# unhide <connected macs>: a forgotten device that is back is an ordinary device again.
+unhide() {
+    hd="$(cfg hidden_devices '' | tr 'A-F-' 'a-f:')"; [ -n "$hd" ] || return 0
+    out=""; back=""
+    for m in $hd; do case " $1 " in *" $m "*) back="$back $m" ;; *) out="$out $m" ;; esac; done
+    [ -n "$back" ] || return 0
+    $UCI set "$SEC.iot_hidden_devices=$(echo $out)" && commit_cfg >/dev/null
+    log "forgotten device(s) back on the network:$back"
+}
+# entry_set <caps|noinet|guest_fast|lan_allow> <mac> <value|on|off>: change one
+# device's entry in a per-device list, under the run lock, so the dashboard never
+# writes a stale copy of the list. caps takes "down/up" in Mbps, or off.
+entry_set() {
+    case "$1" in caps|noinet|guest_fast|lan_allow) ;; *) echo "iot.sh: entry caps|noinet|guest_fast|lan_allow <mac> <value|on|off>" >&2; return 1 ;; esac
+    mac="$(echo "$2" | tr 'A-F-' 'a-f:')"; valid_mac "$mac" || { echo "iot.sh: bad MAC '$2'" >&2; return 1; }
+    new=""
+    case "$1:$3" in
+        *:off) ;;
+        caps:*) echo "$3" | grep -Eq '^[0-9]{1,4}/[0-9]{1,4}$' || { echo "iot.sh: cap is down/up in Mbps" >&2; return 1; }
+                [ "$3" = 0/0 ] || new="$mac=$3" ;;
+        *:on) new="$mac" ;;
+        *) return 1 ;;
+    esac
+    out=""; for e in $(cfg "$1" ''); do
+        [ "$(echo "${e%%[=,]*}" | tr 'A-F-' 'a-f:')" = "$mac" ] || out="$out $e"
+    done
+    $UCI set "$SEC.iot_$1=$(echo $out $new)" || return 1
+    # Giving a forgotten device a setting brings it back onto the lists.
+    hd=""; for m in $(cfg hidden_devices '' | tr 'A-F-' 'a-f:'); do [ "$m" = "$mac" ] || hd="$hd $m"; done
+    $UCI set "$SEC.iot_hidden_devices=$(echo $hd)"
+    commit_cfg >/dev/null || return 1
+}
+# ------------------------------------------------------------- data usage
+# How much data the household uses: per day and per month in total (from the
+# internet connection's own counters, so every device counts), and per device per
+# month for devices on the main router's Wi-Fi (from the radio's counters; devices
+# on the mesh satellite or a cable can't be told apart here and show as "other").
+# The log lives in $RUN/usage as lines "<key> <down bytes> <up bytes>":
+#   T:2026-11-12        a day's total        (kept 62 days)
+#   M:2026-11           a month's total      (kept 24 months)
+#   D:2026-11:<mac>     a device in a month  (this month and the last)
+# and is saved to flash once an hour (in MB, iot_usage_*), so a reboot loses at most
+# the last hour. Counters restart on a reboot or reconnect; a reading lower than the
+# last one is taken as a fresh count.
+# The first reading after a start needs care, because the "last readings" file is in
+# RAM. If it is missing and this is a new boot (iot_usage_boot in flash names another
+# one), the counters began with the boot and all of it is new usage. If it is missing
+# for any other reason (the feature's very first run on a router that has been up for
+# days, or the file was lost), the counters hold history that was never ours or was
+# counted already: that reading only sets the baseline.
+WAN_DEV="${WAN_DEV:-}"
+usage_wan() {
+    [ -n "$WAN_DEV" ] && { echo "$WAN_DEV"; return; }
+    ubus call network.interface.internet status 2>/dev/null | sed -n 's/.*"l3_device": "\([^"]*\)".*/\1/p'
+}
+usage_load() {   # the log as saved in flash -> $RUN/usage (bytes)
+    { for e in $(cfg usage_days ''); do echo "T:${e%%=*} ${e#*=}"; done
+      for e in $(cfg usage_months ''); do echo "M:${e%%=*} ${e#*=}"; done
+      for e in $(cfg usage_devs ''); do echo "D:${e%%=*} ${e#*=}"; done
+    } | awk '{ split($2, v, "/"); if (v[1] ~ /^[0-9]+$/ && v[2] ~ /^[0-9]+$/) printf "%s %.0f %.0f\n", $1, v[1] * 1048576, v[2] * 1048576 }' > "$RUN/usage"
+}
+usage_save() {   # $RUN/usage -> flash, in whole MB
+    pick() { awk -v p="$1" 'index($1, p) == 1 { printf "%s=%.0f/%.0f ", substr($1, 3), $2 / 1048576, $3 / 1048576 }' "$RUN/usage" | sed 's/ $//'; }
+    $UCI set "$SEC.iot_usage_days=$(pick T:)"; $UCI set "$SEC.iot_usage_months=$(pick M:)"; $UCI set "$SEC.iot_usage_devs=$(pick D:)"
+    commit_cfg >/dev/null
+}
+usage_on() { [ "$(cfg usage_on 1)" = 1 ]; }       # counting is on unless iot_usage_on=0
+usage_sync() {
+    usage_on || return 0
+    [ -n "$(epoch)" ] || return 0                 # no clock yet: nothing to file a reading under
+    mkdir -p "$RUN"; [ -f "$RUN/usage" ] || usage_load
+    day="${USAGE_DAY:-$(date +%Y-%m-%d)}"; wd="$(usage_wan)"
+    { [ -n "$wd" ] && [ -r "$NET/$wd/statistics/rx_bytes" ] &&
+          echo "C wan $(cat "$NET/$wd/statistics/rx_bytes") $(cat "$NET/$wd/statistics/tx_bytes")"
+      # the home, guest and IoT radios' clients: bytes sent to them / received from them
+      for i in $(cfg home_ifs 'wl0.1 wl1.1') $(guest_ifs) "$(cfg vif wl1.4)"; do
+          [ -d "$NET/$i" ] || continue
+          for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print $2}'); do
+              $WL -i "$i" sta_info "$m" 2>/dev/null | awk -v m="$m" '/tx total bytes:/ {t=$4} /rx data bytes:/ {r=$4} END { if (t != "" && r != "") printf "C %s %.0f %.0f\n", tolower(m), t, r }'
+          done
+      done
+    } > "$RUN/usage.cur"
+    base=0; boot="${USAGE_BOOT:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)}"
+    if [ ! -f "$RUN/usage.last" ]; then
+        : > "$RUN/usage.last"
+        was="$(cfg usage_boot '')"
+        # a new boot only if an earlier one was recorded and it is not this one
+        if [ -z "$was" ] || [ -z "$boot" ] || [ "$was" = "$boot" ]; then base=1; fi
+        [ "$was" = "$boot" ] || { $UCI set "$SEC.iot_usage_boot=$boot" && commit_cfg >/dev/null; }
+    fi
+    # Counting is under way in this boot: make sure flash says so (written once per boot).
+    [ "$base" = 0 ] && [ -n "$boot" ] && [ "$(cfg usage_boot '')" != "$boot" ] && { $UCI set "$SEC.iot_usage_boot=$boot" && commit_cfg >/dev/null; }
+    awk -v day="$day" -v base="$base" -v lastf="$RUN/usage.last" -v curf="$RUN/usage.cur" '
+        BEGIN {
+            month = substr(day, 1, 7)
+            while ((getline l < lastf) > 0) { split(l, a, " "); ld[a[1]] = a[2]; lu[a[1]] = a[3]; seen[a[1]] = 1 }
+            while ((getline l < curf) > 0) {
+                split(l, a, " "); id = a[2]; d = a[3] + 0; u = a[4] + 0
+                # known reading: the growth, or all of it if the counter restarted.
+                # unknown: all of it (a device that has just connected), unless this
+                # run only sets baselines.
+                dd = seen[id] ? (d >= ld[id] ? d - ld[id] : d) : (base ? 0 : d)
+                du = seen[id] ? (u >= lu[id] ? u - lu[id] : u) : (base ? 0 : u)
+                ld[id] = d; lu[id] = u; seen[id] = 1
+                if (id == "wan") { add("T:" day, dd, du); add("M:" month, dd, du) }
+                else add("D:" month ":" id, dd, du)
+            }
+            for (id in seen) printf "%s %.0f %.0f\n", id, ld[id], lu[id] > (lastf ".new")
+        }
+        function add(k, d, u) { nd[k] += d; nu[k] += u }
+        { k = $1; if (!(k in out)) order[++n] = k; out[k] = 1; D[k] = $2 + nd[k]; U[k] = $3 + nu[k]; delete nd[k]; delete nu[k] }
+        END {
+            for (k in nd) { order[++n] = k; D[k] = nd[k]; U[k] = nu[k] }
+            for (i = 1; i <= n; i++) printf "%s %.0f %.0f\n", order[i], D[order[i]], U[order[i]]
+        }' "$RUN/usage" > "$RUN/usage.new" && mv "$RUN/usage.new" "$RUN/usage" && mv "$RUN/usage.last.new" "$RUN/usage.last"
+    # Keep 62 days, 24 months, and devices for this month and the last.
+    now="$(epoch)"
+    dcut="$(date -d "@$((now - 62 * 86400))" +%Y-%m-%d 2>/dev/null)"; mcut="$(date -d "@$((now - 730 * 86400))" +%Y-%m 2>/dev/null)"
+    uy="${day%%-*}"; um="${day#*-}"; um="${um%%-*}"; um=$((1$um - 100))      # "03" -> 3 (no octal surprises)
+    if [ "$um" = 1 ]; then pm="$((uy - 1))-12"; else pm="$(printf '%04d-%02d' "$uy" "$((um - 1))")"; fi
+    if [ -n "$dcut" ] && [ -n "$mcut" ] && [ -n "$pm" ]; then
+        awk -v dcut="T:$dcut" -v mcut="M:$mcut" -v m1="D:${day%-*}:" -v m2="D:$pm:" '
+            /^T:/ { if ($1 >= dcut) print; next } /^M:/ { if ($1 >= mcut) print; next }
+            /^D:/ { if (index($1, m1) == 1 || index($1, m2) == 1) print; next }' "$RUN/usage" | sort > "$RUN/usage.new" && mv "$RUN/usage.new" "$RUN/usage"
+    fi
+    # To flash once an hour.
+    last="$(cat "$RUN/usage.saved" 2>/dev/null)"
+    if [ $((now - ${last:-0})) -ge 3600 ]; then usage_save; echo "$now" > "$RUN/usage.saved"; fi
+}
+# "Apply what is saved, soon": what the dashboard asks for after every change.
+# Each plain `sync` would wait its turn for the run lock, so a burst of changes left a
+# queue of them. Here a request leaves a note (sync.want); one worker runs until no
+# note is left, so the last change is always applied, in one or two runs however many
+# requests there were. Who the worker is, and when it goes, is settled under a small
+# lock of its own (KICKLOCK), which makes two things impossible:
+#   - two requests both becoming the worker (looking for one and becoming one are
+#     a single step under the lock);
+#   - a request slipping in while the worker leaves (the worker looks for a note and
+#     gives up its place in one step under the same lock, and a request files its
+#     note before it looks for the worker: it either sees a worker that has yet to
+#     take its last look, or none, and then it is the worker).
+KICKLOCK="$RUN/kicklocks"
+kick_unlock() { rm -rf "$KICKLOCK"/*."$$" 2>/dev/null; return 0; }
+kick_mine() { [ "$(cut -d' ' -f1 "$RUN/sync.pid" 2>/dev/null)" = "$$" ]; }
+kick_bye() { kick_mine && rm -f "$RUN/sync.pid"; unlock; kick_unlock; }
+kick_run() {
+    mkdir -p "$RUN"; : > "$RUN/sync.want"
+    lock_at "$KICKLOCK" 15 || return 0           # can't ask right now: the note stays for the next worker or the watcher
+    if pid_live "$RUN/sync.pid" "iot.sh"; then kick_unlock; return 0; fi
+    pid_save "$RUN/sync.pid" $$
+    kick_unlock
+    trap kick_bye EXIT
+    kfail=0
+    while :; do
+        lock_at "$KICKLOCK" 15 || break
+        if [ ! -e "$RUN/sync.want" ] || [ "$kfail" -ge 3 ]; then
+            [ "$kfail" -ge 3 ] && log "could not get the run lock for 3 tries; left the changes for the next run"
+            kick_mine && rm -f "$RUN/sync.pid"
+            kick_unlock; break
+        fi
+        rm -f "$RUN/sync.want"; kick_unlock
+        if lock; then run_all; watcher_sync; unlock; kfail=0
+        else : > "$RUN/sync.want"; kfail=$((kfail + 1)); fi      # not applied: the request stands
+    done
+    trap - EXIT; kick_bye
+}
+# The watcher is what makes saved settings take effect and keeps them in place, and
+# the fallback for every "apply soon" request that did not get through (a worker
+# killed, a lock it could not get): it always runs. With every feature off a pass is
+# a few settings read and nothing else.
+watcher_wanted() { return 0; }
+# Everything the watcher keeps in place, each part only while it is switched on.
+# Local names and DNS over HTTPS don't need the IoT network: apply() covers them
+# when it runs, names_sync when it doesn't.
+# Speed limits, the home allow list and the usage log are not part of the IoT
+# network either: they run whether it is on or off.
+run_all() {
+    if iot_on; then apply
+    else
+        # Switched off in the settings while it is still up: take it down here, so
+        # "off" needs no command of its own (the dashboard only saves and asks for a sync).
+        # "Still up" is read off the router itself (the slot sitting in the IoT bridge),
+        # not only off our own note, which a killed run may never have written.
+        load
+        if [ -s "$RUN/orig_bridge" ] || [ "$(bridge_of "$VIF")" = "$BR" ]; then iot_teardown; fi
+        names_sync
+    fi
+    shape_sync
+    home_sync
+    usage_sync
+}
+shaping_wanted() { [ "$(cfg wan_shape 0)" = 1 ] || [ "$(cfg guest_limit 0)" = 1 ] || [ -n "$(cfg caps '')" ]; }
+# The watcher is registered exactly while something needs it. Only under the run lock.
+watcher_sync() {
+    if watcher_wanted; then grep -q "$TAG" "$INITTAB" 2>/dev/null || { inittab_add; log "watcher registered"; }
+    else inittab_del; fi
+}
 
 # TP-Link's Access Control in allow-list mode is meant for the home Wi-Fi, but it
 # catches guests twice:
@@ -746,14 +1068,176 @@ guest_wifi_open() {
         for m in $macs; do $t -t raw -A "$GUEST_AC" -m mac --mac-source "$m" -j ACCEPT; done
     done
 }
+# ------------------------------------------------------------- local names
+# Names for the router and the devices under a private suffix (iot_dns_domain,
+# default "home"), served by the router's own dnsmasq, the way Pi-hole does it:
+#   router.home         the router (iot_dns_router, several names allowed)
+#   <hostname>.home     every device, by the name it gave DHCP (dnsmasq does this
+#                       itself once it has a domain)
+#   <dashboard name>.home, and custom records (iot_dns_hosts "name=ip ...")
+# For any of it to resolve, devices must ask the router: DHCP hands out the router
+# as DNS server (the stock setting dhcp.lan.dhcp_option, also shown in TP-Link's
+# DHCP page), and the IPv6 DNS servers TP-Link advertises over DHCPv6 are withdrawn
+# (a device would ask those first and never see a local name). The router forwards
+# everything else to iot_dns_upstream. Not ".local": that suffix belongs to mDNS and
+# Apple devices never ask a DNS server for it.
+DHCP6S_CONF="${DHCP6S_CONF:-/etc/dhcp6s.conf}"
+DHCP6S_INIT="${DHCP6S_INIT:-/etc/init.d/dhcp6s}"
+NL='
+'
+dns_load() {
+    DNS_ON="$(cfg dns_on 0)"
+    # Whatever is saved, dnsmasq only ever gets a clean suffix and IPv4 upstream
+    # servers: a line it can't parse stops it, and with it DNS for the whole house.
+    DNS_DOMAIN="$(dns_label "$(cfg dns_domain home)")"
+    case "$DNS_DOMAIN" in ''|local) DNS_DOMAIN=home ;; esac
+    DNS_ROUTER="$(cfg dns_router router)"
+    DNS_HOSTS="$(cfg dns_hosts '')"
+    DNS_UP=""; for u in $(cfg dns_upstream '1.1.1.1 1.0.0.1'); do
+        valid_ip4 "$u" && DNS_UP="$DNS_UP $u"
+    done; DNS_UP="$(echo $DNS_UP)"
+    LAN_IP="$($UCI -q get network.lan.ipaddr)"; LAN_IP="${LAN_IP:-192.168.0.1}"
+}
+# A name as a DNS label: lower case, letters digits and dashes.
+# (Line breaks go first: sed and cut work line by line and would pass them through.)
+dns_label() { printf '%s' "$1" | tr -d '\n\r' | tr 'A-Z _.' 'a-z---' | sed 's/[^a-z0-9-]//g; s/--*/-/g; s/^-//; s/-$//' | cut -c1-63; }
+valid_ip4() {   # four numbers 0-255, nothing else
+    case "$1" in *[!0-9.]*|'') return 1 ;; esac
+    echo "$1" | awk -F. 'NF != 4 { exit 1 } { for (i = 1; i <= 4; i++) if ($i == "" || $i > 255) exit 1 }'
+}
+dns_hosts() {   # the hosts file: router names, custom records, dashboard names of devices with a lease
+    for n in $DNS_ROUTER; do l="$(dns_label "$n")"; [ -n "$l" ] && echo "$LAN_IP $l.$DNS_DOMAIN"; done
+    for e in $DNS_HOSTS; do
+        l="$(dns_label "${e%%=*}")"; ip="${e#*=}"
+        valid_ip4 "$ip" && [ -n "$l" ] && echo "$ip $l.$DNS_DOMAIN"
+    done
+    [ -f "$LEASES" ] || return 0
+    $UCI -q -d "$NL" get "$SEC.iot_names" 2>/dev/null | while IFS= read -r e; do
+        mac="$(echo "${e%%=*}" | tr 'A-F-' 'a-f:')"; l="$(dns_label "${e#*=}")"; [ -n "$l" ] || continue
+        ip="$(awk -v m="$mac" 'tolower($2)==m {print $3; exit}' "$LEASES")"
+        valid_ip4 "$ip" && echo "$ip $l.$DNS_DOMAIN"
+    done
+}
+dns_block() {   # dnsmasq lines, inside our block in dnsmasq.conf
+    [ "$DNS_ON" = 1 ] || return 0
+    echo "domain=$DNS_DOMAIN"
+    echo "local=/$DNS_DOMAIN/"
+    echo "addn-hosts=$RUN/hosts"
+    if [ -e "$RUN/doh.ok" ]; then echo "no-resolv"; echo "server=127.0.0.1#$DOH_PORT"
+    elif [ -n "$DNS_UP" ]; then echo "no-resolv"; for u in $DNS_UP; do echo "server=$u"; done; fi
+}
+# DNS over HTTPS (iot_dns_doh=1, needs local names on): the router's upstream lookups
+# go through iot-ui/doh.lua, a small forwarder on 127.0.0.1:$DOH_PORT that sends them
+# encrypted to one provider, with the server's certificate and name verified. While
+# the forwarder answers, dnsmasq uses only it; while it doesn't (no internet yet, the
+# clock not set at boot so certificates look invalid, provider down), dnsmasq falls
+# back to the plain servers, so the house never loses DNS because of this.
+DOH_PORT="${DOH_PORT:-5053}"
+doh_provider() {   # "<ip> <name>" of the chosen provider
+    case "$(cfg dns_doh_provider cloudflare)" in
+        google) echo "8.8.8.8 dns.google" ;;
+        quad9)  echo "9.9.9.9 dns.quad9.net" ;;
+        *)      echo "1.1.1.1 cloudflare-dns.com" ;;
+    esac
+}
+doh_running() { pid_live "$RUN/doh.pid" doh.lua; }
+doh_stop() {
+    # Its TLS connections (openssl children) end by themselves when it does: they
+    # run with -no_ign_eof and their input is a pipe from it.
+    pid_kill "$RUN/doh.pid" doh.lua
+    rm -f "$RUN/doh.ok" "$RUN/doh.sig" "$RUN/doh.stat"
+}
+doh_sync() {
+    if [ "$DNS_ON" != 1 ] || [ "$(cfg dns_doh 0)" != 1 ] || [ ! -f "$UI_SRC/doh.lua" ] || [ ! -f "$UI_SRC/cacert.pem" ]; then
+        [ -e "$RUN/doh.pid" ] && { doh_stop; log "DNS over HTTPS off"; }
+        return 0
+    fi
+    set -- $(doh_provider)
+    if ! doh_running || [ "$1 $2" != "$(cat "$RUN/doh.sig" 2>/dev/null)" ]; then
+        doh_stop
+        $LUA "$UI_SRC/doh.lua" "$DOH_PORT" "$1" "$2" "$UI_SRC/cacert.pem" "$RUN/doh.stat" >/dev/null 2>&1 &
+        pid_save "$RUN/doh.pid" $!; echo "$1 $2" > "$RUN/doh.sig"
+        sleep "${DOH_WARMUP:-2}"
+    fi
+    if $LUA "$UI_SRC/doh.lua" check "$DOH_PORT" >/dev/null 2>&1; then
+        [ -e "$RUN/doh.ok" ] || { : > "$RUN/doh.ok"; log "DNS over HTTPS working ($2)"; }
+    elif [ -e "$RUN/doh.ok" ]; then
+        rm -f "$RUN/doh.ok"; log "DNS over HTTPS not answering; using the plain DNS servers until it does"
+    fi
+}
+dns_sync() {
+    dns_load; mkdir -p "$RUN"
+    doh_sync
+    # Which DNS server DHCP hands out: the router while this is on; the upstream
+    # servers again when it is switched off (only if it still points at the router).
+    cur="$($UCI -q get dhcp.lan.dhcp_option)"; six=""; rest=""
+    for o in $cur; do case "$o" in 6,*) six="$o" ;; *) rest="$rest $o" ;; esac; done
+    # What was there before is kept in iot_dns_prev6 ("none" if no DNS option was
+    # set) and put back on switching off, if the setting still points at the router.
+    want="$six"; prev="$(cfg dns_prev6 '')"
+    if [ "$DNS_ON" = 1 ]; then
+        want="6,$LAN_IP"
+        if [ "$six" != "$want" ]; then $UCI set "$SEC.iot_dns_prev6=${six:-none}" && commit_cfg >/dev/null; fi
+    elif [ "$six" = "6,$LAN_IP" ] && [ -n "$prev" ]; then
+        case "$prev" in none) want="" ;; 6,*) want="$prev" ;; esac
+    fi
+    if [ "$want" != "$six" ]; then
+        $UCI set "dhcp.lan.dhcp_option=$(echo $rest $want)" && commit_cfg dhcp >/dev/null
+        [ "$DNS_ON" = 1 ] || { $UCI set "$SEC.iot_dns_prev6=" && commit_cfg >/dev/null; }
+        dnsmasq_restart
+        log "DHCP now hands out ${want:+${want#6,} as }${want:-no particular} DNS server"
+    fi
+    # IPv6: withdraw the DNS servers handed out over DHCPv6 while this is on.
+    if [ -f "$DHCP6S_CONF" ]; then
+        if [ "$DNS_ON" = 1 ] && grep -q '^option domain-name-servers' "$DHCP6S_CONF"; then
+            grep -v '^option domain-name-servers' "$DHCP6S_CONF" > "$RUN/dhcp6s.new"; cat "$RUN/dhcp6s.new" > "$DHCP6S_CONF"; rm -f "$RUN/dhcp6s.new"
+            : > "$RUN/dhcp6s.stripped"
+            p6="$(cat /var/run/dhcp6s.pid 2>/dev/null)"
+            if [ -n "$p6" ] && kill "$p6" 2>/dev/null; then sleep 1; /usr/sbin/dhcp6s -c "$DHCP6S_CONF" -P /var/run/dhcp6s.pid "$LANBR" >/dev/null 2>&1; fi
+            log "IPv6 DNS servers no longer advertised: devices ask the router"
+        elif [ "$DNS_ON" != 1 ] && [ -e "$RUN/dhcp6s.stripped" ]; then
+            rm -f "$RUN/dhcp6s.stripped"
+            [ -x "$DHCP6S_INIT" ] && "$DHCP6S_INIT" restart >/dev/null 2>&1
+            log "IPv6 DNS servers advertised again"
+        fi
+    fi
+    # TP-Link's "dnsproxy" does not proxy: its nat chain prerouting_rule_dns sends
+    # every query addressed to the router on to the ISP's DNS server, so dnsmasq never
+    # sees one from the LAN and no local name could resolve. An ACCEPT at the top of
+    # that chain ends NAT for those packets, and they reach dnsmasq. (TP-Link rebuilds
+    # the chain when the internet connection changes; checked every run.)
+    for pr in udp tcp; do
+        if [ "$DNS_ON" = 1 ]; then
+            $IPT -t nat -C prerouting_rule_dns -i "$LANBR" -d "$LAN_IP" -p $pr --dport 53 -j ACCEPT 2>/dev/null ||
+                { $IPT -t nat -I prerouting_rule_dns 1 -i "$LANBR" -d "$LAN_IP" -p $pr --dport 53 -j ACCEPT 2>/dev/null && dnsfix=1; }
+        else
+            while $IPT -t nat -D prerouting_rule_dns -i "$LANBR" -d "$LAN_IP" -p $pr --dport 53 -j ACCEPT 2>/dev/null; do dnsfix=1; done
+        fi
+    done
+    if [ -n "$dnsfix" ]; then
+        dnsfix=""; command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
+        [ "$DNS_ON" = 1 ] && log "DNS queries from the home network now reach the router's own DNS"
+    fi
+    # The hosts file; dnsmasq re-reads it on SIGHUP.
+    if [ "$DNS_ON" = 1 ]; then
+        dns_hosts | sort -u > "$RUN/hosts.new"
+        if cmp -s "$RUN/hosts.new" "$RUN/hosts" 2>/dev/null; then rm -f "$RUN/hosts.new"
+        else mv "$RUN/hosts.new" "$RUN/hosts"; ${DNSMASQ_HUP:-killall -HUP dnsmasq} 2>/dev/null; fi
+    fi
+}
 dhcp_block() {
     echo "$MARK_BEGIN"
-    echo "dhcp-range=set:iot,$START,$END,255.255.255.0,12h"
-    echo "dhcp-option=tag:iot,3,$GW"
-    echo "dhcp-option=tag:iot,6,$(echo $DNS | tr ' ' ',')"
-    for s in $STATIC; do echo "dhcp-host=${s%%,*},${s#*,}"; done
+    if iot_on; then
+        echo "dhcp-range=set:iot,$START,$END,255.255.255.0,12h"
+        echo "dhcp-option=tag:iot,3,$GW"
+        echo "dhcp-option=tag:iot,6,$(echo $DNS | tr ' ' ',')"
+        for s in $STATIC; do echo "dhcp-host=${s%%,*},${s#*,}"; done
+    fi
+    dns_block
     echo "$MARK_END"
 }
+# Local names and DNS over HTTPS without the IoT network: the same two steps apply() does.
+names_sync() { load; dns_sync; dhcp_sync; }
 dhcp_strip() { sed "/^$MARK_BEGIN\$/,/^$MARK_END\$/d" "$DNSMASQ_CONF"; }
 dnsmasq_restart() {
     if [ -x "$DNSMASQ_INIT" ]; then "$DNSMASQ_INIT" restart >/dev/null 2>&1
@@ -763,13 +1247,32 @@ dnsmasq_restart() {
     fi
 }
 # Make the block match the current settings; restart dnsmasq only if it changed.
+# dnsmasq checks the result first (--test): a line it can't read would stop it, and
+# with it DHCP and DNS for the whole house, so such a block is never left in place.
+DNSMASQ_BIN="${DNSMASQ_BIN:-/usr/sbin/dnsmasq}"
+DNSMASQ_MAIN="${DNSMASQ_MAIN:-/var/etc/dnsmasq.conf}"
+dnsmasq_ok() { [ -x "$DNSMASQ_BIN" ] || return 0; "$DNSMASQ_BIN" --test -C "$DNSMASQ_MAIN" >/dev/null 2>&1; }
 dhcp_sync() {
     want="$(dhcp_block)"
     have="$(sed -n "/^$MARK_BEGIN\$/,/^$MARK_END\$/p" "$DNSMASQ_CONF" 2>/dev/null)"
     [ "$want" = "$have" ] && return 0
+    # Nothing to say: no block at all. Not there: leave the file alone. There: take it out.
+    if [ "$want" = "$MARK_BEGIN$NL$MARK_END" ]; then
+        [ -z "$have" ] && return 0
+        dhcp_remove; log "dnsmasq settings removed"; return 0
+    fi
+    [ "$want" = "$(cat "$RUN/dnsmasq.bad" 2>/dev/null)" ] && return 0     # already refused, said so once
+    cat "$DNSMASQ_CONF" > "$RUN/dnsmasq.conf.old" 2>/dev/null
     { dhcp_strip; echo "$want"; } > "$RUN/dnsmasq.conf.new" && cat "$RUN/dnsmasq.conf.new" > "$DNSMASQ_CONF"
     rm -f "$RUN/dnsmasq.conf.new"
-    dnsmasq_restart && log "dnsmasq now serves $START-$END on $BR"
+    if ! dnsmasq_ok; then
+        cat "$RUN/dnsmasq.conf.old" > "$DNSMASQ_CONF"; rm -f "$RUN/dnsmasq.conf.old"
+        echo "$want" > "$RUN/dnsmasq.bad"
+        log "dnsmasq refused the new settings; kept the old ones (check the local-names and IoT address settings)"
+        return 1
+    fi
+    rm -f "$RUN/dnsmasq.conf.old" "$RUN/dnsmasq.bad"
+    dnsmasq_restart && log "dnsmasq settings updated$(iot_on && echo " (IoT addresses $START-$END)")"
 }
 dhcp_remove() {
     grep -q "^$MARK_BEGIN\$" "$DNSMASQ_CONF" 2>/dev/null || return 0
@@ -929,6 +1432,76 @@ shape_load() {
     CAPS="$(cfg caps '' | tr 'A-F-' 'a-f:')"
     WS_ON="$(cfg wan_shape 0)"; WS_DOWN="$(cfg wan_down 0)"; WS_UP="$(cfg wan_up 0)"
     PRIO="$(cfg prio 0)"; GLOW="$(cfg guest_low 0)"
+    # Automatic whole-connection limit (iot-ui/autorate.lua): wan_down/up are the
+    # usual speeds it starts from; it stays between the min and max.
+    WS_AUTO="$(cfg wan_auto 0)"
+    WS_MIN_D="$(cfg wan_min_down '')"; WS_MAX_D="$(cfg wan_max_down '')"
+    WS_MIN_U="$(cfg wan_min_up '')"; WS_MAX_U="$(cfg wan_max_up '')"
+}
+# Range for the automatic limit: what was set, else half to three times the usual speed.
+auto_range() {   # auto_range <usual> <min> <max> -> "min max", sane whatever was saved
+    lo="$2"; hi="$3"
+    case "$lo" in ''|*[!0-9]*) lo=$(($1 / 2)) ;; esac
+    case "$hi" in ''|*[!0-9]*) hi=$(($1 * 3)) ;; esac
+    [ "$lo" -ge 1 ] || lo=1; [ "$lo" -le "$1" ] || lo="$1"
+    [ "$hi" -ge "$1" ] || hi="$1"; [ "$hi" -le 1000 ] || hi=1000
+    echo "$lo $hi"
+}
+# The lanes' rates, changed in place: `sh rate.sh <down kbit> <up kbit>`. Written when
+# the lanes are built, with their layout (priority lane, guest lane) baked in, so the
+# controller does not have to load all of iot.sh once a second.
+rate_script() {   # rate_script <prio 0|1> <low 0|1>
+    cat > "$RUN/rate.sh.new" <<EOF
+#!/bin/sh
+# Written by iot.sh shape_sync. rate.sh <down kbit> <up kbit>
+set_rate() {
+    t=\$2; [ "\$t" -ge 500 ] 2>/dev/null || return 1
+    b=\$((t * 5 / 2)); [ \$b -ge 15000 ] || b=15000; bb="burst \$b cburst \$b"
+    $TC class change dev \$1 parent 1: classid 1:1 htb rate \${t}kbit ceil \${t}kbit \$bb || return 1
+    hi=0; gs=0
+    [ $1 = 1 ] && hi=\$((t * 40 / 100))
+    [ $2 = 1 ] && gs=\$((t / 10))
+    lo=\$((t - hi - gs))
+    [ $1 = 1 ] && $TC class change dev \$1 parent 1:1 classid 1:2 htb rate \${hi}kbit ceil \${t}kbit \$bb prio 0
+    if [ $1 = 1 ] || [ $2 = 1 ]; then $TC class change dev \$1 parent 1:1 classid 1:10 htb rate \${lo}kbit ceil \${t}kbit \$bb prio 1
+    else $TC class change dev \$1 parent 1:1 classid 1:10 htb rate \${t}kbit ceil \${t}kbit \$bb; fi
+    if [ $2 = 1 ]; then
+        $TC class change dev \$1 parent 1:1 classid 1:3 htb rate \${gs}kbit ceil \${t}kbit \$bb prio 2
+        $TC class change dev \$1 parent 1:3 classid 1:4 htb rate \${gs}kbit ceil \${t}kbit \$bb prio 2
+    fi
+    return 0
+}
+set_rate $LANBR "\$1" && set_rate $IFB "\$2"
+EOF
+    mv "$RUN/rate.sh.new" "$RUN/rate.sh"
+}
+auto_running() { pid_live "$RUN/autorate.pid" autorate.lua; }
+auto_stop() {   # auto_stop [keep]: "keep" leaves the last rates for a restart to carry on from
+    pid_kill "$RUN/autorate.pid" autorate.lua; rm -f "$RUN/autorate.sig"
+    [ "$1" = keep ] || rm -f "$RUN/autorate.stat"
+}
+# Keep the controller running while the automatic limit is on (called after the
+# lanes are in place). It restarts from the usual speeds whenever the lanes were rebuilt.
+auto_sync() {   # auto_sync <wan 0|1> <rebuilt 0|1>
+    if [ "$1" != 1 ] || [ "$WS_AUTO" != 1 ] || [ ! -f "$UI_SRC/autorate.lua" ] || [ ! -f "$RUN/rate.sh" ]; then
+        if [ -e "$RUN/autorate.pid" ]; then
+            auto_stop; log "automatic speed limit off"
+            # The lanes still carry whatever rate it had reached: back to the fixed
+            # speeds. If that can't be done in place, have the lanes rebuilt.
+            if [ "$1" = 1 ] && [ "$2" != 1 ]; then
+                sh "$RUN/rate.sh" "$((WS_DOWN * 1000))" "$((WS_UP * 1000))" >/dev/null 2>&1 || rm -f "$RUN/shape.sig"
+            fi
+        fi
+        return 0
+    fi
+    set -- "$2" $(auto_range "$WS_DOWN" "$WS_MIN_D" "$WS_MAX_D") $(auto_range "$WS_UP" "$WS_MIN_U" "$WS_MAX_U")
+    asig="$WS_DOWN $WS_UP $2 $3 $4 $5"
+    if [ "$1" = 1 ] || ! auto_running || [ "$asig" != "$(cat "$RUN/autorate.sig" 2>/dev/null)" ]; then
+        if [ "$asig" = "$(cat "$RUN/autorate.sig" 2>/dev/null)" ]; then auto_stop keep; else auto_stop; fi
+        $LUA "$UI_SRC/autorate.lua" "$RUN/rate.sh" "$RUN/autorate.stat" "$LANBR" "$IFB" "$WS_DOWN" "$WS_UP" "$2" "$3" "$4" "$5" >/dev/null 2>&1 &
+        pid_save "$RUN/autorate.pid" $!; echo "$asig" > "$RUN/autorate.sig"
+        log "automatic speed limit on: download $2-$3 Mbps, upload $4-$5 Mbps, starting at $WS_DOWN/$WS_UP"
+    fi
 }
 guest_ifs() {   # guest Wi-Fi interfaces from TP-Link's own config (wifi-iface guest=on)
     for sec in $($UCI show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.guest='\{0,1\}on'\{0,1\}$/\1/p"); do
@@ -1020,10 +1593,15 @@ shape_sync() {
         if [ -f "$RUN/shape.sig" ] || [ -f "$RUN/guest.sig" ]; then
             shape_clear; rm -f "$RUN/shape.sig"; log "speed limits off"
         fi
+        auto_sync 0 0
         return 0
     fi
     sig="$wan|$WS_DOWN|$WS_UP|$prio|$low|$gl|$(echo $list)"
-    [ "$(cat "$RUN/shape.sig" 2>/dev/null)" = "$sig" ] && shape_ok && return 0
+    if [ "$(cat "$RUN/shape.sig" 2>/dev/null)" = "$sig" ] && shape_ok; then
+        # Lanes built by an older version have no rate script yet.
+        [ "$wan" = 1 ] && [ ! -f "$RUN/rate.sh" ] && rate_script "$prio" "$low"
+        auto_sync "$wan" 0; return 0
+    fi
     shape_clear
     lsmod 2>/dev/null | grep -q '^xt_BLOGSKIP' || insmod /lib/modules/iplatform/xt_BLOGSKIP.ko 2>/dev/null
     for c in "$IPT" "$IPT6"; do
@@ -1095,6 +1673,8 @@ shape_sync() {
     done
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
     echo "$sig" > "$RUN/shape.sig"
+    if [ "$wan" = 1 ]; then rate_script "$prio" "$low"; else rm -f "$RUN/rate.sh"; fi
+    auto_sync "$wan" 1
     log "speed limits: $(echo "$list" | grep -c .) device(s) capped$([ "$wan" = 1 ] && echo ", whole connection at ${WS_DOWN}/${WS_UP} Mbps")$([ "$prio" = 1 ] && echo ", calls and games first")$([ "$low" = 1 ] && echo ", guests last")"
 }
 guest_sync() { shape_sync; }   # older callers
@@ -1108,11 +1688,14 @@ apply() {
 
     [ -d "$NET/$BR" ] || { $BRCTL addbr $BR && log "created $BR"; }
     cur="$(bridge_of "$VIF")"
+    # Where the slot came from is written down before it is moved (a run killed in
+    # between must not leave it moved with nothing to say so), and written again if
+    # it is found moved without the note.
     if [ "$cur" != "$BR" ]; then
+        [ -s "$RUN/orig_bridge" ] || echo "${cur:-br-lan}" > "$RUN/orig_bridge"
         [ -n "$cur" ] && $BRCTL delif "$cur" "$VIF"
         $BRCTL addif $BR "$VIF" && log "moved $VIF from ${cur:-none} to $BR"
-        [ -s "$RUN/orig_bridge" ] || echo "${cur:-br-lan}" > "$RUN/orig_bridge"
-    fi
+    elif [ ! -s "$RUN/orig_bridge" ]; then echo br-lan > "$RUN/orig_bridge"; fi
     $IP addr show dev $BR 2>/dev/null | grep -q "inet $GW/24" || {
         $IP addr flush dev $BR 2>/dev/null
         $IP addr add "$GW/24" dev $BR && log "address $GW/24 on $BR"
@@ -1127,15 +1710,19 @@ apply() {
     brfilter_sync
     firewall_ok || { firewall; log "firewall (re)applied"; }
     autopin
+    dns_sync
     dhcp_sync
     lock_sync
     guest_wifi_open
 }
 
-stop() {
+stop() { inittab_del; iot_teardown; }
+# Take the IoT network down (the watcher's registration is the caller's business).
+iot_teardown() {
     load
-    inittab_del
-    dhcp_remove
+    # dnsmasq: the block as it should be now, in one go. The IoT lines leave it
+    # (iot_on is false here), the local-names lines stay, and it restarts once.
+    dns_load; dhcp_sync
     firewall_remove
     orig="$(cat "$RUN/orig_bridge" 2>/dev/null)"; orig="${orig:-br-lan}"
     vif_release
@@ -1158,9 +1745,11 @@ stop() {
 # busybox-init respawn supervision (same approach as ax10-svc; the stock inittab's
 # last line has no trailing newline, so rebuild through grep).
 TAG="ax10-iot-watch"
+# inittab is rewritten in place (cat > it), so two writers at once could leave it
+# empty: only commands holding the run lock call these, and each uses its own temp file.
 inittab_add() {
-    { grep -v "$TAG" "$INITTAB" 2>/dev/null; echo "::respawn:/bin/sh $SELF watch # $TAG"; } > "$INITTAB.new"
-    cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"; $INIT_HUP 2>/dev/null
+    { grep -v "$TAG" "$INITTAB" 2>/dev/null; echo "::respawn:/bin/sh $SELF watch # $TAG"; } > "$INITTAB.new.$$"
+    [ -s "$INITTAB.new.$$" ] && cat "$INITTAB.new.$$" > "$INITTAB"; rm -f "$INITTAB.new.$$"; $INIT_HUP 2>/dev/null
 }
 # A running watcher keeps the functions it loaded at start; after iot.sh is
 # replaced on disk, kill it so init respawns it with the new code.
@@ -1172,7 +1761,7 @@ watcher_restart() {
 }
 inittab_del() {
     grep -q "$TAG" "$INITTAB" 2>/dev/null || return 0
-    grep -v "$TAG" "$INITTAB" > "$INITTAB.new"; cat "$INITTAB.new" > "$INITTAB"; rm -f "$INITTAB.new"
+    grep -v "$TAG" "$INITTAB" > "$INITTAB.new.$$"; cat "$INITTAB.new.$$" > "$INITTAB"; rm -f "$INITTAB.new.$$"
     $INIT_HUP 2>/dev/null
     for d in /proc/[0-9]*; do
         [ "${d#/proc/}" = "$$" ] && continue
@@ -1277,6 +1866,65 @@ ui_remove() {
 # boot.sh does, and log it (the log tells us what killed it).
 LIFELINE_BIN="${LIFELINE_BIN:-/tmp/dropbear_vanilla}"
 LIFELINE_PID="${LIFELINE_PID:-/tmp/archer-boot-ssh-2222.pid}"
+# TP-Link's WAN IPv6 client (dhcp6c) can abort as the PPPoE link comes up at boot
+# (seen 2026-11-12: a core dump one minute after boot, before any of our code ran).
+# Nothing restarts it, and the router is left without an IPv6 default route or a
+# prefix for the LAN until the next reconnect: IPv6 is simply dead in the house.
+# If its config is in place (TP-Link removes it when the link goes down) and it is
+# not running on two checks in a row, start it the way /lib/netifd/pppshare-up does.
+DHCP6C_DIR="${DHCP6C_DIR:-/tmp/dhcp6c}"
+DHCP6C_BIN="${DHCP6C_BIN:-/usr/sbin/dhcp6c}"
+PIDOF="${PIDOF:-pidof}"
+# TP-Link starts the client itself whenever the link comes up, so this must never add
+# a second one next to it:
+#   - the config must be the same file on both checks (TP-Link rewrites it on every
+#     connect, so a changed one means a connect is in progress: start over);
+#   - it is looked for again right before starting, and again two seconds after: if
+#     TP-Link's own has appeared in the meantime, ours is the one that goes;
+#   - after a restart that did not hold, the next try waits longer each time (2, 4,
+#     8 ... 64 minutes), so a client that keeps crashing is not restarted in a loop.
+d6_state() {   # D6_TRIES (0..6) and D6_UNTIL from $RUN/dhcp6c.tries; anything else in there is thrown away
+    D6_TRIES=0; D6_UNTIL=0
+    [ -f "$RUN/dhcp6c.tries" ] || return 0
+    read -r D6_TRIES D6_UNTIL _rest < "$RUN/dhcp6c.tries"
+    case "$D6_TRIES" in ''|*[!0-9]*) D6_TRIES=bad ;; esac
+    case "$D6_UNTIL" in ''|*[!0-9]*) D6_TRIES=bad ;; esac
+    if [ "$D6_TRIES" = bad ] || [ "${#D6_TRIES}" -gt 2 ] || [ "${#D6_UNTIL}" -gt 12 ]; then D6_TRIES=0; D6_UNTIL=0; rm -f "$RUN/dhcp6c.tries"; return 0; fi
+    [ "$D6_TRIES" -le 6 ] || D6_TRIES=6
+}
+ipv6_guard() {
+    c="$DHCP6C_DIR/dhcp6c.conf"
+    if [ ! -f "$c" ] || [ ! -x "$DHCP6C_BIN" ]; then rm -f "$RUN/dhcp6c.miss"; return 0; fi
+    if $PIDOF dhcp6c >/dev/null 2>&1; then
+        rm -f "$RUN/dhcp6c.miss"
+        # running for a while since our last restart: that one held
+        d6_state; [ "$D6_TRIES" -gt 0 ] && [ "$(now_s)" -ge "$D6_UNTIL" ] && rm -f "$RUN/dhcp6c.tries"
+        return 0
+    fi
+    id="$(ls -li "$c" 2>/dev/null | awk '{print $1, $6, $7, $8, $9}') $(cksum < "$c" 2>/dev/null)"
+    if [ "$(cat "$RUN/dhcp6c.miss" 2>/dev/null)" != "$id" ]; then echo "$id" > "$RUN/dhcp6c.miss"; return 0; fi   # first miss with this config
+    d6_state
+    [ "$(now_s)" -ge "$D6_UNTIL" ] || return 0                               # still backing off
+    rm -f "$RUN/dhcp6c.miss"
+    [ "$($UCI -q get network.wan.type)" = bridge ] && return 0              # IPTV bridge mode uses another port; leave it
+    ifn="$(sed -n 's/^interface \([^ ]*\) {.*/\1/p' "$c" | head -n1)"
+    wif="$($UCI -q get network.wan.ifname)"
+    [ -n "$ifn" ] && [ -n "$wif" ] && [ -d "$NET/$ifn" ] || return 0
+    $PIDOF dhcp6c >/dev/null 2>&1 && return 0                               # it has just been started for us
+    [ -f "$c" ] || return 0
+    "$DHCP6C_BIN" -f -p "$DHCP6C_DIR/dhcp6c.pid" -c "$c" -I "$wif" -t internet "$ifn" >/dev/null 2>&1 &
+    ours=$!; ours_start="$(lock_start "$ours")"
+    tries=$((D6_TRIES + 1)); [ "$tries" -le 6 ] || tries=6
+    echo "$tries $(( $(now_s) + 60 * (1 << tries) ))" > "$RUN/dhcp6c.tries"
+    sleep "${DHCP6C_SETTLE:-2}"
+    if [ "$($PIDOF dhcp6c 2>/dev/null | wc -w)" -gt 1 ]; then
+        # only if that pid is still the process we started
+        [ "$(lock_start "$ours")" = "$ours_start" ] && kill "$ours" 2>/dev/null
+        log "the router started its own IPv6 client while ours was starting; left it to that one"
+    else
+        log "the router's IPv6 client (dhcp6c) was not running; restarted it (try $tries)"
+    fi
+}
 lifeline_guard() {
     [ -x "$LIFELINE_BIN" ] || return 0
     p="$(cat "$LIFELINE_PID" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
@@ -1309,36 +1957,46 @@ status() {
 
 # Commands that change the router take the lock for their whole run.
 case "$1" in
-    apply|start|stop|guest|shape|open|close|forget|home|home-open|home-close|home-allow|home-set|ui|ui-remove|boot)
+    apply|start|stop|guest|shape|sync|usage|home|ui|ui-remove|boot)
         lock || { log "$1: another iot.sh run still holds the lock; gave up after ${LOCK_WAIT}s"
                   echo "iot.sh: another run is in progress; try again" >&2; exit 1; }
+        trap unlock EXIT ;;
+    # Settings edits: only the settings lock, and they only save. Follow with
+    # `iot.sh sync` to apply at once; the watcher applies within its next run anyway.
+    forget|forget-device|entry|home-allow|home-set)
+        cfg_lock || { echo "iot.sh: the settings are busy; try again" >&2; exit 1; }
         trap unlock EXIT ;;
 esac
 
 case "$1" in
-    apply) apply ;;
+    apply) mkdir -p "$RUN"; rm -f "$RUN/iot.stopped"; apply ;;   # asked for by hand: a manual stop no longer holds
     watch)
         while :; do
             if lock 5; then
-                if [ "$(cfg enabled 0)" = 1 ]; then
-                    apply >/dev/null 2>&1
-                    shape_sync >/dev/null 2>&1
-                fi
-                home_sync >/dev/null 2>&1
+                rm -f "$RUN/sync.want"          # this pass applies whatever was asked for up to now
+                run_all >/dev/null 2>&1
                 unlock
             fi
             lifeline_guard
+            ipv6_guard
             trim_log
             sleep "${INTERVAL:-15}"
         done ;;
     start)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
-        apply; shape_sync; home_sync; inittab_add; watcher_restart; log "watcher registered" ;;
+        rm -f "$RUN/iot.stopped"
+        run_all; inittab_add; watcher_restart; log "watcher registered" ;;
     stop)
-        stop; shape_clear; rm -f "$RUN/shape.sig"
+        # Taken down by hand while the setting still says "on": stay down (see iot_on).
+        mkdir -p "$RUN"; [ "$(cfg enabled 0)" = 1 ] && : > "$RUN/iot.stopped"
+        stop
+        shape_sync          # speed limits stay; this clears them only if none are set
         # The home allow list is not part of the IoT network: keep it (and a watcher) running.
-        if [ "$(cfg home_lock 0)" = 1 ]; then home_sync; inittab_add; log "watcher kept for the home allow list"
-        else home_load; home_unlock; portal_clear; rm -f "$RUN/portal_macs"; fi ;;
+        if [ "$(cfg home_lock 0)" = 1 ]; then home_sync
+        else home_load; home_unlock; portal_clear; rm -f "$RUN/portal_macs"; fi
+        # Local names and DNS over HTTPS are not part of the IoT network either.
+        if [ "$(cfg dns_on 0)" = 1 ]; then names_sync; else doh_stop; fi
+        watcher_sync ;;
     open|close)
         load; mkdir -p "$RUN"
         if [ "$1" = open ]; then
@@ -1346,28 +2004,31 @@ case "$1" in
             echo $(( $(now_s) + s )) > "$RUN/open_until"
             log "new IoT devices allowed for ${s}s"
         else rm -f "$RUN/open_until"; fi
-        lock_sync ;;
+        # "later": the caller asks for the sync itself (the dashboard: it records the
+        # window before it answers, so two clicks can't end up in the wrong order).
+        case " $2 $3 " in *" later "*) ;; *) kick_run ;; esac ;;
     home-open|home-close)
         mkdir -p "$RUN"
         if [ "$1" = home-open ]; then
             s="${2:-600}"; case "$s" in ''|*[!0-9]*) s=600 ;; esac
             echo $(( $(now_s) + s )) > "$RUN/home_open_until"; log "new home devices allowed for ${s}s"
         else rm -f "$RUN/home_open_until"; fi
-        home_sync ;;
-    home-allow) home_edit "$2" "$3" || exit 1; home_sync ;;
+        case " $2 $3 " in *" later "*) ;; *) kick_run ;; esac ;;
+    home-allow) home_edit "$2" "$3" || exit 1 ;;
+    forget-device) forget_devices "$2" || exit 1 ;;
+    entry) entry_set "$2" "$3" "$4" || exit 1 ;;
+    sync) run_all; watcher_sync ;;
+    kick)   # kick [up]: apply what is saved, soon (see kick_run). "up": the IoT network was switched on in the settings.
+        mkdir -p "$RUN"; [ "$2" = up ] && rm -f "$RUN/iot.stopped"
+        kick_run ;;
     forget)   # forget <mac>: drop an IoT device's fixed address; autopin won't re-pin it
         load; mac="$(echo "$2" | tr A-F- a-f:)"
         echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "iot.sh: bad MAC '$2'" >&2; exit 1; }
         st=""; for e in $STATIC; do [ "$(echo "${e%%,*}" | tr A-F a-f)" = "$mac" ] || st="$st $e"; done
         fg="$(cfg forget '' | tr A-F a-f)"; case " $fg " in *" $mac "*) ;; *) fg="$fg $mac" ;; esac
         $UCI set "$SEC.iot_static=$(echo $st)"; $UCI set "$SEC.iot_forget=$(echo $fg)"
-        commit_cfg >/dev/null; log "forgot IoT device $mac"
-        if [ "$(cfg enabled 0)" = 1 ]; then apply; fi ;;
-    home-set)
-        home_set "$2" "$3" || exit 1
-        home_sync
-        if watcher_wanted; then grep -q "$TAG" "$INITTAB" 2>/dev/null || { inittab_add; log "watcher registered (home allow list)"; }
-        else inittab_del; fi ;;
+        commit_cfg >/dev/null; log "forgot IoT device $mac" ;;
+    home-set) home_set "$2" "$3" || exit 1 ;;   # `sync` (run lock) registers or drops the watcher
     home)
         home_sync
         echo "home lock: $([ "$H_LOCK" = 1 ] && { home_open_now && echo "on, open to new devices" || echo on; } || echo off)"
@@ -1378,22 +2039,25 @@ case "$1" in
         echo "join page: $(cat "$RUN/portal_macs" 2>/dev/null)$(portal_running && echo " (server up)")"
         echo "expire:    $([ "$H_EXPIRE" -gt 0 ] 2>/dev/null && echo "$H_EXPIRE days" || echo off)" ;;
     guest|shape)
-        shape_sync; shape_load
-        echo "whole connection: $([ "$WS_ON" = 1 ] && echo "${WS_DOWN}/${WS_UP} Mbps" || echo off)"
+        shape_sync; watcher_sync; shape_load
+        echo "whole connection: $([ "$WS_ON" = 1 ] && echo "${WS_DOWN}/${WS_UP} Mbps$([ "$WS_AUTO" = 1 ] && echo ", automatic: $(cat "$RUN/autorate.stat" 2>/dev/null)")" || echo off)"
         echo "priority lane: $([ "$PRIO" = 1 ] && { [ "$WS_ON" = 1 ] && echo on || echo "on, but needs the whole-connection cap"; } || echo off)"
         echo "guests last: $([ "$GLOW" = 1 ] && { [ "$WS_ON" = 1 ] && echo on || echo "on, but needs the whole-connection cap"; } || echo off)"
         echo "guest limit: $GL_ON  ${GL_DOWN}/${GL_UP} Mbps  full-speed: ${GL_FAST:-none}"
         echo "capped (mac down up):"; shape_list | sort -u ;;
-    ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_restart ;;
+    ui) [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null; ui_install; watcher_sync; watcher_restart ;;
     ui-remove) ui_remove ;;
     boot)
         [ "$0" = "$SELF" ] || cp "$0" "$SELF" 2>/dev/null
         ui_install
         # In-process, not "$0 start": the fetched file is not executable.
-        if [ "$(cfg enabled 0)" = 1 ]; then apply; shape_sync; home_sync; inittab_add; log "watcher registered"
-        elif [ "$(cfg home_lock 0)" = 1 ]; then home_sync; inittab_add; log "watcher registered (home allow list)"; fi
+        run_all; watcher_sync
         lifeline_guard ;;
     status) status ;;
+    guard) mkdir -p "$RUN"; lifeline_guard; ipv6_guard ;;   # what the watcher checks besides the rules
+    usage)   # count up to now, then show the log: days, months, devices this month
+        usage_sync
+        awk '{ printf "%-34s %9.2f GB down %9.2f GB up\n", $1, $2 / 1073741824, $3 / 1073741824 }' "$RUN/usage" ;;
     set)
         [ -n "$2" ] || { echo "usage: iot.sh set <key> <value>" >&2; exit 1; }
         k="${2#iot_}"

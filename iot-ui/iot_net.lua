@@ -34,8 +34,10 @@ local function save(opts)
     local c = uci.cursor()
     for k, v in pairs(opts) do c:set("openvpn", SEC, "iot_" .. k, v) end
     c:commit("openvpn")
+    -- Saved; the one sync worker does the rest (it brings the IoT network up, or takes
+    -- it down if it was switched off). "up" lifts a stop made by hand on the router.
     local on = c:get("openvpn", SEC, "iot_enabled") == "1"
-    os.execute(IOT .. (on and " start" or " stop") .. " >/dev/null 2>&1 &")
+    os.execute(IOT .. (on and " kick up" or " kick") .. " >/dev/null 2>&1 &")
 end
 
 ------------------------------------------------------------------ device info
@@ -62,6 +64,16 @@ local function set_name(mac, name)
     if #list > 0 then c:set("openvpn", SEC, "iot_names", list) else c:delete("openvpn", SEC, "iot_names") end
     c:commit("openvpn")
 end
+
+-- One device's entry in a per-device list (caps, noinet, guest_fast, lan_allow),
+-- changed by iot.sh under its settings lock, so the watcher and other requests never
+-- write a stale copy of the list. Every writer of these lists goes through here.
+local function set_entry(key, mac, value)
+    return os.execute(IOT .. " entry " .. key .. " " .. mac .. " " .. value .. " >/dev/null 2>&1") == 0
+end
+-- Apply saved changes without making the request wait for it. `kick`, not `sync`:
+-- a burst of changes becomes one worker instead of a queue of them.
+local function sync_later() os.execute(IOT .. " kick >/dev/null 2>&1 &") end
 
 local function sh(cmd)
     local f = io.popen(cmd .. " 2>/dev/null"); if not f then return "" end
@@ -285,12 +297,8 @@ local function update_client(form)
     local mac = apply_rename(new, old)
     if not mac then return false, "-1" end
     if not old or new.internet ~= old.internet then
-        local out = {}
-        for _, m in ipairs(words(get("noinet", ""))) do
-            if m:lower() ~= mac then out[#out + 1] = m end
-        end
-        if new.internet == "off" then out[#out + 1] = mac end
-        save({ noinet = table.concat(out, " ") })
+        if not set_entry("noinet", mac, new.internet == "off" and "on" or "off") then return false, "-1" end
+        sync_later()
     end
     new.key = mac
     return new
@@ -312,12 +320,8 @@ local function update_home(form)
     local mac = apply_rename(new, old)
     if not mac then return false, "-1" end
     if not old or new.allowed ~= old.allowed then
-        local out = {}
-        for _, m in ipairs(words(get("lan_allow", ""))) do
-            if m:lower() ~= mac then out[#out + 1] = m:lower() end
-        end
-        if new.allowed == "on" then out[#out + 1] = mac end
-        save({ lan_allow = table.concat(out, " ") })
+        if not set_entry("lan_allow", mac, new.allowed == "on" and "on" or "off") then return false, "-1" end
+        sync_later()
     end
     new.key = mac
     return new
@@ -325,7 +329,9 @@ end
 
 ------------------------------------------------------------ guest speed limit
 -- Settings live next to the IoT ones (iot_guest_*); iot.sh's watcher applies them.
-local function guest_apply() os.execute(IOT .. " shape >/dev/null 2>&1 &") end
+-- A full sync, not just `shape`: it also registers the watcher, which is what applies
+-- the guest limit to a guest who joins later.
+local function guest_apply() os.execute(IOT .. " kick >/dev/null 2>&1 &") end
 
 local function read_guest_settings()
     return {
@@ -379,15 +385,8 @@ local function update_guest(form)
     local mac = apply_rename(new, old)
     if not mac then return false, "-1" end
     if not old or new.fast ~= old.fast then
-        local out = {}
-        for _, m in ipairs(words(get("guest_fast", ""))) do
-            if m:lower() ~= mac then out[#out + 1] = m:lower() end
-        end
-        if new.fast == "on" then out[#out + 1] = mac end
-        local c = uci.cursor()
-        c:set("openvpn", SEC, "iot_guest_fast", table.concat(out, " "))
-        c:commit("openvpn")
-        guest_apply()
+        if not set_entry("guest_fast", mac, new.fast == "on" and "on" or "off") then return false, "-1" end
+        sync_later()
     end
     new.key = mac
     return new
@@ -439,15 +438,6 @@ local function caps()
     end
     return t
 end
-local function caps_save(t)
-    local out = {}
-    for m, c in pairs(t) do out[#out + 1] = m .. "=" .. c.down .. "/" .. c.up end
-    table.sort(out)
-    local c = uci.cursor()
-    if #out > 0 then c:set("openvpn", SEC, "iot_caps", table.concat(out, " ")) else c:delete("openvpn", SEC, "iot_caps") end
-    c:commit("openvpn")
-    guest_apply()
-end
 
 -- Every device in the DHCP leases (MACs seen only on the air or in ARP are the mesh
 -- satellite's own radios, not clients), plus offline devices that still have a setting
@@ -483,9 +473,23 @@ local function devices()
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
     local rows, seen = {}, {}
+    -- Last seen (iot.sh home_seen, wall-clock seconds) and devices forgotten on the
+    -- dashboard (hidden while offline).
+    local last, hidden = {}, {}
+    local lf = io.open("/tmp/ax10-iot/home_seen")
+    if lf then
+        for line in lf:lines() do local m, t = line:match("^(%S+) (%d+)"); if m then last[m] = tonumber(t) end end
+        lf:close()
+    end
+    for _, m in ipairs(words(get("hidden_devices", ""))) do hidden[normmac(m)] = true end
+    local stock = stock_clients()
     local function add(mac, ip, host)
         mac = normmac(mac)
         if seen[mac] or not mac:match(MAC_PAT) then return end
+        -- Forgotten devices stay off the list while offline. Online by any source
+        -- counts (the mesh satellite's clients are only in TP-Link's list), and a
+        -- blocked device stays, so it can still be unblocked.
+        if hidden[mac] and not at[mac] and not (stock[mac] and stock[mac].on) and not blocked[mac] then return end
         seen[mac] = true
         local iot = (ip and prefix and ip:sub(1, #prefix + 1) == prefix .. ".") or false
         local net = iot and "iot" or (gif[atif[mac] or ""] and "guest") or "home"
@@ -494,7 +498,7 @@ local function devices()
             name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
             net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
             internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac),
-            cap = cp[mac] or false, pinned = pins[mac] or false,
+            cap = cp[mac] or false, pinned = pins[mac] or false, seen = last[mac],
         }
         local r, x = rows[#rows], st[mac]
         if x then r.down, r.up, r.rssi, r.rate, r.conn = x.down, x.up, x.rssi, x.rate, x.conn
@@ -521,11 +525,11 @@ local function devices()
         end
         af:close()
     end
-    for m, c in pairs(stock_clients()) do if c.on then add(m, c.ip, c.name) end end
+    for m, c in pairs(stock) do if c.on then add(m, c.ip, c.name) end end
     for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
     for m in pairs(blocked) do add(m, nil, nil) end
     for m in pairs(cp) do add(m, nil, nil) end
-    return { list = rows, t = t, lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
+    return { list = rows, t = t, now = os.time(), lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
              guest_limit = get("guest_limit", "0") == "1",
              guest_down = tonumber(get("guest_down", "5")), guest_up = tonumber(get("guest_up", "2")),
              wan_shape = get("wan_shape", "0") == "1",
@@ -684,54 +688,78 @@ local function connections(form)
     return { t = uptime(), total = total, list = list }
 end
 
--- Remove or add one mac in a space-separated list setting.
-local function list_with(key, mac, on)
-    local out = {}
-    for _, m in ipairs(words(get(key, ""))) do
-        if normmac(m) ~= mac then out[#out + 1] = normmac(m) end
-    end
-    if on then out[#out + 1] = mac end
-    return table.concat(out, " ")
-end
 
 -- Change one device: any of name, internet (IoT), allowed (home -> IoT), fast (guest).
+local requester_mac
 local function write_device(form)
+    if form.forget then
+        -- form.forget: one MAC or a comma-separated list (at most 64). iot.sh checks
+        -- and saves the whole batch; names (which Lua owns) go only once that worked.
+        local list, me = {}, requester_mac()
+        for raw in tostring(form.forget):gmatch("[^,]+") do
+            local m = normmac(raw)
+            if not m:match(MAC_PAT) then return false, "-1" end
+            if m == me then return false, "that's the device you're using" end
+            list[#list + 1] = m
+        end
+        if #list == 0 or #list > 64 then return false, "-1" end
+        if os.execute(IOT .. " forget-device " .. table.concat(list, ",") .. " >/dev/null 2>&1") ~= 0 then
+            return false, "nothing was changed: that would empty the home allow list while the lock is on"
+        end
+        for _, m in ipairs(list) do set_name(m, "") end
+        sync_later()
+        return { forgot = #list }
+    end
     local mac = normmac(form.mac)
     if not mac:match(MAC_PAT) then return false, "-1" end
     if form.name ~= nil then set_name(mac, form.name) end
-    local opts = {}
-    if form.internet == "on" or form.internet == "off" then opts.noinet = list_with("noinet", mac, form.internet == "off") end
-    if form.allowed == "on" or form.allowed == "off" then opts.lan_allow = list_with("lan_allow", mac, form.allowed == "on") end
-    if next(opts) then save(opts) end
+    local changed = false
+    for field, key in pairs({ internet = "noinet", allowed = "lan_allow", fast = "guest_fast" }) do
+        local v = form[field]
+        if v == "on" or v == "off" then
+            -- noinet lists devices WITHOUT internet, so it is the inverse of the switch.
+            local on = (v == "on") ~= (key == "noinet")
+            if not set_entry(key, mac, on and "on" or "off") then return false, "-1" end
+            changed = true
+        end
+    end
     if form.pin == "off" then
         -- Through iot.sh, under the lock autopin runs under, so the watcher can't
         -- save a stale pin list over it. iot_forget keeps it from being re-pinned.
         if os.execute(IOT .. " forget " .. mac .. " >/dev/null 2>&1") ~= 0 then return false, "-1" end
+        changed = true
     end
     if form.cap ~= nil then                     -- "down/up" in Mbps, or "" to remove
-        local t = caps()
         local d, u = tostring(form.cap):match("^(%d+)/(%d+)$")
         d, u = tonumber(d), tonumber(u)
-        if form.cap == "" or (d == 0 and u == 0) then t[mac] = nil
-        elseif d and u and d <= 1000 and u <= 1000 then t[mac] = { down = d, up = u }
+        local v
+        if form.cap == "" or (d == 0 and u == 0) then v = "off"
+        elseif d and u and d <= 1000 and u <= 1000 then v = d .. "/" .. u
         else return false, "-1" end
-        caps_save(t)
+        if not set_entry("caps", mac, v) then return false, "-1" end
+        changed = true
     end
-    if form.fast == "on" or form.fast == "off" then
-        local c = uci.cursor()
-        c:set("openvpn", SEC, "iot_guest_fast", list_with("guest_fast", mac, form.fast == "on"))
-        c:commit("openvpn")
-        guest_apply()
-    end
+    if changed then sync_later() end
     return { mac = mac:upper() }
 end
 
 -- Whole-connection shaping: cap all internet traffic a little under the line speed.
 local function read_shaping()
+    -- What the automatic limit is doing right now (iot-ui/autorate.lua), in kbit/s.
+    local now = {}
+    local f = io.open("/tmp/ax10-iot/autorate.stat")
+    if f then for k, v in (f:read("*l") or ""):gmatch("([%a_]+)=(%d+)") do now[k] = tonumber(v) end; f:close() end
+    local fresh = now.t and math.abs(os.time() - now.t) < 30
     return { enable = get("wan_shape", "0") == "1" and "on" or "off",
              down = get("wan_down", ""), up = get("wan_up", ""),
              prio = get("prio", "0") == "1" and "on" or "off",
-             guest_low = get("guest_low", "0") == "1" and "on" or "off" }
+             guest_low = get("guest_low", "0") == "1" and "on" or "off",
+             auto = get("wan_auto", "0") == "1" and "on" or "off",
+             min_down = get("wan_min_down", ""), max_down = get("wan_max_down", ""),
+             min_up = get("wan_min_up", ""), max_up = get("wan_max_up", ""),
+             now_down = fresh and now.down or 0, now_up = fresh and now.up or 0,
+             now_extra = fresh and now.extra or 0, now_usual = fresh and now.usual or 0,
+             now_ceil_down = fresh and now.ceil_down or 0, now_ceil_up = fresh and now.ceil_up or 0 }
 end
 local function write_shaping(form)
     local d, u = tonumber(form.down), tonumber(form.up)
@@ -742,6 +770,17 @@ local function write_shaping(form)
     if form.guest_low == "on" or form.guest_low == "off" then c:set("openvpn", SEC, "iot_guest_low", form.guest_low == "on" and "1" or "0") end
     if d then c:set("openvpn", SEC, "iot_wan_down", tostring(math.floor(d))) end
     if u then c:set("openvpn", SEC, "iot_wan_up", tostring(math.floor(u))) end
+    if form.auto == "on" or form.auto == "off" then c:set("openvpn", SEC, "iot_wan_auto", form.auto == "on" and "1" or "0") end
+    -- The range for the automatic limit: whole Mbps, or empty for "half to three times the usual speed".
+    for _, k in ipairs({ "min_down", "max_down", "min_up", "max_up" }) do
+        local v = form[k]
+        if v ~= nil then
+            local nv = tonumber(v)
+            if v == "" then c:delete("openvpn", SEC, "iot_wan_" .. k)
+            elseif nv and nv >= 1 and nv <= 1000 then c:set("openvpn", SEC, "iot_wan_" .. k, tostring(math.floor(nv)))
+            else return false, "-1" end
+        end
+    end
     c:commit("openvpn")
     guest_apply()
     return read_shaping()
@@ -766,31 +805,35 @@ end
 local function write_open(form)
     local s = tonumber(form.seconds) or 600
     s = math.max(0, math.min(math.floor(s), 3600))
-    os.execute(IOT .. (s > 0 and (" open " .. s) or " close") .. " >/dev/null 2>&1 &")
+    -- recorded before we answer (so open-then-close can't land the other way round); applied in the background
+    os.execute(IOT .. (s > 0 and (" open " .. s) or " close") .. " later >/dev/null 2>&1")
+    sync_later()
     return { open_left = s }
 end
 
 -- Disconnect one device from the home Wi-Fi now. TP-Link's allow list only turns
 -- away new joins, so a device taken off it stays connected until it is kicked.
 -- Only interfaces carrying the home network's name; guests and IoT are left alone.
-local function write_kick(form)
-    local mac = normmac(form.mac)
-    if not mac:match(MAC_PAT) then return false, "-1" end
+local function kick(mac)
     sh([[home="$(/usr/sbin/wl -i wl0.1 ssid)"; cd /sys/class/net || exit 0
 for i in wl[0-9] wl[0-9].[0-9]; do
     [ -d "$i" ] && [ "$(/usr/sbin/wl -i $i ssid)" = "$home" ] && /usr/sbin/wl -i $i deauthenticate ]] .. mac .. [[
 
 done]])
+end
+local function write_kick(form)
+    local mac = normmac(form.mac)
+    if not mac:match(MAC_PAT) then return false, "-1" end
+    kick(mac)
     return { mac = mac }
 end
 
 -- Our home allow list (iot.sh home_sync). Every change goes through iot.sh, which
 -- edits the list under its run lock, so it never races the 15 s watcher.
-local function home_run(args) os.execute(IOT .. " " .. args .. " >/dev/null 2>&1 &") end
 local function home_cmd(args) return os.execute(IOT .. " " .. args .. " >/dev/null 2>&1") == 0 end
 -- The MAC of the device making this request, from the neighbour tables (IPv4 or
 -- IPv6), so the lock can never shut out whoever is turning it on.
-local function requester_mac()
+requester_mac = function()   -- forward-declared above write_device
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local ip = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
     if ip == "" then return nil end
@@ -812,6 +855,23 @@ local function requester_mac()
     end
     return nil
 end
+-- Which allow-list entries are the mesh satellite, so the dashboard can fold them
+-- into one line. Display only: this never allows anything. Only evidence a device
+-- cannot fake counts: TP-Link's list of paired EasyMesh agents (exact MAC), or being
+-- connected to a mesh backhaul radio right now (needs the backhaul key from pairing).
+-- Not names, and not "a similar MAC": someone joining during an allow-new-devices
+-- window could use either to get folded out of sight.
+local function mesh_set()
+    local t = {}
+    local f = io.open("/tmp/easymesh_firmwareinfo_list")
+    if f then
+        local s = f:read("*a") or ""; f:close()
+        for m in s:gmatch('"mac":"([^"]+)"') do t[normmac(m)] = true end
+    end
+    local _, atif = presence()
+    for m, i in pairs(atif or {}) do if i == "wl0.2" or i == "wl1.2" then t[m] = true end end
+    return t
+end
 local function read_home()
     local seen = {}
     local f = io.open("/tmp/ax10-iot/home_seen")
@@ -832,11 +892,14 @@ local function read_home()
     end
     local function name_of(m) return nm[m] or hosts[m] or (sc[m] and sc[m].name ~= "" and sc[m].name) or "" end
     local keep, list = words(get("home_keep", ""):lower()), {}
+    local mt = mesh_set()
     for _, m in ipairs(words(get("home_allow", ""):lower())) do
-        list[#list + 1] = { mac = m, seen = seen[m], keep = has(keep, m), name = name_of(m) }
+        list[#list + 1] = { mac = m, seen = seen[m], keep = has(keep, m), name = name_of(m), mesh = mt[m] or false }
     end
     for _, m in ipairs(keep) do
-        if not has(words(get("home_allow", ""):lower()), m) then list[#list + 1] = { mac = m, seen = seen[m], keep = true, name = name_of(m) } end
+        if not has(words(get("home_allow", ""):lower()), m) then
+            list[#list + 1] = { mac = m, seen = seen[m], keep = true, name = name_of(m), mesh = mt[m] or false }
+        end
     end
     local open_left = 0
     local of = io.open("/tmp/ax10-iot/home_open_until")
@@ -847,7 +910,8 @@ local function read_home()
     end
     local df = io.open("/tmp/ax10-iot/home_drop"); local dropped = df and df:read("*l") or ""; if df then df:close() end
     return { lock = get("home_lock", "0") == "1" and "on" or "off", expire = tonumber(get("home_expire", "0")) or 0,
-             open_left = open_left, now = os.time(), list = list, dropped = words(dropped) }
+             open_left = open_left, now = os.time(), list = list, dropped = words(dropped),
+             mesh_macs = (function() local r = {}; for m in pairs(mt) do r[#r + 1] = m end; return r end)() }
 end
 local function write_home(form)
     if form.lock == "on" then
@@ -863,6 +927,7 @@ local function write_home(form)
     end
     local e = tonumber(form.expire)
     if e and e >= 0 and e <= 365 and not home_cmd("home-set expire " .. math.floor(e)) then return false, "-1" end
+    sync_later()
     return read_home()
 end
 -- Add, remove or mark one entry ("keep" entries never expire).
@@ -876,16 +941,138 @@ local function write_home_allow(form)
     if not home_cmd("home-allow " .. op .. " " .. mac) then
         return false, op == "remove" and "that's the last device on the list; turn the lock off instead" or "-1"
     end
+    -- Saved. Off the home radios right away; the rest (firewall for satellite and
+    -- wired devices, join page) follows in the background.
+    if op == "remove" and get("home_lock", "0") == "1" then kick(mac) end
+    sync_later()
     return read_home()
 end
 local function write_home_open(form)
     local s = tonumber(form.seconds) or 600
     s = math.max(0, math.min(math.floor(s), 3600))
-    home_run(s > 0 and ("home-open " .. s) or "home-close")
+    os.execute(IOT .. (s > 0 and (" home-open " .. s) or " home-close") .. " later >/dev/null 2>&1")
+    sync_later()
     return { open_left = s }
 end
 
+-- Local names (iot.sh dns_sync): <name>.<suffix> for the router and the devices.
+local function dns_label(v)
+    v = tostring(v or ""):lower():gsub("[%s_%.]", "-"):gsub("[^a-z0-9-]", ""):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")
+    return v:sub(1, 63)
+end
+local function valid_ip4(ip)
+    local a, b, c, d = tostring(ip or ""):match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return false end
+    for _, n in ipairs({ a, b, c, d }) do if tonumber(n) > 255 then return false end end
+    return true
+end
+local function read_names()
+    local hosts = {}
+    for _, e in ipairs(words(get("dns_hosts", ""))) do
+        local n, ip = e:match("^([^=]+)=(.+)$")
+        if n then hosts[#hosts + 1] = { name = n, ip = ip } end
+    end
+    -- DNS over HTTPS: on/off, provider, and how the forwarder is doing (iot-ui/doh.lua).
+    local st = {}
+    local sf = io.open("/tmp/ax10-iot/doh.stat")
+    if sf then for k, v in (sf:read("*l") or ""):gmatch("(%a+)=(%d+)") do st[k] = tonumber(v) end; sf:close() end
+    local okf = io.open("/tmp/ax10-iot/doh.ok"); if okf then okf:close() end
+    return { enable = get("dns_on", "0") == "1" and "on" or "off", domain = get("dns_domain", "home"),
+             router = get("dns_router", "router"), upstream = get("dns_upstream", "1.1.1.1 1.0.0.1"), hosts = hosts,
+             doh = get("dns_doh", "0") == "1" and "on" or "off", provider = get("dns_doh_provider", "cloudflare"),
+             doh_ok = okf ~= nil, doh_answered = st.answered or 0, doh_failed = st.failed or 0, doh_ms = st.ms or 0 }
+end
+-- form.hosts: "name=ip name=ip" (the dashboard builds it). Everything is checked
+-- here; iot.sh checks again before anything reaches dnsmasq.
+local function write_names(form)
+    local domain = dns_label(form.domain)
+    if domain == "" or domain == "local" or #domain > 30 then return false, "the suffix needs letters or digits, and can't be \"local\"" end
+    local router = {}
+    for _, n in ipairs(words(form.router)) do local l = dns_label(n); if l ~= "" then router[#router + 1] = l end end
+    if #router == 0 then return false, "the router needs at least one name" end
+    local up = {}
+    for _, u in ipairs(words(form.upstream)) do
+        if not valid_ip4(u) then return false, "DNS servers are IPv4 addresses, like 1.1.1.1" end
+        up[#up + 1] = u
+    end
+    if #up == 0 or #up > 4 then return false, "give one to four DNS servers" end
+    local hosts = {}
+    for _, e in ipairs(words(form.hosts)) do
+        local n, ip = e:match("^([^=]+)=(.+)$")
+        local l = dns_label(n)
+        if l == "" or not valid_ip4(ip) then return false, "each custom name needs a name and an IPv4 address" end
+        hosts[#hosts + 1] = l .. "=" .. ip
+    end
+    if #hosts > 64 then return false, "at most 64 custom names" end
+    local c = uci.cursor()
+    local function put(k, v) if v == "" then c:delete("openvpn", SEC, "iot_" .. k) else c:set("openvpn", SEC, "iot_" .. k, v) end end
+    local provider = form.provider
+    if provider ~= "google" and provider ~= "quad9" then provider = "cloudflare" end
+    put("dns_doh", form.doh == "on" and "1" or "0"); put("dns_doh_provider", provider)
+    put("dns_on", form.enable == "on" and "1" or "0")
+    put("dns_domain", domain); put("dns_router", table.concat(router, " "))
+    put("dns_upstream", table.concat(up, " ")); put("dns_hosts", table.concat(hosts, " "))
+    c:commit("openvpn")
+    sync_later()
+    return read_names()
+end
+
+-- Data used (iot.sh usage_sync): totals per day and month, devices for this month.
+local function read_usage()
+    local days, months, devs = {}, {}, {}
+    local month = os.date("%Y-%m")
+    local f = io.open("/tmp/ax10-iot/usage")
+    if not f then
+        -- Not counted yet in this boot (the watcher writes this file): show what was saved.
+        local function saved(key, kind, out)
+            for _, e in ipairs(words(get(key, ""))) do
+                local k, d, u = e:match("^([^=]+)=(%d+)/(%d+)$")
+                if k then out[#out + 1] = { [kind] = k, down = tonumber(d) * 1048576, up = tonumber(u) * 1048576 } end
+            end
+        end
+        saved("usage_days", "day", days); saved("usage_months", "month", months)
+    end
+    if f then
+        local nm, sc, hosts = names(), stock_clients(), {}
+        local lf = io.open("/tmp/dhcp.leases")
+        if lf then
+            for line in lf:lines() do
+                local m, h = line:match("^%S+%s+(%S+)%s+%S+%s+(%S+)")
+                if m and h ~= "*" then hosts[normmac(m)] = h end
+            end
+            lf:close()
+        end
+        for line in f:lines() do
+            local k, d, u = line:match("^(%S+) (%d+) (%d+)")
+            d, u = tonumber(d), tonumber(u)
+            if k and d and u then
+                local day = k:match("^T:(%d%d%d%d%-%d%d%-%d%d)$")
+                local mon = k:match("^M:(%d%d%d%d%-%d%d)$")
+                local dm, mac = k:match("^D:(%d%d%d%d%-%d%d):(.+)$")
+                if day then days[#days + 1] = { day = day, down = d, up = u }
+                elseif mon then months[#months + 1] = { month = mon, down = d, up = u }
+                elseif dm == month then
+                    devs[#devs + 1] = { mac = mac:upper(), down = d, up = u,
+                                        name = nm[mac] or hosts[mac] or (sc[mac] and sc[mac].name ~= "" and sc[mac].name) or "" }
+                end
+            end
+        end
+        f:close()
+    end
+    table.sort(days, function(a, b) return a.day < b.day end)
+    table.sort(months, function(a, b) return a.month < b.month end)
+    table.sort(devs, function(a, b) return (a.down + a.up) > (b.down + b.up) end)
+    return { today = os.date("%Y-%m-%d"), month = month, days = days, months = months, devices = devs }
+end
+
 local dispatch_tbl = {
+    usage = {
+        ["read"]  = { cb = read_usage },
+    },
+    names = {
+        ["read"]  = { cb = read_names },
+        ["write"] = { cb = write_names },
+    },
     home = {
         ["read"]  = { cb = read_home },
         ["write"] = { cb = write_home },

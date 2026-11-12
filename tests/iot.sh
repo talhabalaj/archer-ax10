@@ -119,12 +119,17 @@ case "\$op" in
   -S) grep "^\$tbl \$1 " "$T/rules6" 2>/dev/null || true ;;
 esac
 EOF
+# dnsmasq --test: refuses the config while $T/dnsmasq_reject exists.
+cat > "$T/bin/dnsmasq-test" <<EOF
+#!/bin/sh
+[ ! -f "$T/dnsmasq_reject" ]
+EOF
 chmod +x "$T/bin/"*
 
 # iot <uci stub> <script> <args...>: run iot.sh with every host touch-point stubbed.
 iot() {
   u="$1"; s="$2"; shift 2
-  env UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
+  env WAN_DEV="${WAN_DEV:-none}" UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" DHCP6S_CONF="$T/dhcp6s.conf" DHCP6S_INIT="$T/bin/none" DNSMASQ_HUP=true COMMIT_FLASH="$T/bin/none" DOH_WARMUP=0 DNSMASQ_BIN="$T/bin/dnsmasq-test" DNSMASQ_MAIN="$T/dnsmasq.conf" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
       IPT="$T/bin/iptables" IPT6="$T/bin/ip6tables" TC="$T/bin/tc" \
       MOUNT="$T/bin/mount" UMOUNT="$T/bin/mount" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
@@ -135,6 +140,8 @@ iot() {
 }
 run() { iot "$T/bin/uci" "$ROOT/iot.sh" "$@"; }
 
+# ticket <dir> <name> [pid]: a lock ticket as iot.sh writes it (start time inside).
+ticket() { mkdir -p "$1/$2"; awk '{print $22}' "/proc/${3:-$$}/stat" > "$1/$2/start" 2>/dev/null || : > "$1/$2/start"; }
 fail() { echo "FAIL: $1"; echo "--- calls"; cat "$T/calls"; exit 1; }
 has() { grep -qF -- "$1" "$T/calls" || fail "expected call: $1"; }
 
@@ -355,6 +362,8 @@ case "\$*" in
   *iot_wan_down*) echo "90" ;;
   *iot_wan_up*) echo "40" ;;
   *iot_prio*) [ -f "$T/prio_on" ] && echo 1 || echo 0 ;;
+  *iot_wan_auto*) [ -f "$T/auto_on" ] && echo 1 || echo 0 ;;
+  *iot_wan_max_down*) echo 200 ;;
   *iot_guest_low*) [ -f "$T/glow_on" ] && echo 1 || echo 0 ;;
   *) exec "$T/bin/uci" "\$@" ;;
 esac
@@ -466,26 +475,36 @@ has "mount --bind $T/run/ui/dash/index.html $T/index.html"
 has "mount --bind $T/run/ui/dash/login.html $T/www/login.html"
 
 # Lock 1: held by a live process -> the run gives up and changes nothing.
-mkdir -p "$T/run/lock"; echo $$ > "$T/run/lock/pid"
+ticket "$T/run/locks" "1.$$"
 : > "$T/calls"
 set +e; LOCK_WAIT=1 run apply >/dev/null 2>&1; st=$?; set -e
 [ "$st" -ne 0 ] || fail "apply succeeded while the lock was held"
 [ ! -s "$T/calls" ] || fail "apply touched the router while the lock was held"
-[ "$(cat "$T/run/lock/pid" 2>/dev/null)" = "$$" ] || fail "live lock was disturbed"
-rm -rf "$T/run/lock"
+[ -d "$T/run/locks/1.$$" ] || fail "live lock was disturbed"
+[ "$(ls "$T/run/locks" | wc -l)" -eq 1 ] || fail "a run that gave up left its ticket behind"
+rm -rf "$T/run/locks"
 
 # Lock 2: a lock left by a dead process is taken over.
 sh -c 'exit 0' & dead=$!; wait "$dead" 2>/dev/null || true
-mkdir -p "$T/run/lock"; echo "$dead" > "$T/run/lock/pid"
+mkdir -p "$T/run/locks/1.$dead" "$T/run/locks/c.$dead"
 rm -f "$T/run/fw.sig"; : > "$T/calls"
 run apply >/dev/null 2>&1 || true
 [ -s "$T/calls" ] || fail "stale lock was not taken over"
-[ ! -e "$T/run/lock" ] || fail "lock left behind after taking over a stale one"
+[ -z "$(ls "$T/run/locks" 2>/dev/null)" ] || fail "lock left behind after a dead holder"
+
+# Lock 2b: a ticket whose pid is alive but belongs to another process (recycled pid,
+# or a ticket that never got its start time) does not hold the lock. Needs /proc.
+if [ -r "/proc/$$/stat" ]; then
+  mkdir -p "$T/run/locks/1.$$"; echo 1 > "$T/run/locks/1.$$/start"; : > "$T/calls"
+  LOCK_WAIT=1 run apply >/dev/null 2>&1 || true
+  [ -s "$T/calls" ] || fail "a recycled pid's ticket blocked the lock"
+  rm -rf "$T/run/locks"
+fi
 
 # Lock 3: released after normal runs.
 run status >/dev/null 2>&1 || true
 run apply >/dev/null 2>&1 || true
-[ ! -e "$T/run/lock" ] || fail "lock not released after a normal run"
+[ -z "$(ls "$T/run/locks" 2>/dev/null)" ] || fail "lock not released after a normal run"
 
 # Lock 4: concurrent runs take turns, so the rules end up in order.
 rm -f "$T/run/fw.sig"
@@ -497,7 +516,17 @@ acc_ln="$(grep -nxF "$acc" "$T/rules" | head -n1 | cut -d: -f1)"
 last_ln="$(grep -n '^filter AX10_IOT_FWD ' "$T/rules" | tail -n1 | cut -d: -f1)"
 [ -n "$drop_ln" ] && [ "$drop_ln" -lt "$acc_ln" ] || fail "concurrent runs: drop not before accept"
 [ "$acc_ln" -eq "$last_ln" ] || fail "concurrent runs: final accept is not last"
-[ ! -e "$T/run/lock" ] || fail "lock left behind after concurrent runs"
+[ -z "$(ls "$T/run/locks" 2>/dev/null)" ] || fail "lock left behind after concurrent runs"
+
+# Lock 5: a dead holder plus many waiters at once (the case that let two runs through):
+# the firewall must still be built by one run at a time. Repeated to give a race a chance.
+for round in 1 2 3; do
+  sh -c 'exit 0' & dead=$!; wait "$dead" 2>/dev/null || true
+  mkdir -p "$T/run/locks/1.$dead"; rm -f "$T/run/fw.sig"
+  run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & run apply >/dev/null 2>&1 & wait
+  [ "$(grep -cxF "$acc" "$T/rules")" -eq 1 ] || fail "dead holder + 5 waiters: two runs built the firewall at once (round $round)"
+  [ -z "$(ls "$T/run/locks" 2>/dev/null)" ] || fail "tickets left behind (round $round)"
+done
 
 # --- home allow list: radios take listed MACs only, unlisted ones are kicked, and an
 # unlisted home client behind the satellite (04 in the client list) is dropped by MAC;
@@ -547,7 +576,8 @@ cat > "$T/bin/uci7" <<EOF
 #!/bin/sh
 case "\$*" in
   "-q get openvpn.archer_boot.iot_home_"*|"-q get openvpn.archer_boot.iot_enabled") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
-  "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
+  "-q get openvpn.archer_boot.iot_usage_"*) k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
+  "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget"|"-q get openvpn.archer_boot.iot_caps"|"-q get openvpn.archer_boot.iot_noinet"|"-q get openvpn.archer_boot.iot_guest_fast"|"-q get openvpn.archer_boot.iot_lan_allow"|"-q get openvpn.archer_boot.iot_hidden"|"-q get openvpn.archer_boot.iot_hidden_devices") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
   "set openvpn.archer_boot.iot_"*) kv="\${2#openvpn.archer_boot.}"; echo "\${kv#*=}" > "$T/u/\${kv%%=*}" ;;
   "commit openvpn") ;;
   "show wireless") echo "wireless.guest2g.guest='on'" ;;
@@ -561,6 +591,7 @@ chmod +x "$T/bin/uci7"
 cat > "$T/bin/lua" <<EOF
 #!/bin/sh
 echo "lua \$*" >> "$T/calls"
+case "\$*" in *"doh.lua check"*) [ -f "$T/doh_healthy" ]; exit ;; esac
 exec sleep 30
 EOF
 chmod +x "$T/bin/lua"; mkdir -p "$T/www/js/libs"; : > "$T/www/js/libs/jquery.min.js"; : > "$T/www/js/libs/jquery.qrcode.min.js"
@@ -584,12 +615,29 @@ h home-allow add "bad;rm" && fail "bad MAC accepted"
 # Re-adding an expired device starts a fresh clock instead of expiring it again.
 echo 1 > "$T/u/iot_home_expire"
 echo "aa:bb:cc:00:00:50 1000000000" >> "$T/run/home_seen"
-h home-allow add aa:bb:cc:00:00:50
+h home-allow add aa:bb:cc:00:00:50; h home
 grep -q "aa:bb:cc:00:00:50" "$T/u/iot_home_allow" || fail "re-added device expired again at once"
+[ -z "$(ls "$T/run/cfglocks" 2>/dev/null)" ] || fail "settings lock left behind"
+# A settings edit does not wait for a rebuild in progress (it takes only the settings lock)...
+ticket "$T/run/locks" "1.$$"
+LOCK_WAIT=1 h home-allow add aa:bb:cc:00:00:51 || fail "a settings edit waited for the run lock"
+rm -rf "$T/run/locks"
+# ...but it does wait for another settings edit.
+ticket "$T/run/cfglocks" "1.$$"
+iot "$T/bin/uci7" "$ROOT/iot.sh" home-allow add aa:bb:cc:00:00:52 >/dev/null 2>&1 & ep=$!
+sleep 2; grep -q "aa:bb:cc:00:00:52" "$T/u/iot_home_allow" && fail "two settings edits ran at once"
+rm -rf "$T/run/cfglocks/1.$$"; wait "$ep" || fail "the waiting settings edit failed"
+grep -q "aa:bb:cc:00:00:52" "$T/u/iot_home_allow" || fail "the waiting settings edit was lost"
+h home-allow remove aa:bb:cc:00:00:51; h home-allow remove aa:bb:cc:00:00:52
 # Expiry never empties the list.
 echo "aa:bb:cc:00:00:60" > "$T/u/iot_home_allow"; : > "$T/u/iot_home_keep"
 echo "aa:bb:cc:00:00:60 1000000000" > "$T/run/home_seen"; h home
 [ -n "$(cat "$T/u/iot_home_allow")" ] || fail "expiry emptied the allow list"
+# With the lock off, nothing is ever taken off the saved list.
+echo 0 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:60 aa:bb:cc:00:00:61" > "$T/u/iot_home_allow"
+printf '%s\n' "aa:bb:cc:00:00:60 1000000000" "aa:bb:cc:00:00:61 1000000000" > "$T/run/home_seen"; h home
+[ "$(cat "$T/u/iot_home_allow")" = "aa:bb:cc:00:00:60 aa:bb:cc:00:00:61" ] || fail "entries expired off the allow list while the lock was off: $(cat "$T/u/iot_home_allow")"
+echo 1 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:60" > "$T/u/iot_home_allow"
 echo 0 > "$T/u/iot_home_expire"
 # The last device can't be removed while the lock is on.
 h home-allow remove aa:bb:cc:00:00:60 && fail "removed the last device with the lock on"
@@ -597,8 +645,13 @@ h home-allow remove aa:bb:cc:00:00:60 && fail "removed the last device with the 
 : > "$T/inittab"; : > "$T/calls"; h stop
 grep -q "ax10-iot-watch" "$T/inittab" || fail "stop removed the watcher the home lock needs"
 grep -q "raw -D PREROUTING -i br-lan -j AX10_HOME" "$T/calls" && fail "stop tore down the home lock"
-echo 0 > "$T/u/iot_home_lock"; h home-set lock 0
-grep -q "ax10-iot-watch" "$T/inittab" && fail "watcher left running with nothing to watch"
+echo 0 > "$T/u/iot_home_lock"; h home-set lock 0; h sync
+grep -q "ax10-iot-watch" "$T/inittab" || fail "the watcher was dropped"
+# The watcher always runs, even with every feature off: it is what applies saved
+# changes if an "apply soon" request never got through.
+echo 0 > "$T/u/iot_usage_on"; h sync
+grep -q "ax10-iot-watch" "$T/inittab" || fail "the watcher was dropped with every feature off"
+rm -f "$T/u/iot_usage_on"
 
 # A re-added device's old last-seen time is gone from the saved copy too (reboot-safe).
 echo "aa:bb:cc:00:00:70=1000000000 aa:bb:cc:00:00:20=1000000001" > "$T/u/iot_home_seen"; rm -f "$T/run/home_seen"
@@ -617,6 +670,135 @@ grep -q "ee:05" "$T/u/iot_static" && fail "forget kept the fixed address"
 grep -q "aa:bb:cc:dd:ee:01" "$T/u/iot_static" || fail "forget dropped another device"
 grep -q "aa:bb:cc:dd:ee:05" "$T/u/iot_forget" || fail "forget not recorded"
 rm -f "$T/u/iot_static" "$T/u/iot_forget"
+
+# forget-device: every setting for the MACs goes, others stay; hidden; one commit.
+echo 0 > "$T/u/iot_home_lock"
+echo "aa:bb:cc:00:00:20 AA-BB-CC-00-00-90 aa:bb:cc:00:00:91" > "$T/u/iot_home_allow"; echo "aa:bb:cc:00:00:91" > "$T/u/iot_home_keep"
+echo "aa:bb:cc:00:00:90=5/2 aa:bb:cc:00:00:20=3/3" > "$T/u/iot_caps"; echo "AA:BB:CC:00:00:91" > "$T/u/iot_noinet"
+echo "aa:bb:cc:00:00:90 aa:bb:cc:00:00:20" > "$T/u/iot_guest_fast"; echo "aa:bb:cc:00:00:90" > "$T/u/iot_lan_allow"
+echo "aa:bb:cc:00:00:91,192.168.50.20" > "$T/u/iot_static"; : > "$T/u/iot_forget"; : > "$T/u/iot_hidden_devices"; echo 1 > "$T/u/iot_hidden"
+echo "aa:bb:cc:00:00:90=1700000001 aa:bb:cc:00:00:20=1700000002" > "$T/u/iot_home_seen"
+h forget-device aa:bb:cc:00:00:91,AA-BB-CC-00-00-90 || fail "forget-device failed"
+grep -qi "00[:-]00[:-]9[01]" "$T/u/iot_home_allow" "$T/u/iot_home_keep" "$T/u/iot_caps" "$T/u/iot_guest_fast" "$T/u/iot_lan_allow" && fail "forget-device left allow list, pin, cap or switch entries"
+grep -qi "00:91" "$T/u/iot_noinet" "$T/u/iot_static" && fail "forget-device left settings or the IoT pin"
+grep -q "00:00:90" "$T/u/iot_home_seen" && fail "forget-device left the last-seen time"
+grep -q "aa:bb:cc:00:00:20=3/3" "$T/u/iot_caps" || fail "forget-device dropped another device's cap"
+grep -q "aa:bb:cc:00:00:20" "$T/u/iot_guest_fast" || fail "forget-device dropped another device's switch"
+grep -q "aa:bb:cc:00:00:90" "$T/u/iot_hidden_devices" && grep -q "aa:bb:cc:00:00:91" "$T/u/iot_hidden_devices" || fail "forgotten devices not hidden"
+[ "$(cat "$T/u/iot_hidden")" = 1 ] || fail "forget-device changed the hide-network-name setting"
+grep -q "aa:bb:cc:00:00:91" "$T/u/iot_forget" || fail "forgotten IoT device could be re-pinned"
+grep -q "aa:bb:cc:00:00:90" "$T/u/iot_forget" && fail "a device with no fixed address put on the no-re-pin list"
+h forget-device "x;y" && fail "forget-device accepted a bad MAC"
+# A batch that would empty the locked allow list is refused whole: nothing changes.
+echo 1 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:20 aa:bb:cc:00:00:21" > "$T/u/iot_home_allow"; : > "$T/u/iot_home_keep"
+before="$(cat "$T/u/iot_home_allow" "$T/u/iot_caps" "$T/u/iot_hidden_devices")"
+h forget-device aa:bb:cc:00:00:20,aa:bb:cc:00:00:21 && fail "forgot every allowed device with the lock on"
+[ "$(cat "$T/u/iot_home_allow" "$T/u/iot_caps" "$T/u/iot_hidden_devices")" = "$before" ] || fail "a refused forget changed settings"
+h forget-device aa:bb:cc:00:00:20,bad && fail "batch with a bad MAC accepted"
+[ "$(cat "$T/u/iot_home_allow" "$T/u/iot_caps" "$T/u/iot_hidden_devices")" = "$before" ] || fail "a batch with a bad MAC changed settings"
+# A forgotten device that reconnects (20 is on the home radio) is un-hidden.
+echo "aa:bb:cc:00:00:20 aa:bb:cc:00:00:99" > "$T/u/iot_hidden_devices"; h home
+grep -q "aa:bb:cc:00:00:20" "$T/u/iot_hidden_devices" && fail "reconnected device still hidden"
+grep -q "aa:bb:cc:00:00:99" "$T/u/iot_hidden_devices" || fail "offline forgotten device un-hidden"
+# entry: one device's setting, others untouched; a new setting un-hides the device.
+echo 0 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:20=3/3" > "$T/u/iot_caps"
+h entry caps AA-BB-CC-00-00-99 5/2 || fail "entry caps failed"
+[ "$(cat "$T/u/iot_caps")" = "aa:bb:cc:00:00:20=3/3 aa:bb:cc:00:00:99=5/2" ] || fail "entry caps wrote '$(cat "$T/u/iot_caps")'"
+grep -q "aa:bb:cc:00:00:99" "$T/u/iot_hidden_devices" && fail "a device given a cap stayed hidden"
+h entry caps aa:bb:cc:00:00:99 off; [ "$(cat "$T/u/iot_caps")" = "aa:bb:cc:00:00:20=3/3" ] || fail "entry caps off left the cap"
+h entry noinet aa:bb:cc:00:00:99 on; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_noinet" || fail "entry noinet on did not save"
+h entry noinet aa:bb:cc:00:00:99 off; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_noinet" && fail "entry noinet off left the entry"
+h entry caps aa:bb:cc:00:00:99 "5/2;reboot" && fail "entry accepted a bad cap"
+h entry static aa:bb:cc:00:00:99 on && fail "entry accepted a list it does not own"
+rm -f "$T/u/iot_caps" "$T/u/iot_noinet" "$T/u/iot_guest_fast" "$T/u/iot_lan_allow" "$T/u/iot_static" "$T/u/iot_forget" "$T/u/iot_hidden_devices" "$T/u/iot_hidden" "$T/u/iot_home_seen"
+
+# --- local names: hosts file, dnsmasq lines, DHCP hands out the router, and back again.
+cat > "$T/bin/uci9" <<EOF
+#!/bin/sh
+echo "uci \$*" >> "$T/calls"
+case "\$*" in
+  *iot_dns_on*) cat "$T/dns_on" ;;
+  *iot_dns_doh_provider*) echo quad9 ;;
+  *iot_dns_doh*) cat "$T/doh_on" 2>/dev/null || echo 0 ;;
+  *iot_dns_domain*) if [ -f "$T/dns_nl" ]; then printf 'ho\nme\nserver=6.6.6.6\n'; else echo "Ho me!"; fi ;;
+  *iot_dns_router*) echo "router Talha" ;;
+  *iot_dns_hosts*) echo "nas=192.168.0.9 bad=999.x cam=192.168.50.187" ;;
+  *iot_dns_upstream*) echo "1.1.1.1 evil;rm 9.9.9.9 999.1.1.1 1.2.3" ;;
+  *"get openvpn.archer_boot.iot_dns_prev6"*) cat "$T/prev6" 2>/dev/null ;;
+  "set openvpn.archer_boot.iot_dns_prev6="*) v="\$*"; echo "\${v#set openvpn.archer_boot.iot_dns_prev6=}" > "$T/prev6" ;;
+  *"get openvpn.archer_boot.iot_names"*) printf '%s\n' "aa:bb:cc:dd:ee:07=Living Room TV" "aa:bb:cc:00:00:55=No Lease" ;;
+  "-q get dhcp.lan.dhcp_option") cat "$T/dhcp_opt" ;;
+  "set dhcp.lan.dhcp_option="*) v="\$*"; echo "\${v#set dhcp.lan.dhcp_option=}" > "$T/dhcp_opt" ;;
+  "commit dhcp") ;;
+  "set "*) exit 0 ;;
+  *) exec "$T/bin/uci" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/uci9"
+printf '%s\n' "1000 aa:bb:cc:dd:ee:07 192.168.0.50 laptop *" > "$T/leases"
+echo "3,192.168.0.1 6,1.1.1.1,1.0.0.1" > "$T/dhcp_opt"; echo 1 > "$T/dns_on"
+printf 'option domain-name-servers 2001:db8::1;\n\noption x y;\n' > "$T/dhcp6s.conf"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+[ "$(cat "$T/dhcp_opt")" = "3,192.168.0.1 6,192.168.0.1" ] || fail "DHCP not handing out the router as DNS: $(cat "$T/dhcp_opt")"
+for l in "192.168.0.1 router.ho-me" "192.168.0.1 talha.ho-me" "192.168.0.9 nas.ho-me" "192.168.50.187 cam.ho-me" "192.168.0.50 living-room-tv.ho-me"; do
+  grep -qxF "$l" "$T/run/hosts" || fail "hosts file lacks '$l': $(cat "$T/run/hosts")"
+done
+grep -q "bad\|no-lease" "$T/run/hosts" && fail "hosts file has a bad record or a device without an address"
+for l in "domain=ho-me" "local=/ho-me/" "addn-hosts=$T/run/hosts" "no-resolv" "server=1.1.1.1" "server=9.9.9.9"; do
+  grep -qxF "$l" "$T/dnsmasq.conf" || fail "dnsmasq.conf lacks '$l'"
+done
+grep "^server=" "$T/dnsmasq.conf" | grep -q "evil\|rm\|999\|=1\.2\.3$" && fail "a bad upstream server reached dnsmasq.conf"   # (server lines only: the temp path may contain "rm")
+[ "$(cat "$T/prev6")" = "6,1.1.1.1,1.0.0.1" ] || fail "the previous DHCP DNS setting was not remembered"
+# A suffix saved with line breaks in it stays one label, never extra dnsmasq lines.
+: > "$T/dns_nl"; iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+grep -qxF "domain=homeserver6-6-6-6" "$T/dnsmasq.conf" || fail "suffix with line breaks: $(grep '^domain=' "$T/dnsmasq.conf")"
+grep -qx "me\|server=6.6.6.6" "$T/dnsmasq.conf" && fail "a line break in the suffix became a dnsmasq line"
+rm -f "$T/dns_nl"; iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+# Settings dnsmasq refuses are not left in place.
+before="$(cat "$T/dnsmasq.conf")"; : > "$T/dnsmasq_reject"; echo 0 > "$T/dns_on"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+[ "$(cat "$T/dnsmasq.conf")" = "$before" ] || fail "a block dnsmasq refused was left in dnsmasq.conf"
+rm -f "$T/dnsmasq_reject" "$T/run/dnsmasq.bad"; echo 1 > "$T/dns_on"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+has "iptables -t nat -I prerouting_rule_dns 1 -i br-lan -d 192.168.0.1 -p udp --dport 53 -j ACCEPT"
+has "iptables -t nat -I prerouting_rule_dns 1 -i br-lan -d 192.168.0.1 -p tcp --dport 53 -j ACCEPT"
+grep -q "domain-name-servers" "$T/dhcp6s.conf" && fail "IPv6 DNS servers still advertised"
+grep -q "option x y" "$T/dhcp6s.conf" || fail "other DHCPv6 options lost"
+# DNS over HTTPS: the forwarder runs against the chosen provider; dnsmasq uses only it
+# while it answers, and the plain servers while it doesn't.
+: > "$T/run/ui/doh.lua"; : > "$T/run/ui/cacert.pem"; echo 1 > "$T/doh_on"; : > "$T/doh_healthy"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+i=0; while [ $i -lt 30 ] && ! grep -qF "doh.lua 5053" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "doh.lua 5053 9.9.9.9 dns.quad9.net $T/run/ui/cacert.pem"
+grep -qxF "server=127.0.0.1#5053" "$T/dnsmasq.conf" || fail "dnsmasq not using the DNS-over-HTTPS forwarder"
+grep -qxF "server=1.1.1.1" "$T/dnsmasq.conf" && fail "plain DNS server still in use next to DNS over HTTPS"
+rm -f "$T/doh_healthy"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+grep -qxF "server=1.1.1.1" "$T/dnsmasq.conf" || fail "no fallback to plain DNS while the forwarder is not answering"
+grep -q "127.0.0.1#5053" "$T/dnsmasq.conf" && fail "dnsmasq still pointed at a forwarder that is not answering"
+echo 0 > "$T/doh_on"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+[ -e "$T/run/doh.pid" ] && fail "DNS-over-HTTPS forwarder left running after it was switched off"
+# Off again: DHCP hands out the upstream servers, the dnsmasq lines go.
+echo 0 > "$T/dns_on"
+iot "$T/bin/uci9" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
+[ "$(cat "$T/dhcp_opt")" = "3,192.168.0.1 6,1.1.1.1,1.0.0.1" ] || fail "DHCP DNS not put back as it was: $(cat "$T/dhcp_opt")"
+grep -q "^domain=\|no-resolv" "$T/dnsmasq.conf" && fail "local-names lines left in dnsmasq.conf"
+has "iptables -t nat -D prerouting_rule_dns -i br-lan -d 192.168.0.1 -p udp --dport 53 -j ACCEPT"
+: > "$T/leases"; rm -f "$T/dhcp6s.conf"
+
+# --- speed limits don't need the IoT network (uci7 has it switched off).
+echo 0 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:20=5/2" > "$T/u/iot_caps"; rm -f "$T/run/shape.sig"; : > "$T/inittab"; : > "$T/calls"
+h sync
+has "tc class add dev br-lan parent 1:1 classid 1:11 htb rate 5mbit ceil 5mbit"
+grep -q "ax10-iot-watch" "$T/inittab" || fail "no watcher kept for speed limits with the IoT network off"
+# ...and the dashboard's own "apply speed limits" call (`shape`) registers the watcher
+# too: with a guest limit set and no guest connected yet, nothing else would.
+echo 0 > "$T/u/iot_usage_on"; : > "$T/inittab"; h shape
+grep -q "ax10-iot-watch" "$T/inittab" || fail "\`shape\` did not register the watcher speed limits need"
+h entry caps aa:bb:cc:00:00:20 off; : > "$T/calls"; h sync
+has "tc qdisc del dev br-lan root"
+rm -f "$T/u/iot_caps" "$T/u/iot_usage_on"
 
 # --- join-home page: a listed device on the guest Wi-Fi (08) gets the page, not internet.
 echo 1 > "$T/u/iot_home_lock"; echo "aa:bb:cc:00:00:20 aa:bb:cc:00:00:08" > "$T/u/iot_home_allow"; : > "$T/calls"
@@ -645,6 +827,127 @@ has "iptables -t nat -D PREROUTING -i br-lan -j AX10_PORTAL_NAT"
 [ -e "$T/run/portal.pid" ] && fail "join page server left running"
 echo 0 > "$T/u/iot_home_lock"; h home
 
+# --- automatic whole-connection limit: the lanes' rates change in place, and the
+# controller runs with the usual speeds and the range.
+: > "$T/run/ui/autorate.lua"; echo 1 > "$T/wan_on"; : > "$T/prio_on"; : > "$T/glow_on"; : > "$T/auto_on"; rm -f "$T/run/shape.sig"; : > "$T/calls"
+iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+i=0; while [ $i -lt 30 ] && ! grep -qF "autorate.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "autorate.lua $T/run/rate.sh $T/run/autorate.stat br-lan ifb0 90 40 45 200 20 120"
+[ -f "$T/run/rate.sh" ] || fail "no rate script written"
+: > "$T/calls"; sh "$T/run/rate.sh" 60000 20000 || fail "rate script failed"
+has "tc class change dev br-lan parent 1: classid 1:1 htb rate 60000kbit ceil 60000kbit burst 150000 cburst 150000"
+has "tc class change dev br-lan parent 1:1 classid 1:2 htb rate 24000kbit ceil 60000kbit burst 150000 cburst 150000 prio 0"
+has "tc class change dev br-lan parent 1:1 classid 1:10 htb rate 30000kbit ceil 60000kbit burst 150000 cburst 150000 prio 1"
+has "tc class change dev br-lan parent 1:3 classid 1:4 htb rate 6000kbit ceil 60000kbit burst 150000 cburst 150000 prio 2"
+has "tc class change dev ifb0 parent 1: classid 1:1 htb rate 20000kbit ceil 20000kbit burst 50000 cburst 50000"
+sh "$T/run/rate.sh" "1;reboot" 20000 2>/dev/null && fail "rate script accepted a bad rate"
+# Unchanged on the next run; stopped when automatic is switched off.
+: > "$T/calls"; iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+grep -q "autorate.lua" "$T/calls" && fail "controller restarted with no change"
+rm -f "$T/auto_on"; : > "$T/calls"; iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+[ -e "$T/run/autorate.pid" ] && fail "controller left running after automatic was switched off"
+has "tc class change dev br-lan parent 1: classid 1:1 htb rate 90000kbit ceil 90000kbit"
+has "tc class change dev ifb0 parent 1: classid 1:1 htb rate 40000kbit ceil 40000kbit"
+rm -f "$T/prio_on" "$T/glow_on"; echo 0 > "$T/wan_on"; iot "$T/bin/uci3" "$ROOT/iot.sh" shape >/dev/null 2>&1 || true
+
+# --- data usage: counted from the internet connection's counters, across counter
+# restarts, and brought back from flash after a reboot.
+M=1048576; day="$(date +%Y-%m-%d)"; mon="${day%-*}"
+mkdir -p "$T/net/wan0/statistics"; rm -f "$T/run/usage" "$T/run/usage.last" "$T/run/usage.saved" "$T/u/iot_usage_"*
+wanc() { echo $(($1 * M)) > "$T/net/wan0/statistics/rx_bytes"; echo $(($2 * M)) > "$T/net/wan0/statistics/tx_bytes"; }
+usage() { WAN_DEV=wan0 USAGE_BOOT="$BOOTID" iot "$T/bin/uci7" "$ROOT/iot.sh" usage >/dev/null 2>&1; awk -v k="$1" '$1 == k { printf "%.0f/%.0f", $2 / 1048576, $3 / 1048576 }' "$T/run/usage"; }
+# The very first run on a router that has been up a while: what the counter already
+# holds is history from before counting began, so it only sets the baseline.
+BOOTID=boot1
+wanc 100 50; [ "$(usage "T:$day")" = "0/0" ] || fail "usage: history from before counting began was counted ($(usage "T:$day"))"
+wanc 400 90; [ "$(usage "T:$day")" = "300/40" ] || fail "usage: growth not added ($(usage "T:$day"))"
+[ "$(usage "M:$mon")" = "300/40" ] || fail "usage: month total wrong ($(usage "M:$mon"))"
+wanc 10 5;   [ "$(usage "T:$day")" = "310/45" ] || fail "usage: a restarted counter not counted as new ($(usage "T:$day"))"
+[ "$(usage "T:$day")" = "310/45" ] || fail "usage: an unchanged counter was counted again"
+grep -q "$day=0/0" "$T/u/iot_usage_days" || fail "usage: saved to flash more than once an hour ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
+rm -f "$T/run/usage.saved"; usage "T:$day" >/dev/null                      # the hour is up
+grep -q "$day=310/45" "$T/u/iot_usage_days" || fail "usage: not saved to flash ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
+[ "$(cat "$T/u/iot_usage_boot")" = boot1 ] || fail "usage: the boot it is counting in was not recorded"
+# The baseline file lost while the router keeps running: nothing is counted twice.
+rm -f "$T/run/usage.last"; [ "$(usage "T:$day")" = "310/45" ] || fail "usage: lost baseline made it count the same traffic again ($(usage "T:$day"))"
+wanc 12 6; [ "$(usage "T:$day")" = "312/46" ] || fail "usage: counting did not carry on after a lost baseline ($(usage "T:$day"))"
+# A reboot: RAM gone, a new boot, the counter starts again from zero: all of it is new.
+rm -f "$T/run/usage" "$T/run/usage.last" "$T/run/usage.saved"; BOOTID=boot2; wanc 7 3
+# (From the last hourly save, 310/45: what came after it went with the RAM.)
+[ "$(usage "T:$day")" = "317/48" ] || fail "usage: log not carried over a reboot, or the new boot's traffic not counted ($(usage "T:$day"))"
+# Device history: the previous calendar month is kept on the 1st of March, May and July too.
+if date -d @0 +%Y >/dev/null 2>&1; then
+  for d in 2026-03-01 2026-05-01 2026-07-01 2026-01-01; do
+    y="${d%%-*}"; m="${d#*-}"; m="${m%%-*}"; m=$((1$m - 100)); if [ $m = 1 ]; then pv="$((y - 1))-12"; else pv="$(printf '%04d-%02d' $y $((m - 1)))"; fi
+    printf '%s\n' "D:$pv:aa:bb:cc:00:00:20 1048576 1048576" "D:2025-01:aa:bb:cc:00:00:20 1048576 1048576" > "$T/run/usage"
+    WAN_DEV=wan0 USAGE_BOOT=boot2 USAGE_DAY="$d" iot "$T/bin/uci7" "$ROOT/iot.sh" usage >/dev/null 2>&1
+    grep -q "^D:$pv:" "$T/run/usage" || fail "usage: last month's device figures ($pv) dropped on $d"
+    grep -q "^D:2025-01:" "$T/run/usage" && fail "usage: old device figures kept on $d"
+  done
+fi
+rm -rf "$T/net/wan0" "$T/run/usage"* "$T/u/iot_usage_"*
+
+# --- IPv6 client guard: restarted only after two misses, and only if its config is there.
+cat > "$T/bin/dhcp6c" <<EOF
+#!/bin/sh
+echo "dhcp6c \$*" >> "$T/calls"
+EOF
+chmod +x "$T/bin/dhcp6c"; mkdir -p "$T/d6" "$T/net/ppp9"; printf 'interface ppp9 {\n\tsend ia-pd 1;\n};\n' > "$T/d6/dhcp6c.conf"
+cat > "$T/bin/uci10" <<EOF
+#!/bin/sh
+case "\$*" in *network.wan.ifname*) echo eth9 ;; *network.wan.type*) echo normal ;; *) exec "$T/bin/uci" "\$@" ;; esac
+EOF
+chmod +x "$T/bin/uci10"
+# pidof stub: "running" (and which pids) is whatever $T/pidof_out holds.
+cat > "$T/bin/pidof" <<EOF
+#!/bin/sh
+[ -s "$T/pidof_out" ] && cat "$T/pidof_out"
+EOF
+chmod +x "$T/bin/pidof"
+guard() { DHCP6C_DIR="$1" DHCP6C_BIN="$T/bin/dhcp6c" PIDOF="$T/bin/pidof" DHCP6C_SETTLE=0 iot "$T/bin/uci10" "$ROOT/iot.sh" guard >/dev/null 2>&1 || true; }
+started() { i=0; while [ $i -lt 10 ] && ! grep -q "^dhcp6c " "$T/calls"; do sleep 0.1; i=$((i + 1)); done; grep -q "^dhcp6c " "$T/calls"; }
+rm -f "$T/run/dhcp6c.miss" "$T/run/dhcp6c.tries" "$T/pidof_out"; : > "$T/calls"
+guard "$T/nowhere"; guard "$T/nowhere"
+started && fail "IPv6 client started although it has no config"
+guard "$T/d6"; started && fail "IPv6 client restarted on the first miss"
+# The config rewritten between the two checks (a connect in progress): start over.
+printf 'interface ppp9 {\n\tsend ia-pd 2;\n};\n' > "$T/d6/dhcp6c.conf"; guard "$T/d6"
+started && fail "IPv6 client restarted although its config had just been rewritten"
+# Running after all: nothing to do.
+echo 123 > "$T/pidof_out"; guard "$T/d6"; guard "$T/d6"; started && fail "IPv6 client started next to a running one"
+rm -f "$T/pidof_out"; guard "$T/d6"; guard "$T/d6"
+started || fail "IPv6 client not restarted after two misses"
+has "dhcp6c -f -p $T/d6/dhcp6c.pid -c $T/d6/dhcp6c.conf -I eth9 -t internet ppp9"
+# It did not hold: the next try waits (back-off), however often the check runs.
+: > "$T/calls"; guard "$T/d6"; guard "$T/d6"; guard "$T/d6"
+started && fail "IPv6 client restarted again at once after a restart that did not hold"
+# The router's own client appears while ours is starting: ours is the one that goes.
+rm -f "$T/run/dhcp6c.tries" "$T/run/dhcp6c.miss"; : > "$T/calls"
+printf '#!/bin/sh\necho "dhcp6c $*" >> "%s/calls"\necho "111 222" > "%s/pidof_out"\nsleep 5\n' "$T" "$T" > "$T/bin/dhcp6c"
+guard "$T/d6"; guard "$T/d6"
+grep -q "left it to that one" "$T/run/iot.log" || fail "a second IPv6 client was left running next to the router's own"
+# Garbage in the retry file must not stop the watcher (it would be respawned into the same crash).
+for junk in "1 2x" "x 5" "9999999999999999999999 1" "3" ""; do
+  printf '%s\n' "$junk" > "$T/run/dhcp6c.tries"; rm -f "$T/pidof_out" "$T/run/dhcp6c.miss"
+  DHCP6C_DIR="$T/d6" DHCP6C_BIN="$T/bin/dhcp6c" PIDOF="$T/bin/pidof" DHCP6C_SETTLE=0 iot "$T/bin/uci10" "$ROOT/iot.sh" guard >/dev/null 2>&1 || fail "IPv6 guard died on a retry file holding '$junk'"
+  DHCP6C_DIR="$T/d6" DHCP6C_BIN="$T/bin/dhcp6c" PIDOF="$T/bin/pidof" DHCP6C_SETTLE=0 iot "$T/bin/uci10" "$ROOT/iot.sh" guard >/dev/null 2>&1 || fail "IPv6 guard died on its second check with '$junk'"
+done
+rm -f "$T/pidof_out" "$T/run/dhcp6c.tries" "$T/run/dhcp6c.miss"
+
+# --- a pid file from before start times were recorded (an upgrade without a reboot):
+# the old helper is recognised by its command line and stopped. Needs /proc.
+if [ -r "/proc/$$/cmdline" ]; then
+  mkdir -p "$T/old/portal"; printf '#!/bin/sh\nsleep 60\n' > "$T/old/portal/server.lua"
+  sh "$T/old/portal/server.lua" & op=$!; sleep 0.3
+  echo "$op" > "$T/run/portal.pid"; echo "aa:bb:cc:00:00:08" > "$T/run/portal_macs"
+  echo 0 > "$T/u/iot_home_lock"; h home
+  sleep 0.3; kill -0 "$op" 2>/dev/null && { kill "$op"; fail "a helper from the previous version was left running"; }
+  # ...but a pid that is somebody else's process is left alone.
+  sleep 60 & op=$!; echo "$op" > "$T/run/portal.pid"; echo "aa:bb:cc:00:00:08" > "$T/run/portal_macs"; h home
+  kill -0 "$op" 2>/dev/null || fail "an unrelated process was killed through a stale pid file"
+  kill "$op" 2>/dev/null; wait "$op" 2>/dev/null || true
+fi
+
 # --- Forget: a forgotten IoT device is not pinned again from its old lease.
 cat > "$T/bin/uci8" <<EOF
 #!/bin/sh
@@ -661,5 +964,64 @@ printf '%s\n' "1000 AA:BB:CC:DD:EE:05 192.168.50.150 cam *" > "$T/leases"; rm -f
 iot "$T/bin/uci8" "$ROOT/iot.sh" apply >/dev/null 2>&1 || true
 grep -q "iot_static=.*aa:bb:cc:dd:ee:05" "$T/calls" && fail "forgotten device pinned again from its lease"
 : > "$T/leases"
+
+# --- a burst of "apply now" requests becomes one worker, not a queue.
+ticket "$T/run/locks" "1.$$"                                   # something else holds the run lock
+for k in 1 2 3 4 5 6 7 8; do LOCK_WAIT=20 iot "$T/bin/uci7" "$ROOT/iot.sh" kick >/dev/null 2>&1 & done
+# wait until every request has either become the worker or left its note and gone
+queued() { ls "$T/run/locks" 2>/dev/null | grep -v "\.$$\$" | wc -l | tr -d ' '; }
+i=0; while [ $i -lt 40 ] && { [ "$(queued)" -lt 1 ] || [ -n "$(ls "$T/run/kicklocks" 2>/dev/null)" ]; }; do sleep 0.5; i=$((i + 1)); done
+n="$(queued)"
+[ "$n" -eq 1 ] || fail "$n sync runs queued for the lock after 8 requests in a row (want exactly 1)"
+# A request arriving now, while the worker waits for its turn, leaves a note and goes.
+rm -f "$T/run/sync.want"; LOCK_WAIT=20 h kick
+[ -e "$T/run/sync.want" ] || fail "a request arriving while the worker waits left no note"
+[ "$(queued)" -eq 1 ] || fail "a later request became a second worker"
+rm -rf "$T/run/locks/1.$$"; wait
+[ ! -e "$T/run/sync.pid" ] && [ ! -e "$T/run/sync.want" ] || fail "sync worker left its files behind"
+[ -z "$(ls "$T/run/locks" "$T/run/kicklocks" 2>/dev/null | grep -v ":$")" ] || fail "sync worker left a lock ticket behind"
+# A worker that can't get the run lock keeps the request (the note) instead of dropping it.
+ticket "$T/run/locks" "1.$$"; LOCK_WAIT=1 h kick
+[ -e "$T/run/sync.want" ] || fail "a request that could not be applied was dropped"
+[ ! -e "$T/run/sync.pid" ] || fail "a worker that gave up left its pid file"
+rm -rf "$T/run/locks/1.$$"; h kick
+[ ! -e "$T/run/sync.want" ] || fail "the kept request was not applied by the next worker"
+# Another process's pid file is never removed by a worker on its way out.
+sleep 30 & other=$!; echo "$other " > "$T/run/sync.pid"; h kick
+[ "$(cut -d' ' -f1 "$T/run/sync.pid" 2>/dev/null)" = "$other" ] || fail "a request removed another worker's pid file"
+[ -e "$T/run/sync.want" ] || fail "a request next to a live worker left no note"
+kill "$other" 2>/dev/null; wait "$other" 2>/dev/null || true; rm -f "$T/run/sync.pid" "$T/run/sync.want"
+# The dashboard's open and close record the window at once and leave the applying
+# to the worker ("later"), so the last click is what counts.
+: > "$T/calls"; h open 600 later; [ -s "$T/run/open_until" ] || fail "open ... later did not record the window"
+h close later; [ ! -e "$T/run/open_until" ] || fail "close later left the window open"
+h home-open 600 later; [ -s "$T/run/home_open_until" ] || fail "home-open ... later did not record the window"
+h home-close later; [ ! -e "$T/run/home_open_until" ] || fail "home-close later left the window open"
+grep -q "^tc \|^iptables \|^wl " "$T/calls" && fail "a \"later\" command applied things itself"
+# Switching the IoT network on and off in the settings needs nothing but a sync.
+echo 1 > "$T/u/iot_enabled"; : > "$T/calls"; h kick up
+has "brctl addif br-iot wl1.4"
+echo 0 > "$T/u/iot_enabled"; : > "$T/calls"; h kick
+has "brctl delif br-iot wl1.4"
+[ "$(grep -c "^dnsmasq " "$T/calls")" -le 1 ] || fail "dnsmasq restarted $(grep -c "^dnsmasq " "$T/calls") times for one switch-off"
+: > "$T/calls"; h kick; grep -q "brctl delif" "$T/calls" && fail "the IoT network was taken down again on every sync"
+# Up, but our own note of it lost (a run killed mid-move): switching off still takes it down.
+echo 1 > "$T/u/iot_enabled"; h kick up; rm -f "$T/run/orig_bridge"
+echo 0 > "$T/u/iot_enabled"; : > "$T/calls"; h kick
+has "brctl delif br-iot wl1.4"
+# ...and a normal run writes the note again when it finds the slot moved without one.
+echo 1 > "$T/u/iot_enabled"; h kick up; rm -f "$T/run/orig_bridge"; h kick
+[ -s "$T/run/orig_bridge" ] || fail "the missing bridge note was not written again"
+echo 0 > "$T/u/iot_enabled"; h kick
+rm -f "$T/u/iot_enabled"
+
+# --- `stop` by hand keeps the IoT network down while the watcher runs on for the rest.
+run start >/dev/null 2>&1 || true
+run stop >/dev/null 2>&1 || true
+: > "$T/calls"; run sync >/dev/null 2>&1 || true; run kick >/dev/null 2>&1 || true
+grep -q "brctl addbr br-iot\|brctl addif br-iot" "$T/calls" && fail "the watcher brought the IoT network back after stop"
+grep -q "dhcp-range=set:iot" "$T/dnsmasq.conf" && fail "IoT addresses handed out again after stop"
+: > "$T/calls"; run start >/dev/null 2>&1 || true
+has "brctl addif br-iot wl1.4"
 
 echo "iot.sh tests passed"

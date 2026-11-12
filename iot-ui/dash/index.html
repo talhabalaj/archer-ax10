@@ -3,240 +3,343 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0b0f12">
-<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#f2f4f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131816" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2312181c'/%3E%3Cpath d='M8 21.5a11 11 0 0 1 16 0M11 17.8a6.5 6.5 0 0 1 10 0' stroke='%232dd4bf' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='24' r='1.9' fill='%232dd4bf'/%3E%3C/svg%3E">
-<title>Talha · Network</title>
+<title>Talha's network</title>
 <!-- Dashboard for the Archer AX10, served at / by `iot.sh ui` (bind mount over /www/index.html).
      Talks to the same encrypted LuCI API as the stock UI, with the stock encryption scripts,
      and shares its login (token + keys in localStorage), so "Full settings" opens logged in. -->
 <style>
+/* Tokens. Light by default ("router chassis"), dark follows the system. Each network keeps one
+   hue everywhere: home green, guest amber, IoT violet. */
 :root {
-  --bg: #0b0f12; --surface: #12181c; --surface-2: #171f24; --surface-3: #1e272d;
-  --line: #222c33; --line-2: #2c3840;
-  --text: #e7eef1; --muted: #8c9ba3; --faint: #5f6d74;
-  --accent: #2dd4bf; --accent-ink: #04201c; --accent-soft: rgba(45, 212, 191, .12);
-  --ok: #34d399; --warn: #fbbf24; --bad: #f87171; --bad-soft: rgba(248, 113, 113, .12);
-  --r: 14px; --r-sm: 10px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ground: #f2f4f1; --panel: #ffffff; --panel-2: #f7f8f6; --sunk: #eceeea;
+  --ink: #17201c; --ink-2: #57635d; --ink-3: #87918c;
+  --line: #e1e5e1; --line-2: #cfd5d0;
+  --signal: #0b7a5c; --signal-ink: #ffffff; --signal-soft: #e3f2ec;
+  --home: #0b7a5c; --guest: #a35f00; --iot: #5848c2;
+  --guest-soft: #fbf0de; --iot-soft: #ecebfb;
+  --warn: #a35f00; --warn-soft: #fbf0de;
+  --bad: #b3261e; --bad-soft: #fbe9e7;
+  --shadow: 0 1px 2px rgba(23, 32, 28, .05), 0 1px 0 rgba(23, 32, 28, .03);
+  --pop: 0 12px 32px rgba(23, 32, 28, .16);
+  --r: 12px; --r-sm: 8px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --font: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: var(--font);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #131816; --panel: #1a201d; --panel-2: #1f2622; --sunk: #161b19;
+    --ink: #e6ebe8; --ink-2: #9aa59f; --ink-3: #6c7772;
+    --line: #29302c; --line-2: #36403b;
+    --signal: #3cc99a; --signal-ink: #06231a; --signal-soft: rgba(60, 201, 154, .13);
+    --home: #3cc99a; --guest: #e7a33e; --iot: #9d92f2;
+    --guest-soft: rgba(231, 163, 62, .14); --iot-soft: rgba(157, 146, 242, .15);
+    --warn: #e7a33e; --warn-soft: rgba(231, 163, 62, .14);
+    --bad: #f0857c; --bad-soft: rgba(240, 133, 124, .13);
+    --shadow: none; --pop: 0 16px 40px rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+html, body { margin: 0; background: var(--ground); color: var(--ink); font: 400 14.5px/1.5 var(--font); -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1; }
 body { min-height: 100vh; }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-a { color: var(--accent); text-decoration: none; }
-svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+a { color: var(--signal); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .hidden { display: none !important; }
-.mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: -.01em; }
-.muted { color: var(--muted); }
+.mono { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.muted { color: var(--ink-2); }
 
-/* ---- shell ---- */
-.wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
-header.top { position: sticky; top: 0; z-index: 20; background: rgba(11, 15, 18, .86); backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid var(--line); }
-.bar { display: flex; align-items: center; gap: 16px; height: 60px; }
-.brand { font-weight: 760; font-size: 20px; letter-spacing: -.03em; }
-.brand small { font-weight: 500; font-size: 13px; color: var(--muted); letter-spacing: 0; margin-left: 6px; }
-nav.tabs { display: flex; gap: 2px; margin-left: 12px; }
-nav.tabs button { display: flex; align-items: center; gap: 7px; border: 0; background: none; color: var(--muted); padding: 8px 12px; border-radius: 9px; font-weight: 550; font-size: 14px; }
-nav.tabs button:hover { color: var(--text); background: var(--surface-2); }
-nav.tabs button[aria-current="page"] { color: var(--text); background: var(--surface-3); }
+/* ---- shell: sidebar + content ---- */
+.app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; background: linear-gradient(to right, var(--panel-2) 235px, var(--line) 235px 236px, transparent 236px); }
+.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 4px; padding: 20px 14px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 18px; font-weight: 700; font-size: 16.5px; letter-spacing: -.015em; }
+.brand .mark { width: 28px; height: 28px; border-radius: 8px; background: var(--ink); color: var(--panel); display: grid; place-items: center; }
+.brand .mark svg { width: 17px; height: 17px; stroke-width: 2.2; }
+.brand small { display: block; font-weight: 450; font-size: 12px; color: var(--ink-3); letter-spacing: 0; margin-top: -2px; }
+nav.tabs { display: flex; flex-direction: column; gap: 2px; }
+nav.tabs button { display: flex; align-items: center; gap: 11px; border: 0; background: none; color: var(--ink-2); padding: 9px 10px; border-radius: 8px; font-weight: 500; font-size: 14px; text-align: left; transition: transform 160ms var(--ease-out); }
+nav.tabs button:hover { color: var(--ink); background: var(--sunk); }
+nav.tabs button[aria-current="page"] { color: var(--ink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--line), var(--shadow); font-weight: 600; }
+nav.tabs button[aria-current="page"] svg { color: var(--signal); }
 .spacer { flex: 1; }
-.iconbtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; border: 0; background: none; color: var(--muted); }
-.iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.sidestat { padding: 12px 10px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); display: grid; gap: 2px; }
+.sidestat b { color: var(--ink); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.sidestat .sub { font-size: 12.5px; color: var(--ink-3); }
+.sideacts { display: flex; gap: 4px; padding: 4px 6px 0; }
+.iconbtn { display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; border: 0; background: none; color: var(--ink-2); transition: transform 160ms var(--ease-out), background-color 120ms ease, color 120ms ease; }
+.iconbtn:hover { background: var(--sunk); color: var(--ink); }
 .menu { position: relative; }
-.menu-pop { position: absolute; right: 0; top: 44px; min-width: 210px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; padding: 6px; box-shadow: 0 16px 40px rgba(0, 0, 0, .45); }
-.menu-pop button, .menu-pop a { display: flex; width: 100%; align-items: center; gap: 10px; padding: 9px 10px; border: 0; background: none; color: var(--text); border-radius: 8px; font-size: 14px; text-align: left; }
-.menu-pop button:hover, .menu-pop a:hover { background: var(--surface-3); }
+.menu-pop { position: absolute; left: 0; bottom: 42px; min-width: 220px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px; box-shadow: var(--pop); z-index: 40; transform-origin: bottom left; animation: pop 150ms var(--ease-out); }
+@keyframes pop { from { opacity: 0; transform: scale(0.96); } }
+.menu-pop button, .menu-pop a { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 0; background: none; color: var(--ink); border-radius: 6px; font-size: 14px; text-align: left; }
+.menu-pop button:hover, .menu-pop a:hover { background: var(--sunk); text-decoration: none; }
 .menu-pop .danger { color: var(--bad); }
-main.wrap { padding-top: 22px; padding-bottom: 120px; }
+.main { min-width: 0; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+main.wrap { padding-top: 28px; padding-bottom: 96px; }
+.pagehead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.pagehead h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.022em; line-height: 1.2; }
+.pagehead p { margin: 4px 0 0; color: var(--ink-2); font-size: 14px; }
+header.top { display: none; }
 
-/* ---- status strip ---- */
-.status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
-.stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; min-width: 0; }
-.stat .k { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
-.stat .v { font-size: 20px; font-weight: 680; letter-spacing: -.02em; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stat .s { font-size: 12.5px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); display: inline-block; flex: none; }
-.dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(52, 211, 153, .15); }
-.dot.bad { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+/* ---- "Right now": the one loud element ---- */
+.now { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 36px; align-items: end; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); padding: 18px 22px 16px; margin-bottom: 18px; }
+.now .nums { display: flex; gap: 30px; }
+.now .num span { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 2px; }
+.now .num b { font-size: 34px; font-weight: 650; letter-spacing: -.03em; line-height: 1; }
+.now .num b small { font-size: 15px; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-left: 4px; }
+.now svg.flow { width: 100%; height: 72px; display: block; stroke: none; border-bottom: 1px solid var(--line-2); }
+.now .legend { grid-column: 1 / -1; display: flex; gap: 18px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); padding-top: 2px; }
+.now .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
 
-/* ---- sections and cards ---- */
-h2 { font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; display: flex; align-items: center; gap: 10px; }
-h2 .count { color: var(--faint); font-weight: 600; }
-#view > h2:first-child { margin-top: 4px; }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+/* ---- old status strip (kept for compatibility, hidden by layout) ---- */
+.status { display: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); display: inline-block; flex: none; }
+.dot.on { background: var(--signal); }
+.dot.bad { background: var(--bad); }
+
+/* ---- sections and panels ---- */
+h2 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; color: var(--ink); margin: 32px 0 10px; display: flex; align-items: baseline; gap: 8px; }
+h2 .count { color: var(--ink-3); font-weight: 500; font-size: 14px; }
+#view > h2:first-child { margin-top: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); }
 .card + .card { margin-top: 12px; }
-.card-h { display: flex; align-items: center; gap: 12px; padding: 16px 18px; }
-.card-h h3 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
-.card-h p { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
-.card-b { padding: 4px 18px 18px; }
-.card-f { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--line); }
-.note { font-size: 13px; color: var(--muted); padding: 12px 18px; border-top: 1px solid var(--line); }
+.card-h { display: flex; align-items: flex-start; gap: 16px; padding: 18px 20px; }
+.card-h h3 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.card-h p { margin: 3px 0 0; font-size: 13.5px; color: var(--ink-2); max-width: 68ch; }
+.card-h .sw { margin-top: 2px; }
+.card-b { padding: 2px 20px 16px; border-top: 1px solid var(--line); }
+.card-f { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--panel-2); border-radius: 0 0 var(--r) var(--r); }
+.note { font-size: 13px; color: var(--ink-2); padding: 12px 20px; border-top: 1px solid var(--line); }
 
 /* ---- forms ---- */
-.field { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 6px 18px; align-items: center; padding: 10px 0; }
+.field { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 4px 24px; align-items: center; padding: 14px 0; }
 .field + .field { border-top: 1px solid var(--line); }
-.field > label { color: var(--muted); font-size: 14px; }
-.field .help { grid-column: 2; font-size: 12.5px; color: var(--faint); }
-.input { display: flex; align-items: center; background: var(--bg); border: 1px solid var(--line-2); border-radius: var(--r-sm); height: 40px; padding: 0 4px 0 12px; min-width: 0; max-width: 420px; transition: border-color .12s, box-shadow .12s; }
-.input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.input input { flex: 1; min-width: 0; border: 0; background: none; outline: none; height: 100%; }
-.input .unit { color: var(--muted); font-size: 13px; padding: 0 8px; }
-.input .iconbtn { width: 32px; height: 32px; }
-.input.short { max-width: 160px; }
-.seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line-2); border-radius: 11px; padding: 3px; gap: 2px; flex-wrap: wrap; }
-.seg button { border: 0; background: none; color: var(--muted); padding: 6px 12px; border-radius: 8px; font-size: 13.5px; font-weight: 550; }
-.seg button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); }
-.seg button .n { color: var(--faint); margin-left: 5px; font-weight: 500; }
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 14px; }
-.btn:hover { background: var(--surface-3); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.btn.primary:hover { filter: brightness(1.08); }
+.field > label { color: var(--ink); font-size: 14px; font-weight: 500; }
+.field .help { grid-column: 2; font-size: 13px; color: var(--ink-2); max-width: 64ch; }
+.input { display: flex; align-items: center; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-sm); height: 38px; padding: 0 4px 0 12px; min-width: 0; max-width: 420px; transition: border-color .12s, box-shadow .12s; }
+.input:focus-within { border-color: var(--signal); box-shadow: 0 0 0 3px var(--signal-soft); }
+.input input, .input select { flex: 1; min-width: 0; border: 0; background: none; outline: none; height: 100%; }
+.input .unit { color: var(--ink-2); font-size: 13px; padding: 0 8px; }
+.input .iconbtn { width: 30px; height: 30px; }
+.input.short { max-width: 170px; }
+.seg { display: inline-flex; background: var(--sunk); border-radius: 9px; padding: 3px; gap: 2px; flex-wrap: wrap; }
+.seg button { border: 0; background: none; color: var(--ink-2); padding: 6px 12px; border-radius: 7px; font-size: 13.5px; font-weight: 500; transition: transform 160ms var(--ease-out); }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+.seg button .n { color: var(--ink-3); margin-left: 6px; font-weight: 500; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel); color: var(--ink); font-weight: 600; font-size: 13.5px; white-space: nowrap; transition: transform 160ms var(--ease-out), background-color 120ms ease, border-color 120ms ease; }
+.btn:active:not(:disabled), .iconbtn:active, nav.tabs button:active, .seg button:active, .linkbtn:active { transform: scale(0.97); }
+.btn:hover { background: var(--sunk); }
+.btn.primary { background: var(--signal); border-color: var(--signal); color: var(--signal-ink); }
+.btn.primary:hover { filter: brightness(1.06); background: var(--signal); }
 .btn.danger { color: var(--bad); }
-.btn.danger:hover { background: var(--bad-soft); border-color: rgba(248, 113, 113, .35); }
+.btn.danger:hover { background: var(--bad-soft); border-color: var(--bad-soft); }
 .btn:disabled { opacity: .5; cursor: default; }
-.btn.sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
+.btn.sm { height: 30px; padding: 0 11px; font-size: 13px; border-radius: 7px; }
 
 /* ---- switch ---- */
-.sw { position: relative; display: inline-block; width: 42px; height: 24px; flex: none; }
+.sw { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
 .sw input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
-.sw span { position: absolute; inset: 0; background: var(--surface-3); border: 1px solid var(--line-2); border-radius: 99px; transition: background .15s, border-color .15s; }
-.sw span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #c3ced3; transition: transform .15s, background .15s; }
-.sw input:checked + span { background: var(--accent); border-color: var(--accent); }
-.sw input:checked + span::after { transform: translateX(18px); background: #fff; }
-.sw input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+.sw span { position: absolute; inset: 0; background: var(--line-2); border-radius: 99px; transition: background-color 160ms ease; }
+.sw span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 160ms var(--ease-out); }
+.sw input:checked + span { background: var(--signal); }
+.sw input:checked + span::after { transform: translateX(16px); }
+.sw input:focus-visible + span { box-shadow: 0 0 0 3px var(--signal-soft); }
 .sw input:disabled + span { opacity: .45; }
 
-/* ---- device list ---- */
-.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.search { flex: 1 1 220px; max-width: none; }
-.list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
-.row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line); }
-.row:first-child { border-top: 0; }
+/* ---- device table ---- */
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pagehead .toolbar { flex-wrap: nowrap; flex: 0 1 auto; }
+.pagehead .seg { flex-wrap: nowrap; }
+@media (max-width: 1180px) { .pagehead .toolbar { flex-wrap: wrap; } }
+.search { flex: 0 1 280px; max-width: none; }
+.list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden; }
+.thead, .row.dev { display: grid; grid-template-columns: 34px minmax(170px, 1.7fr) 92px minmax(150px, 1.25fr) 128px 108px 16px; gap: 14px; align-items: center; }
+.thead { padding: 9px 16px; font-size: 12.5px; color: var(--ink-3); font-weight: 500; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.thead .r { text-align: right; }
+.row.dev .meta.m { display: none; }
+.row { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 11px 16px; border-top: 1px solid var(--line); }
+.row:first-child, .thead + .row { border-top: 0; }
 .row.click { cursor: pointer; }
-.row.click:hover { background: var(--surface-2); }
-.row.open { background: var(--surface-2); }
-.av { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: var(--surface-3); color: var(--muted); position: relative; }
-.av .dot { position: absolute; right: -2px; bottom: -2px; border: 2px solid var(--surface); width: 11px; height: 11px; box-shadow: none; }
-.row.open .av .dot, .row.click:hover .av .dot { border-color: var(--surface-2); }
+.row.click:hover { background: var(--panel-2); }
+.row.open { background: var(--panel-2); }
+.av { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--sunk); color: var(--ink-2); position: relative; }
+.av svg { width: 17px; height: 17px; }
+.av .dot { position: absolute; right: -2px; bottom: -2px; border: 2px solid var(--panel); width: 10px; height: 10px; }
+.row.open .av .dot, .row.click:hover .av .dot { border-color: var(--panel-2); }
 .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .nm > span:first-child { overflow: hidden; text-overflow: ellipsis; }
-.meta { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
-.tag { font-size: 11px; font-weight: 650; letter-spacing: .02em; padding: 2px 7px; border-radius: 6px; background: var(--surface-3); color: var(--muted); flex: none; }
-.tag.iot { color: #a5b4fc; background: rgba(129, 140, 248, .14); }
-.tag.guest { color: #fcd34d; background: rgba(251, 191, 36, .12); }
+.meta { font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.cell { font-size: 13.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cell.r { text-align: right; }
+.cell b { color: var(--ink); font-weight: 600; }
+.netpill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--ink); }
+.netpill::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--home); }
+.netpill.guest::before { background: var(--guest); }
+.netpill.iot::before { background: var(--iot); }
+.tag { font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 5px; background: var(--sunk); color: var(--ink-2); flex: none; line-height: 18px; }
+.tag.iot { color: var(--iot); background: var(--iot-soft); }
+.tag.guest { color: var(--guest); background: var(--guest-soft); }
 .tag.blocked { color: var(--bad); background: var(--bad-soft); }
-.tag.you { color: var(--accent); background: var(--accent-soft); }
-.tag.cap { color: #93c5fd; background: rgba(96, 165, 250, .13); }
-.tag.no { color: var(--warn); background: rgba(251, 146, 60, .13); }
-.acadd { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 18px; border-top: 1px solid var(--line); }
-.acadd .input { flex: 1 1 160px; }
+.tag.you { color: var(--signal); background: var(--signal-soft); }
+.tag.cap { color: var(--ink); background: var(--sunk); box-shadow: inset 0 0 0 1px var(--line-2); }
+.tag.no { color: var(--warn); background: var(--warn-soft); }
+.grouph { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 22px 2px 8px; }
+.linkbtn { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: var(--ink); font-size: 14px; font-weight: 600; cursor: pointer; padding: 4px 0; }
+.linkbtn .chev { width: 15px; height: 15px; color: var(--ink-3); transition: transform 160ms var(--ease-out); }
+.linkbtn .chev.up { transform: rotate(90deg); }
+.linkbtn .count { margin-left: 2px; color: var(--ink-3); font-weight: 500; }
+.field > .seg { justify-self: start; }
+.ubar { height: 4px; border-radius: 2px; background: var(--sunk); margin-top: 7px; max-width: 420px; }
+.ubar i { display: block; height: 100%; border-radius: 2px; background: var(--signal); }
+.rangerow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.rangerow .input.short { max-width: 140px; }
+.hostrow { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.hostrow .input { flex: 1 1 0; }
+.acadd { display: flex; gap: 10px; flex-wrap: wrap; padding: 10px 0 2px; }
+.addmac { border-top: 1px solid var(--line); padding-top: 12px; }
+.addmac summary { cursor: pointer; font-size: 13.5px; font-weight: 500; color: var(--signal); width: max-content; }
+.acadd .input { flex: 1 1 180px; }
 .capform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-.capform .input { height: 36px; max-width: 150px; }
-.offline .nm, .offline .av { opacity: .55; }
-.right { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
-.chev { color: var(--faint); transition: transform .15s; }
+.capform .input { height: 34px; max-width: 150px; }
+.offline .nm, .offline .av, .offline .cell { opacity: .6; }
+.right { display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 13px; }
+.chev { color: var(--ink-3); transition: transform 160ms var(--ease-out); }
 .row.open .chev { transform: rotate(90deg); }
-.detail { padding: 4px 16px 16px 68px; background: var(--surface-2); }
-.detail .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 20px; font-size: 13px; margin-bottom: 14px; }
-.detail .grid div span { display: block; color: var(--faint); font-size: 12px; }
-.detail .acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.detail .togg { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-right: 10px; }
-.rename { display: flex; gap: 8px; margin-bottom: 12px; }
-.rename .input { flex: 1; height: 36px; }
-.rate { font-size: 12.5px; color: var(--muted); text-align: right; line-height: 1.35; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.rate b { color: var(--text); font-weight: 600; }
-.panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-bottom: 14px; }
+.detail { padding: 6px 16px 18px 64px; background: var(--panel-2); border-top: 1px solid var(--line); }
+.detail .acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0 6px; }
+.detail .togg { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-right: 12px; }
+.rename { display: flex; gap: 8px; margin: 8px 0 12px; }
+.rename .input { flex: 1; height: 34px; }
+.rate { font-size: 13px; color: var(--ink-2); text-align: right; line-height: 1.35; white-space: nowrap; }
+.rate b { color: var(--ink); font-weight: 600; }
+.panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin: 8px 0 0; }
 .pane.wide { grid-column: 1 / -1; }
-.pane { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.pane h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
-.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; align-items: baseline; }
-.kv.two { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 18px; }
-.kv > span { color: var(--muted); white-space: nowrap; }
+.pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.pane h4 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 16px; font-size: 13px; align-items: baseline; }
+.kv.two { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 20px; }
+.kv > span { color: var(--ink-2); white-space: nowrap; }
 .kv b .nw { white-space: nowrap; }
-.kv b { font-weight: 550; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; min-width: 0; }
-.kv b .mono { word-break: break-all; font-size: 12px; }
-.live { display: flex; gap: 22px; align-items: baseline; margin-bottom: 6px; }
-.live div span { display: block; font-size: 11.5px; color: var(--faint); }
-.live div b { font-size: 20px; font-weight: 680; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.kv b { font-weight: 550; text-align: right; overflow-wrap: anywhere; min-width: 0; }
+.kv b .mono { word-break: break-all; }
+.live { display: flex; gap: 24px; align-items: baseline; margin-bottom: 6px; }
+.live div span { display: block; font-size: 12px; color: var(--ink-2); }
+.live div b { font-size: 21px; font-weight: 650; letter-spacing: -.02em; }
 .spark { width: 100%; height: 54px; display: block; }
 .bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; margin-left: 6px; vertical-align: -1px; }
 .bars i { width: 3px; background: var(--line-2); border-radius: 1px; }
-.bars i.on { background: var(--accent); }
-.ctable { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.ctable th { text-align: left; font-weight: 600; color: var(--faint); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 0 8px 6px 0; white-space: nowrap; }
-.ctable td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+.bars i.on { background: var(--signal); }
+.ctable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ctable th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 0 10px 8px 0; white-space: nowrap; }
+.ctable td { padding: 7px 10px 7px 0; border-top: 1px solid var(--line); vertical-align: top; }
 .ctable td.num, .ctable th.num { text-align: right; white-space: nowrap; }
-.ctable td .mono { word-break: break-all; font-size: 11.5px; }
+.ctable td .mono { word-break: break-all; }
 .ctable .svc { font-weight: 600; }
-.ctable .sub { color: var(--faint); font-size: 11.5px; }
+.ctable .sub { color: var(--ink-3); font-size: 12px; }
 .cwrap { max-height: 420px; overflow: auto; }
-.pane h4 .btn { float: right; margin-top: -6px; text-transform: none; letter-spacing: 0; }
-.empty { padding: 34px 16px; text-align: center; color: var(--muted); font-size: 14px; }
-.sk { height: 62px; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
+.pane h4 .btn { margin-left: auto; }
+.empty { padding: 36px 16px; text-align: center; color: var(--ink-2); font-size: 14px; }
+.sk { height: 58px; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
 .sk:first-child { border-top: 0; }
-.sk::after { content: ""; position: absolute; left: 16px; top: 12px; width: 38px; height: 38px; border-radius: 11px; background: var(--surface-2); box-shadow: 52px 4px 0 -2px var(--surface-2); }
-.sk::before { content: ""; position: absolute; left: 68px; top: 18px; height: 11px; width: 34%; border-radius: 6px; background: var(--surface-2); box-shadow: 0 16px 0 0 var(--surface-2); }
+.sk::after { content: ""; position: absolute; left: 16px; top: 12px; width: 34px; height: 34px; border-radius: 9px; background: var(--sunk); }
+.sk::before { content: ""; position: absolute; left: 64px; top: 16px; height: 10px; width: 32%; border-radius: 5px; background: var(--sunk); box-shadow: 0 16px 0 0 var(--sunk); }
 
-/* ---- wifi cards ---- */
-.nets { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; align-items: start; }
+/* ---- Wi-Fi networks ---- */
+.nets { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; align-items: start; }
 .nets .card + .card { margin-top: 0; }
-.net { padding: 16px 18px; }
+.net { padding: 18px 20px; }
 .net .t { display: flex; align-items: center; gap: 10px; }
-.net .t b { font-size: 16px; font-weight: 650; }
-.net .band { font-size: 12.5px; color: var(--muted); margin: 2px 0 12px; }
-.pw { display: flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 4px 4px 12px; }
-.pw code { flex: 1; font-family: var(--mono); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qr { display: grid; place-items: center; margin-top: 12px; padding: 14px; background: #fff; border-radius: var(--r-sm); }
-.off-net { opacity: .55; }
+.net .t svg { color: var(--ink-2); }
+.net .t b { font-size: 15.5px; font-weight: 650; }
+.net .band { font-size: 13px; color: var(--ink-2); margin: 2px 0 14px; }
+.pw { display: flex; align-items: center; gap: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px 3px 3px 12px; }
+.pw code { flex: 1; font-family: var(--font); font-size: 14px; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qr { display: grid; place-items: center; margin-top: 12px; padding: 14px; background: #fff; border-radius: var(--r-sm); border: 1px solid var(--line); }
+.off-net { opacity: .6; }
 
 /* ---- login ---- */
 .login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-.login form { width: 100%; max-width: 360px; }
-.login .brand { font-size: 34px; display: block; margin-bottom: 4px; }
-.login p { color: var(--muted); margin: 0 0 26px; }
-.login .input { max-width: none; height: 46px; }
-.login .btn { width: 100%; height: 46px; margin-top: 12px; }
+.login form { width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 30px 28px; box-shadow: var(--shadow); }
+.login .brand { padding: 0 0 18px; font-size: 18px; }
+.login p { color: var(--ink-2); margin: 0 0 20px; }
+.login .input { max-width: none; height: 44px; }
+.login .btn { width: 100%; height: 44px; margin-top: 12px; }
 .login .err { color: var(--bad); font-size: 13.5px; min-height: 20px; margin-top: 10px; }
-.login .alt { margin-top: 28px; font-size: 13.5px; color: var(--muted); }
+.login .alt { margin-top: 22px; font-size: 13.5px; color: var(--ink-2); }
 
-/* ---- toast, dialog, overlay ---- */
+/* ---- toast, dialog ---- */
 .toasts { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; display: grid; gap: 8px; width: max-content; max-width: calc(100vw - 32px); }
-.toast { background: var(--surface-3); border: 1px solid var(--line-2); padding: 10px 14px; border-radius: 11px; font-size: 14px; box-shadow: 0 12px 30px rgba(0, 0, 0, .4); animation: in .16s ease-out; }
-.toast.bad { border-color: rgba(248, 113, 113, .4); }
-@keyframes in { from { opacity: 0; transform: translateY(6px); } }
-.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .55); display: grid; place-items: center; padding: 20px; animation: fade .12s ease-out; }
+.toast { background: var(--ink); color: var(--panel); padding: 10px 14px; border-radius: 9px; font-size: 14px; font-weight: 500; box-shadow: var(--pop); animation: in 200ms var(--ease-out); }
+.toast.bad { background: var(--bad); color: #fff; }
+@keyframes in { from { opacity: 0; transform: translateY(100%); } }
+.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(15, 20, 18, .45); display: grid; place-items: center; padding: 20px; animation: fade 150ms ease-out; }
 @keyframes fade { from { opacity: 0; } }
-.dialog { width: 100%; max-width: 400px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 22px; }
-.dialog h3 { margin: 0 0 6px; font-size: 18px; }
-.dialog p { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+.dialog { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; box-shadow: var(--pop); animation: pop 180ms var(--ease-out); }
+.dialog h3 { margin: 0 0 6px; font-size: 17px; font-weight: 650; }
+.dialog p { margin: 0 0 20px; color: var(--ink-2); font-size: 14px; }
 .dialog .acts { display: flex; justify-content: flex-end; gap: 10px; }
-.spin { width: 18px; height: 18px; border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: rot .7s linear infinite; }
+.spin { width: 18px; height: 18px; border: 2px solid var(--line-2); border-top-color: var(--signal); border-radius: 50%; animation: rot .7s linear infinite; }
 @keyframes rot { to { transform: rotate(360deg); } }
 .busy { display: flex; align-items: center; gap: 12px; }
 
-/* ---- phones ---- */
-@media (max-width: 720px) {
+/* ---- narrower screens ---- */
+@media (max-width: 1080px) {
+  .thead, .row.dev { grid-template-columns: 34px minmax(160px, 1.6fr) 84px minmax(130px, 1.2fr) 100px 16px; }
+  .thead .c-addr, .row.dev .c-addr { display: none; }
+}
+@media (max-width: 860px) {
+  .app { grid-template-columns: minmax(0, 1fr); background: none; }
+  .side { position: fixed; left: 0; right: 0; bottom: 0; top: auto; height: auto; z-index: 30; flex-direction: row; align-items: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); border-right: 0; border-top: 1px solid var(--line); background: var(--panel); }
+  .side .brand, .side .sidestat, .side .spacer { display: none; }
+  nav.tabs { flex-direction: row; flex: 1; justify-content: space-around; }
+  nav.tabs button { flex-direction: column; gap: 3px; font-size: 11.5px; padding: 6px 8px; flex: 1; align-items: center; }
+  nav.tabs button svg { width: 21px; height: 21px; }
+  nav.tabs button[aria-current="page"] { background: none; box-shadow: none; color: var(--signal); }
+  .sideacts { padding: 0; }
+  .menu-pop { left: auto; right: 0; bottom: 46px; transform-origin: bottom right; }
   .wrap { padding: 0 16px; }
-  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; z-index: 30; justify-content: space-around; background: rgba(18, 24, 28, .94); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); }
-  nav.tabs button { flex-direction: column; gap: 3px; font-size: 11.5px; padding: 6px 10px; flex: 1; }
-  nav.tabs button svg { width: 22px; height: 22px; }
-  nav.tabs button[aria-current="page"] { background: none; color: var(--accent); }
-  .status { grid-template-columns: 1fr 1fr; }
-  .status .stat:first-child { grid-column: 1 / -1; }
-  .field { grid-template-columns: 1fr; gap: 6px; }
+  main.wrap { padding-top: 20px; padding-bottom: 110px; }
+  .mobilehead { display: flex !important; }
+  .thead { display: none; }
+  .row.dev { grid-template-columns: 34px minmax(0, 1fr) auto 16px; }
+  .row.dev .c-net, .row.dev .c-conn, .row.dev .c-addr { display: none; }
+  .row.dev .meta.m { display: block; }
+  .now { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+  .now .num b { font-size: 28px; }
+  .field { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .field .help { grid-column: 1; }
   .input { max-width: none; }
   .detail { padding-left: 16px; }
   .panes { grid-template-columns: minmax(0, 1fr); }
   .kv.two { grid-template-columns: auto minmax(0, 1fr); }
   .toasts { bottom: calc(84px + env(safe-area-inset-bottom)); }
-  main.wrap { padding-bottom: 110px; }
-  header.top { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--bg); }   /* a filter here would trap the fixed tab bar inside the header */
 }
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+.mobilehead { display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 0; }
+.mobilehead .brand { padding: 0; }
+@media (hover: none) {
+  .btn:hover, .iconbtn:hover, nav.tabs button:hover, .row.click:hover, .menu-pop button:hover, .menu-pop a:hover, .seg button:hover { background: none; color: inherit; }
+  .btn:hover { background: var(--panel); } .btn.primary:hover { background: var(--signal); filter: none; }
+  .row.click:hover .av .dot { border-color: var(--panel); }
+}
+/* Reduced motion: keep fades, drop movement and scaling. */
+@media (prefers-reduced-motion: reduce) {
+  .menu-pop, .dialog, .toast { animation: fade 150ms ease-out; }
+  .btn:active, .iconbtn:active, nav.tabs button:active, .seg button:active, .linkbtn:active { transform: none; }
+  .chev, .linkbtn .chev, .sw span::after { transition: none; }
+}
 </style>
 </head>
 <body>
@@ -270,6 +373,7 @@ const ICON = {
   copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4h-4"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -338,14 +442,24 @@ const API = (() => {
 const iot = (form, params) => API.call("/admin/iot_net?form=" + form, params).then(r => r.data);
 
 /* ------------------------------------------------------------------ state */
+// "#networks/guest" -> { tab: "networks", net: "guest" }. Links from older versions
+// (#iot, #wifi, #speed, #guests) land on the page that now holds that content.
+function route(hash) {
+  const [t, n] = String(hash || "").replace(/^#/, "").split("/");
+  const OLD = { iot: ["networks", "iot"], wifi: ["networks", "home"], guests: ["networks", "guest"], speed: ["internet"] };
+  const old = Object.prototype.hasOwnProperty.call(OLD, t) ? OLD[t] : null;      // "#constructor" is not a page
+  if (old) return { tab: old[0], net: old[1] || "home" };
+  if (t === "networks") return { tab: t, net: ["home", "guest", "iot"].includes(n) ? n : "home" };
+  return { tab: t === "internet" ? t : "devices", net: "home" };
+}
 const S = {
-  tab: ({ guests: "speed" })[(location.hash || "#devices").slice(1)] || (location.hash || "#devices").slice(1),
+  ...route(location.hash),
   devices: null, summary: null, iot: null, guest: null, wifi: null,
   filter: "all", q: "", open: null, editing: null, reveal: {}, qr: null,
   menu: false, busy: {}, dirty: {},
 };
-const TABS = [["devices", "Devices", "devices"], ["iot", "IoT", "iot"], ["speed", "Speed", "gauge"], ["wifi", "Wi-Fi", "wifi"]];
-if (!TABS.some(t => t[0] === S.tab)) S.tab = "devices";
+const TABS = [["devices", "Devices", "devices"], ["networks", "Networks", "wifi"], ["internet", "Internet", "globe"]];
+const SUBNETS = [["home", "Home"], ["guest", "Guest"], ["iot", "IoT"]];
 
 function toast(msg, bad) {
   const t = document.createElement("div"); t.className = "toast" + (bad ? " bad" : ""); t.textContent = msg;
@@ -443,9 +557,9 @@ async function loadDevices() {
   r.list.forEach(d => { d.listed = d.blocked; d.blocked = d.blocked && live; });
   // Our home allow list (iot.sh home_sync).
   // The router's JSON encoder turns an empty list into {}.
-  if (home) { if (!Array.isArray(home.list)) home.list = []; if (!Array.isArray(home.dropped)) home.dropped = []; }
+  if (home) { ["list", "dropped", "mesh_macs"].forEach(k => { if (!Array.isArray(home[k])) home[k] = []; }); }
   r.home = home; S.homeAt = Date.now();
-  r.white = home ? home.list.map(x => ({ mac: x.mac.toUpperCase(), seen: x.seen, keep: x.keep, name: x.name || "" })) : null;
+  r.white = home ? home.list.map(x => ({ mac: x.mac.toUpperCase(), seen: x.seen, keep: x.keep, name: x.name || "", mesh: !!x.mesh })) : null;
   r.allowOn = !!home && home.lock === "on";
   const wl = new Set((r.white || []).map(x => x.mac));
   r.list.forEach(d => { d.onWhite = wl.has(d.mac); });
@@ -456,6 +570,12 @@ async function loadDevices() {
     d.live = p ? rates(p, d, S.devices.t, r.t) : null;
   });
   r.byMac = now;
+  // Live traffic by network, for the "Right now" graph (last ~3 minutes).
+  if (prev) {
+    const f = { home: 0, guest: 0, iot: 0, up: 0, mesh: 0 };
+    r.list.forEach(d => { if (!d.online) return; if (d.live) { f[d.net] += d.live.down; f.up += d.live.up; } else if (/^Mesh/.test(d.where)) f.mesh++; });
+    S.flow = (S.flow || []).concat([f]).slice(-36);
+  }
   S.devices = r;
 }
 async function loadSummary() {
@@ -465,13 +585,15 @@ async function loadSummary() {
 async function loadIot() { S.iot = await iot("settings"); S.iotLoadedAt = Date.now(); }
 async function loadGuest() { S.guest = await iot("guest_settings"); }
 async function loadShaping() { S.shaping = await iot("shaping"); }
+async function loadUsage() { const u = await iot("usage"); ["days", "months", "devices"].forEach(k => { if (!Array.isArray(u[k])) u[k] = []; }); S.usage = u; }
+async function loadNames() { const n = await iot("names"); if (!Array.isArray(n.hosts)) n.hosts = []; S.names = n; }
 async function loadWifi() {
   const get = f => API.call("/admin/wireless?form=" + f).then(r => r.data).catch(() => null);
   const [w2, w5, g2, g5, sc] = await Promise.all([get("wireless_2g"), get("wireless_5g"), get("guest_2g"), get("guest_5g"), get("smart_connect")]);
   if (!S.iot) await loadIot();
   S.wifi = { w2, w5, g2, g5, smart: sc && sc.smart_enable === "on" };
 }
-const NEEDS = { devices: [loadDevices, loadSummary], iot: [loadDevices, loadIot], speed: [loadDevices, loadGuest, loadShaping], wifi: [loadWifi, loadDevices] };
+const NEEDS = { devices: [loadDevices, loadSummary], networks: [loadWifi, loadDevices, loadIot, loadGuest, loadSummary], internet: [loadDevices, loadShaping, loadNames, loadUsage, loadSummary] };
 async function refresh(quiet) {
   const tab = S.tab;
   try { await Promise.all(NEEDS[tab].map(f => f())); if (tab === S.tab) render(); }
@@ -481,18 +603,23 @@ let timer = null;
 function startPolling() {
   clearInterval(timer);
   timer = setInterval(() => {
-    if (document.hidden || !API.has() || S.editing || S.capEdit || S.tab === "wifi" || Object.keys(S.dirty).length) return;
+    // Internet page: only the "Now ..." line of the automatic limit moves; a full
+    // refresh would fight with what is being typed.
+    if (S.tab === "internet" && !document.hidden && API.has() && S.shaping && S.shaping.auto === "on") {
+      iot("shaping").then(w => { ["now_down", "now_up", "now_extra", "now_ceil_down", "now_ceil_up"].forEach(k => { S.shaping[k] = w[k]; }); const el = $id("w-now"); if (el) el.innerHTML = autoNow(S.shaping); }).catch(() => {});
+    }
+    if (document.hidden || !API.has() || S.editing || S.capEdit || S.tab === "networks" || S.tab === "internet" || Object.keys(S.dirty).length) return;
     refresh(true);
   }, 5000);
 }
-window.addEventListener("hashchange", () => { const t = location.hash.slice(1); if (API.has() && TABS.some(x => x[0] === t)) go(t); });
+window.addEventListener("hashchange", () => { if (!API.has()) return; const r = route(location.hash); go(r.tab, r.net); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && API.has()) refresh(true); });
 
 /* ------------------------------------------------------------------ login */
 function showLogin(msg) {
   clearInterval(timer);
   $id("app").innerHTML = `<div class="login"><form id="lf" autocomplete="on">
-    <span class="brand">${esc(OWNER)}</span><p>Sign in to manage your network.</p>
+    <div class="brand"><span class="mark">${ic("wifi")}</span><div>${esc(OWNER)}'s network<small>Archer AX10</small></div></div><p>Sign in with the router password.</p>
     <input type="text" name="username" value="admin" autocomplete="username" hidden>
     <div class="input"><input id="pw" type="password" placeholder="Router password" autocomplete="current-password" required>
       <button type="button" class="iconbtn" id="pwv" aria-label="Show password">${ic("eye")}</button></div>
@@ -520,20 +647,24 @@ function showLogin(msg) {
 
 /* ------------------------------------------------------------------ shell */
 function shell() {
-  $id("app").innerHTML = `
-  <header class="top"><div class="wrap bar">
-    <div class="brand">${esc(OWNER)}<small>network</small></div>
-    <nav class="tabs" id="tabs">${TABS.map(([id, label, icon]) => `<button data-tab="${id}">${ic(icon)}<span>${label}</span></button>`).join("")}</nav>
-    <div class="spacer"></div>
-    <button class="iconbtn" id="rf" aria-label="Refresh" title="Refresh">${ic("refresh")}</button>
-    <div class="menu"><button class="iconbtn" id="mb" aria-label="More" aria-expanded="false">${ic("more")}</button>
+  const menu = `<div class="menu"><button class="iconbtn" id="mb" aria-label="More" aria-expanded="false">${ic("more")}</button>
       <div class="menu-pop hidden" id="mp">
         <a href="${FULL}">${ic("ext")}Full TP-Link settings</a>
         <button id="mr">${ic("power")}Reboot router</button>
         <button id="mo" class="danger">${ic("out")}Log out</button>
-      </div></div>
-  </div></header>
-  <main class="wrap" id="view"></main>`;
+      </div></div>`;
+  $id("app").innerHTML = `<div class="app">
+    <aside class="side">
+      <div class="brand"><span class="mark">${ic("wifi")}</span><div>${esc(OWNER)}'s network<small>Archer AX10</small></div></div>
+      <nav class="tabs" id="tabs" aria-label="Sections">${TABS.map(([id, label, icon]) => `<button data-tab="${id}">${ic(icon)}<span>${label}</span></button>`).join("")}</nav>
+      <div class="spacer"></div>
+      <div class="sidestat" id="sidestat"></div>
+      <div class="sideacts"><button class="iconbtn" id="rf" aria-label="Refresh" title="Refresh">${ic("refresh")}</button>${menu}</div>
+    </aside>
+    <div class="main">
+      <div class="mobilehead"><div class="brand"><span class="mark">${ic("wifi")}</span><div>${esc(OWNER)}'s network</div></div><span id="mobstat"></span></div>
+      <main class="wrap" id="view"></main>
+    </div></div>`;
   $id("tabs").onclick = ev => { const b = ev.target.closest("[data-tab]"); if (b) go(b.dataset.tab); };
   $id("rf").onclick = async () => { const b = $id("rf"); b.firstChild.style.animation = "rot .7s linear infinite"; await refresh(); b.firstChild.style.animation = ""; };
   const mp = $id("mp");
@@ -542,10 +673,24 @@ function shell() {
   $id("mr").onclick = reboot;
   $id("mo").onclick = logout;
 }
-function go(tab) {
-  if (S.tab === tab) return;
-  S.tab = tab; S.open = null; S.editing = null; S.qr = null; S.conns = null; watchConns(); watchDetail();
-  if (location.hash !== "#" + tab) history.pushState(null, "", "#" + tab);
+// Router and internet state, in the sidebar (and a dot on phones).
+function renderSide() {
+  const sm = S.summary, D = S.devices, el = $id("sidestat"), mob = $id("mobstat");
+  if (!el) return;
+  const up = sm && sm.internet === "connected";
+  el.innerHTML = sm ? `<b><span class="dot ${up ? "on" : "bad"}"></span>${up ? "Internet connected" : "Internet down"}</b>
+      <span class="sub">${esc(sm.wan_ip || "No address")}${sm.wan_uptime ? `, up ${dur(sm.wan_uptime)}` : ""}</span>
+      <span class="sub">Router up ${dur(sm.uptime)}${D ? `, ${D.list.filter(d => d.online).length} devices online` : ""}</span>` : '<span class="sub">Checking the connection…</span>';
+  if (mob) mob.innerHTML = sm ? `<span class="dot ${up ? "on" : "bad"}" title="${up ? "Internet connected" : "Internet down"}"></span>` : "";
+}
+const pageHead = (title, sub, right) => `<div class="pagehead"><div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}</div>${right || ""}</div>`;
+function go(tab, net) {
+  net = net || (tab === "networks" ? S.net : undefined);
+  if (S.tab === tab && (!net || S.net === net)) return;
+  S.tab = tab; if (net) S.net = net;
+  S.open = null; S.editing = null; S.qr = null; S.conns = null; watchConns(); watchDetail();
+  const h = "#" + tab + (tab === "networks" ? "/" + S.net : "");
+  if (location.hash !== h) history.pushState(null, "", h);
   render(); refresh(true);
   window.scrollTo(0, 0);
 }
@@ -573,9 +718,10 @@ function render() {
   const v = $id("view"); if (!v) return;
   const focus = document.activeElement && document.activeElement.id;
   const caret = focus && document.activeElement.selectionStart;
-  v.innerHTML = ({ devices: viewDevices, iot: viewIot, speed: viewSpeed, wifi: viewWifi })[S.tab]();
+  v.innerHTML = ({ devices: viewDevices, networks: viewNetworks, internet: viewInternet })[S.tab]();
   if (focus && $id(focus)) { const el = $id(focus); el.focus(); try { if (caret != null) el.setSelectionRange(caret, caret); } catch (x) {} }
   if (S.qr) drawQr();
+  renderSide();
 }
 const skel = n => `<div class="list">${'<div class="sk"></div>'.repeat(n)}</div>`;
 function sortDevices(list) {
@@ -583,46 +729,95 @@ function sortDevices(list) {
 }
 
 function viewDevices() {
-  const D = S.devices, sm = S.summary;
+  const D = S.devices;
   const online = D ? D.list.filter(d => d.online) : [];
-  const status = `<div class="status">
-    <div class="stat"><div class="k">${ic("globe")}Internet</div>
-      ${sm ? `<div class="v"><span class="dot ${sm.internet === "connected" ? "on" : "bad"}"></span> ${sm.internet === "connected" ? "Connected" : "Offline"}</div>
-      <div class="s mono">${esc(sm.wan_ip || "no address")}${sm.wan_uptime ? " · up " + dur(sm.wan_uptime) : ""}</div>` : '<div class="v muted">…</div><div class="s">&nbsp;</div>'}</div>
-    <div class="stat"><div class="k">${ic("devices")}Online now</div>
-      <div class="v">${D ? online.length : "…"}</div><div class="s">${D ? `${online.filter(d => d.net === "guest").length} guest · ${online.filter(d => d.net === "iot").length} IoT` : "&nbsp;"}</div></div>
-    <div class="stat"><div class="k">${ic("clock")}Router up</div>
-      <div class="v">${sm ? dur(sm.uptime) : "…"}</div><div class="s">${D && D.block.enable === "on" ? `${D.list.filter(d => d.blocked).length} blocked` : "Nothing blocked"}</div></div>
-  </div>`;
-  if (!D) return status + skel(6);
+  const sub = D ? [`${online.length} online`, online.filter(d => d.net === "guest").length ? `${online.filter(d => d.net === "guest").length} on guest Wi-Fi` : "",
+    online.filter(d => d.net === "iot").length ? `${online.filter(d => d.net === "iot").length} IoT` : ""].filter(Boolean).join(", ") : "Loading…";
+  if (!D) return pageHead("Devices", sub) + skel(6);
   const counts = { all: D.list.length, home: 0, guest: 0, iot: 0, blocked: 0 };
   D.list.forEach(d => { counts[d.net]++; if (d.blocked) counts.blocked++; });
   const q = S.q.trim().toLowerCase();
-  const shown = sortDevices(D.list).filter(d =>
-    (S.filter === "all" || (S.filter === "blocked" ? d.blocked : d.net === S.filter)) &&
-    (!q || [devName(d), d.host, d.ip, d.mac, d.where].join(" ").toLowerCase().includes(q)));
+  const shown = shownDevices();
   const filters = [["all", "All"], ["home", "Home"], ["guest", "Guest"], ["iot", "IoT"], ["blocked", "Blocked"]]
     .filter(([k]) => k === "all" || counts[k])
     .map(([k, l]) => `<button data-filter="${k}" aria-pressed="${S.filter === k}">${l}<span class="n">${counts[k]}</span></button>`).join("");
-  return status + `<div class="toolbar">
-      <div class="input search">${ic("search")}<input id="q" placeholder="Search name, IP or MAC" value="${esc(S.q)}" autocomplete="off" style="margin-left:8px"></div>
-      <div class="seg" id="flt">${filters}</div>
-    </div>
-    <div class="list" id="dl">${shown.length ? shown.map(deviceRow).join("") : '<div class="empty">No devices match.</div>'}</div>`;
+  const tools = `<div class="toolbar">
+      <div class="input search">${ic("search")}<input id="q" placeholder="Search name, IP or MAC" value="${esc(S.q)}" autocomplete="off" aria-label="Search devices" style="margin-left:8px"></div>
+      <div class="seg" id="flt">${filters}</div></div>`;
+  return pageHead("Devices", sub, tools) + nowCard() + deviceGroups(shown, !!q);
 }
+// The live traffic band: totals now, and a stacked graph by network.
+const NETS = [["home", "Home"], ["guest", "Guest"], ["iot", "IoT"]];
+function nowCard() {
+  const F = S.flow || [], last = F[F.length - 1];
+  const down = last ? last.home + last.guest + last.iot : null, up = last ? last.up : null;
+  const big = v => { if (v == null) return "–"; const t = fmtRate(v).split(" "); return `${t[0]}<small>${t[1]}</small>`; };
+  const W = 600, H = 64, n = 36, max = Math.max(1e5, ...F.map(f => f.home + f.guest + f.iot));
+  const x = i => (W * i) / Math.max(1, F.length - 1), y = v => H - (v / max) * (H - 4);
+  let paths = "";
+  if (F.length > 1) {
+    const base = F.map(() => 0);
+    NETS.forEach(([k]) => {
+      const top = F.map((f, i) => base[i] + f[k]);
+      const d = "M" + top.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("L") + "L" + base.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).reverse().join("L") + "Z";
+      paths += `<path d="${d}" style="fill:var(--${k})" opacity="${k === "home" ? .85 : .9}"/>`;
+      top.forEach((v, i) => { base[i] = v; });
+    });
+  }
+  const legend = NETS.map(([k, l]) => `<span><i style="background:var(--${k})"></i>${l} ${last ? fmtRate(last[k]) : "–"}</span>`).join("")
+    + (last && last.mesh ? `<span>${last.mesh} on the mesh satellite not counted</span>` : "");
+  return `<section class="now" aria-label="Traffic right now">
+    <div class="nums"><div class="num"><span>Download now</span><b>${big(down)}</b></div><div class="num"><span>Upload now</span><b>${big(up)}</b></div></div>
+    <svg class="flow" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Download over the last 3 minutes">${paths || `<line x1="0" y1="${H - 1}" x2="${W}" y2="${H - 1}" style="stroke:var(--line-2)"/>`}</svg>
+    <div class="legend">${legend}</div></section>`;
+}
+// The devices matching the current filter and search: what the list shows, and
+// exactly what "Forget all offline" acts on.
+function shownDevices() {
+  const D = S.devices, q = S.q.trim().toLowerCase();
+  return sortDevices(D.list).filter(d =>
+    (S.filter === "all" || (S.filter === "blocked" ? d.blocked : d.net === S.filter)) &&
+    (!q || [devName(d), d.host, d.ip, d.mac, d.where].join(" ").toLowerCase().includes(q)));
+}
+// Online devices first; offline ones folded away (shown while searching), with a
+// way to forget the old ones.
+function deviceGroups(shown, searching) {
+  if (!shown.length) return '<div class="list" id="dl"><div class="empty">No devices match.</div></div>';
+  const on = shown.filter(d => d.online), off = shown.filter(d => !d.online);
+  const open = searching || S.showOffline;
+  const forgettable = off.filter(canForget);
+  const scope = S.filter !== "all" || searching ? "shown here" : "offline";
+  const offHead = off.length ? `<div class="grouph">${searching ? `<span class="linkbtn" style="cursor:default">Offline<span class="count">${off.length}</span></span>`
+      : `<button class="linkbtn" data-act="off-toggle" aria-expanded="${open}">${ic("chev", "chev" + (open ? " up" : ""))}Offline<span class="count">${off.length}</span></button>`}
+    ${open && forgettable.length > 1 ? `<button class="btn sm" data-act="forget-offline">Forget the ${forgettable.length} ${scope}…</button>` : ""}</div>` : "";
+  const thead = '<div class="thead" aria-hidden="true"><span></span><span>Device</span><span>Network</span><span>Connection</span><span class="c-addr">Address</span><span class="r">Now</span><span></span></div>';
+  return `<div class="list" id="dl">${thead}${on.length ? on.map(deviceRow).join("") : '<div class="empty">Nothing online right now.</div>'}</div>
+    ${offHead}${off.length && open ? `<div class="list">${off.map(deviceRow).join("")}</div>` : ""}`;
+}
+// Forget: not the device in use, and not one pinned on the allow list.
+const canForget = d => !d.this && !(S.devices && (S.devices.white || []).some(w => w.mac === d.mac && w.keep));
 
+const NET_NAME = { home: "Home", guest: "Guest", iot: "IoT" };
+const rateShort = v => v < 1000 ? "&lt;1 kbps" : fmtRate(v);
 function deviceRow(d) {
-  const open = S.open === d.mac;
-  const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>', S.devices.allowOn && d.net === "home" && !d.onWhite && '<span class="tag no" title="Not on the home Wi-Fi allow list">Not allowed</span>',
-    d.net === "guest" && '<span class="tag guest">Guest</span>', d.net === "guest" && d.online && d.onWhite && S.devices.allowOn && '<span class="tag cap" title="On the home allow list: this device sees a page with the home Wi-Fi password instead of internet">Join page</span>', d.net === "iot" && '<span class="tag iot">IoT</span>',
-    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>', d.cap && `<span class="tag cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
-  const meta = [d.ip, whereText(d), d.online && d.rssi ? `${d.rssi} dBm` : ""].filter(Boolean).join(" · ");
+  const open = S.open === d.mac, D = S.devices;
+  const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
+    d.online && D.allowOn && d.net === "home" && !d.onWhite && '<span class="tag no" title="Not on the home Wi-Fi allow list">Not allowed</span>',
+    d.net === "guest" && d.online && d.onWhite && D.allowOn && '<span class="tag cap" title="On the home allow list: it sees a page with the home Wi-Fi password instead of internet">Sent to home Wi-Fi</span>',
+    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>',
+    d.cap && `<span class="tag cap" title="Speed cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
+  const conn = d.online ? `${esc(whereText(d))}${d.rssi ? sigBars(d.rssi) : ""}` : esc(d.seen ? ago(D.now, d.seen) : "Offline");
+  const mob = [NET_NAME[d.net], d.online ? whereText(d) : (d.seen ? ago(D.now, d.seen) : "Offline"), d.ip].filter(Boolean).join(", ");
   const live = d.online && d.live && (d.live.down >= 1000 || d.live.up >= 1000)
-    ? `<div class="rate"><b>↓ ${fmtRate(d.live.down)}</b><br>↑ ${fmtRate(d.live.up)}</div>` : "";
-  return `<div class="row click ${d.online ? "" : "offline"} ${open ? "open" : ""}" data-mac="${d.mac}" tabindex="0" role="button" aria-expanded="${open}">
+    ? `<div class="rate"><b>↓ ${rateShort(d.live.down)}</b><br>↑ ${rateShort(d.live.up)}</div>` : "";
+  return `<div class="row dev click ${d.online ? "" : "offline"} ${open ? "open" : ""}" data-mac="${d.mac}" tabindex="0" role="button" aria-expanded="${open}">
       <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
-      <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${tags}</div><div class="meta">${esc(meta)}</div></div>
-      <div class="right">${live}${ic("chev", "chev")}</div>
+      <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${tags}</div><div class="meta m">${esc(mob)}</div></div>
+      <div class="cell c-net"><span class="netpill ${d.net}">${NET_NAME[d.net]}</span></div>
+      <div class="cell c-conn" title="${d.online && d.rssi ? `${d.rssi} dBm, ${sigWord(d.rssi).toLowerCase()} signal` : ""}">${conn}</div>
+      <div class="cell c-addr">${esc(d.ip || "")}</div>
+      <div class="cell r">${live}</div>
+      ${ic("chev", "chev")}
     </div>${open ? deviceDetail(d) : ""}`;
 }
 
@@ -651,7 +846,6 @@ function deviceDetail(d) {
   return `<div class="detail">
     ${S.editing === d.mac ? `<form class="rename" data-rename="${d.mac}"><div class="input"><input id="rn" value="${esc(d.name || d.host)}" maxlength="40" placeholder="Name"></div>
       <button class="btn sm primary">Save</button><button type="button" class="btn sm" data-act="cancel">Cancel</button></form>` : ""}
-    ${detailPanes(d)}
     ${S.capEdit === d.mac ? capEditor(d) : ""}
     <div class="acts">${toggles.join("")}
       ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
@@ -661,8 +855,10 @@ function deviceDetail(d) {
         ? (d.this ? "" : `<button class="btn sm" data-act="ac-remove" data-mac="${d.mac}">Remove from home Wi-Fi</button>`)
         : `<button class="btn sm" data-act="ac-allow" data-mac="${d.mac}">Allow on home Wi-Fi</button>`) : ""}
       ${canBlock ? `<button class="btn sm ${d.blocked ? "" : "danger"}" data-act="${d.blocked ? "unblock" : "block"}" data-mac="${d.mac}" ${busy ? "disabled" : ""}>${d.blocked ? "Unblock" : "Block"}</button>` : ""}
+      ${canForget(d) ? `<button class="btn sm danger" data-act="forget-device" data-mac="${d.mac}" ${busy ? "disabled" : ""} title="Clear its name, settings and allow-list entry, and hide it while it is offline">Forget</button>` : ""}
       ${busy ? '<span class="spin"></span>' : ""}
-    </div></div>`;
+    </div>
+    ${detailPanes(d)}</div>`;
 }
 // The nerdy part: polled every 2 s while a device is open (iot_net form "client").
 function sparkline(hist) {
@@ -834,7 +1030,7 @@ function simpleRow(d, control) {
   return `<div class="row ${d.online ? "" : "offline"}">
     <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
     <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${d.this ? '<span class="tag you">This device</span>' : ""}</div>
-      <div class="meta">${esc([d.ip, whereText(d)].filter(Boolean).join(" · "))}</div></div>
+      <div class="meta">${esc([d.ip, whereText(d)].filter(Boolean).join(", "))}</div></div>
     <div class="right">${control}</div></div>`;
 }
 const rowSwitch = (field, d, on, label) => `<label class="sw" title="${esc(label)}"><input type="checkbox" aria-label="${esc(label + ": " + devName(d))}" data-field="${field}" data-mac="${d.mac}" ${on ? "checked" : ""}><span></span></label>`;
@@ -847,12 +1043,12 @@ function pwField(id, value, ph) {
 
 function viewIot() {
   const c = S.iot, D = S.devices;
-  if (!c || !D) return `<h2>IoT Wi-Fi</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
+  if (!c || !D) return `<div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
   const f = S.dirty.iot || c;
   const isDirty = !!S.dirty.iot;
   const iotDevs = sortDevices(D.list.filter(d => d.net === "iot"));
   const homes = sortDevices(D.list.filter(d => d.net === "home"));
-  return `<h2>IoT Wi-Fi</h2>
+  return `
   <div class="card">
     <div class="card-h"><div style="flex:1"><h3>${esc(c.ssid || "IoT network")}</h3>
       <p>A separate 2.4 GHz network for smart devices. They can't reach your devices or this router.</p></div>
@@ -871,7 +1067,7 @@ function viewIot() {
   ${sectionList("IoT devices", iotDevs.map(d => simpleRow(d,
       (d.pinned ? `<span class="tag" title="This device always gets ${esc(d.pinned)}">Fixed ${esc(d.pinned.split(".").pop() === d.pinned ? d.pinned : "." + d.pinned.split(".").pop())}</span>` : "")
       + `<span class="muted" style="font-size:12.5px">Internet</span>` + rowSwitch("internet", d, d.internet, "Internet access")
-      + (d.pinned && (!d.online || c.lock === "on") ? `<button class="btn sm" data-act="forget" data-mac="${d.mac}">Forget</button>` : ""))),
+      + (d.pinned && (!d.online || c.lock === "on") ? `<button class="btn sm" data-act="forget" data-mac="${d.mac}">Remove fixed address</button>` : ""))),
     "Nothing has joined the IoT network yet.")}
   <h2>Who can reach IoT devices</h2>
   <div class="card"><div class="card-h"><div style="flex:1"><h3>Home devices</h3><p>${c.lan_mode === "selected" ? "Only the devices switched on below can open connections to IoT devices." : "Every device on your home network can open connections to IoT devices."}</p></div>
@@ -894,20 +1090,33 @@ function joinCard(c, iotDevs) {
     ${c.lock === "on" ? `<div class="card-f">${open ? `<button class="btn" data-act="iot-close">Lock now</button>` : `<button class="btn primary" data-act="iot-open">Allow new devices for 10 minutes</button>`}</div>` : ""}
   </div>`;
 }
-function viewSpeed() {
-  const g = S.guest, D = S.devices, w = S.shaping;
-  if (!g || !D || !w) return `<h2>Whole connection</h2><div class="card"><div class="card-b" style="padding:22px"><span class="spin"></span></div></div>` + skel(3);
-  const wf = S.dirty.wan || w, wDirty = !!S.dirty.wan;
-  const f = S.dirty.guest || g, isDirty = !!S.dirty.guest;
+function viewInternet() {
+  const D = S.devices, w = S.shaping, sm = S.summary;
+  const head = pageHead("Internet", "Your connection, and how its speed is shared.");
+  if (!D || !w) return head + `<div class="card"><div class="card-b" style="padding:22px;border:0"><span class="spin"></span></div></div>` + skel(2);
+  const wf = S.dirty.wan || w, wDirty = !!S.dirty.wan, auto = wf.auto === "on";
   const capped = sortDevices(D.list.filter(d => d.cap));
-  const guests = sortDevices(D.list.filter(d => d.net === "guest" || d.fast));
-  return `<h2>Whole connection</h2>
+  const up = sm && sm.internet === "connected";
+  const status = `<div class="card"><div class="card-h"><div style="flex:1"><h3><span class="dot ${up ? "on" : "bad"}" style="margin-right:8px;vertical-align:1px"></span>${sm ? (up ? "Connected" : "Not connected") : "Checking…"}</h3>
+      <p>${sm ? `Public address ${esc(sm.wan_ip || "none")}${sm.wan_uptime ? `, connected for ${dur(sm.wan_uptime)}` : ""}.` : ""}</p></div></div></div>`;
+  return head + status + usageCard() + `<h2>Whole connection</h2>
   <div class="card">
-    <div class="card-h"><div style="flex:1"><h3>Keep the connection responsive</h3><p>Caps all internet traffic a little under your plan's speed, so calls and games stay smooth while someone downloads. Set about 90% of what a speed test shows.</p></div>
+    <div class="card-h"><div style="flex:1"><h3>Keep the connection responsive</h3><p>Holds all internet traffic just under what your line can carry, so calls and games stay smooth while someone downloads.</p></div>
       <label class="sw"><input type="checkbox" id="w-enable" ${wf.enable === "on" ? "checked" : ""} aria-label="Whole-connection limit on"><span></span></label></div>
     <div class="card-b">
-      <div class="field"><label for="w-down">Download</label><div class="input short"><input id="w-down" inputmode="numeric" value="${esc(wf.down)}" placeholder="e.g. 18"><span class="unit">Mbps</span></div></div>
-      <div class="field"><label for="w-up">Upload</label><div class="input short"><input id="w-up" inputmode="numeric" value="${esc(wf.up)}" placeholder="e.g. 60"><span class="unit">Mbps</span></div></div>
+      <div class="field"><label>Speed</label><div class="seg" id="w-auto" data-v="${auto ? "on" : "off"}" role="group" aria-label="How the limit is set">
+          <button data-wauto="on" aria-pressed="${auto}">Automatic</button><button data-wauto="off" aria-pressed="${!auto}">Fixed</button></div>
+        <div class="help">${auto ? `Follows your line: it rises when there is room and backs off when the line fills up. <span id="w-now">${autoNow(w)}</span>`
+          : "Always the speeds below. Set about 90% of what a speed test shows. Anything your line gives beyond that goes unused."}</div></div>
+      <div class="field"><label for="w-down">${auto ? "Usual download" : "Download"}</label><div class="input short"><input id="w-down" inputmode="numeric" value="${esc(wf.down)}" placeholder="e.g. 30"><span class="unit">Mbps</span></div>
+        ${auto ? '<div class="help">Where it starts, and where it returns when the line is quiet. A normal speed test result is a good value.</div>' : ""}</div>
+      <div class="field"><label for="w-up">${auto ? "Usual upload" : "Upload"}</label><div class="input short"><input id="w-up" inputmode="numeric" value="${esc(wf.up)}" placeholder="e.g. 30"><span class="unit">Mbps</span></div></div>
+      ${auto ? `<details class="addmac" ${S.wRange ? "open" : ""} id="w-range"><summary>Lowest and highest it may go</summary>
+        <div class="field" style="border:0"><label for="w-min-d">Download</label><div class="rangerow"><div class="input short"><input id="w-min-d" inputmode="numeric" value="${esc(wf.min_down || "")}" placeholder="${Math.max(1, Math.floor((+wf.down || 30) / 2))}" aria-label="Lowest download"><span class="unit">Mbps</span></div><span class="muted">to</span>
+          <div class="input short"><input id="w-max-d" inputmode="numeric" value="${esc(wf.max_down || "")}" placeholder="${Math.min(1000, (+wf.down || 30) * 3)}" aria-label="Highest download"><span class="unit">Mbps</span></div></div></div>
+        <div class="field"><label for="w-min-u">Upload</label><div class="rangerow"><div class="input short"><input id="w-min-u" inputmode="numeric" value="${esc(wf.min_up || "")}" placeholder="${Math.max(1, Math.floor((+wf.up || 30) / 2))}" aria-label="Lowest upload"><span class="unit">Mbps</span></div><span class="muted">to</span>
+          <div class="input short"><input id="w-max-u" inputmode="numeric" value="${esc(wf.max_up || "")}" placeholder="${Math.min(1000, (+wf.up || 30) * 3)}" aria-label="Highest upload"><span class="unit">Mbps</span></div></div>
+          <div class="help">Leave empty for half to three times the usual speed.</div></div></details>` : ""}
       <div class="field"><label for="w-prio">Calls and games first</label><label class="sw"><input type="checkbox" id="w-prio" ${wf.prio === "on" ? "checked" : ""}><span></span></label>
         <div class="help">Zoom, Meet, Teams and FaceTime calls, game traffic and ping skip ahead of downloads and uploads. Works while the connection limit above is on.</div></div>
       <div class="field"><label for="w-glow">Guests go last</label><label class="sw"><input type="checkbox" id="w-glow" ${wf.guest_low === "on" ? "checked" : ""}><span></span></label>
@@ -917,9 +1126,156 @@ function viewSpeed() {
     ${wDirty ? `<div class="card-f"><button class="btn" data-act="w-reset">Discard</button><button class="btn primary" data-act="w-save">Save changes</button></div>` : ""}
   </div>
   ${sectionList("Capped devices", capped.map(d => simpleRow(d, `<span class="tag cap">${capText(d.cap)}</span><button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove</button>`)), "No device has its own cap. Open a device on the Devices tab and choose Cap speed.")}
-  <h2>Guest speed limit</h2>
+  ${namesCard()}`;
+}
+// Data used: this month and today, a bar per day, and who used it.
+const gb = b => b >= 1073741824 * 100 ? Math.round(b / 1073741824) + " GB" : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GB" : Math.round(b / 1048576) + " MB";
+function usageCard() {
+  const u = S.usage; if (!u) return "";
+  const m = u.months.find(x => x.month === u.month) || { down: 0, up: 0 };
+  const t = u.days.find(x => x.day === u.today) || { down: 0, up: 0 };
+  if (!u.days.length) return `<h2>Data used</h2><div class="card"><div class="card-b" style="border:0;padding:18px 20px">Nothing counted yet. The first figures appear within a minute.</div></div>`;
+  const first = u.days[0].day, monthName = new Date(u.month + "-15").toLocaleDateString(undefined, { month: "long" });
+  const dayLabel = d => new Date(d + "T12:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  // one bar per day, the last 30 days with data
+  const days = u.days.slice(-30), max = Math.max(1, ...days.map(d => d.down + d.up));
+  const W = 600, H = 70, bw = Math.min(26, (W - 4) / Math.max(days.length, 12) - 4);
+  const bars = days.map((d, i) => { const h = Math.max(2, (d.down + d.up) / max * (H - 6)), hu = d.up / max * (H - 6), x = 2 + i * (bw + 4);
+    return `<g><title>${dayLabel(d.day)}: ${gb(d.down)} down, ${gb(d.up)} up</title><rect x="${x.toFixed(1)}" y="${(H - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" style="fill:var(--signal)"/>
+      <rect x="${x.toFixed(1)}" y="${(H - hu).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0, hu).toFixed(1)}" rx="2" style="fill:var(--ink-3)"/></g>`; }).join("");
+  const counted = u.devices.reduce((a, d) => a + d.down + d.up, 0), other = m.down + m.up - counted;
+  const share = b => Math.max(1, Math.round(b / Math.max(1, m.down + m.up) * 100));
+  const row = (name, sub, d, up, total) => `<div class="row"><div style="min-width:0;grid-column:1 / 3"><div class="nm"><span>${name}</span></div><div class="meta">${sub}</div>
+      <div class="ubar"><i style="width:${Math.min(100, share(total))}%"></i></div></div><div class="right" style="text-align:right"><div><b style="color:var(--ink)">${gb(total)}</b><br><span style="font-size:12.5px">${gb(d)} down, ${gb(up)} up</span></div></div></div>`;
+  const rows = u.devices.filter(d => d.down + d.up >= 1048576).slice(0, 12).map(d => row(esc(d.name || d.mac), esc(d.mac), d.down, d.up, d.down + d.up));
+  if (other > 52428800) rows.push(row("Other devices", "On the mesh satellite or a cable. They can't be told apart here.", 0, 0, other).replace(/<br>.*?<\/span>/, ""));
+  return `<h2>Data used</h2>
+  <div class="card"><div class="now" style="border:0;box-shadow:none;margin:0;background:none">
+    <div class="nums"><div class="num"><span>${esc(monthName)} so far</span><b>${gb(m.down + m.up).replace(" ", "<small>")}</small></b></div>
+      <div class="num"><span>Today</span><b>${gb(t.down + t.up).replace(" ", "<small>")}</small></b></div></div>
+    <svg class="flow" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Data used per day">${bars}</svg>
+    <div class="legend"><span><i style="background:var(--signal)"></i>Download ${gb(m.down)}</span><span><i style="background:var(--ink-3)"></i>Upload ${gb(m.up)}</span><span>Counted since ${dayLabel(first)}</span></div></div></div>
+  ${rows.length ? sectionList(`Who used it in ${esc(monthName)}`, rows, "") + '<p class="muted" style="font-size:13px;margin:10px 2px 0;max-width:76ch">Per-device figures come from the Wi-Fi radio and include traffic between devices at home, so they are approximate. The totals above are exact.</p>' : ""}`;
+}
+// What the automatic limit is doing: "Now 41 Mbps down, 28 up."
+function autoNow(w) {
+  if (w.auto !== "on" || w.enable !== "on") return "";
+  if (!w.now_down) return "Starting…";
+  const m = k => (k / 1000).toFixed(k < 10000 ? 1 : 0);
+  return `<b>Now ${m(w.now_down)} Mbps down, ${m(w.now_up)} up.</b>${w.now_extra >= 15 ? " The line is full right now." : w.now_ceil_down || w.now_ceil_up ? " It has found the top of your line and is holding just under it." : ""}`;
+}
+// Local names: <name>.<suffix> for the router and devices, from the router's DNS.
+const dnsLabel = v => String(v || "").toLowerCase().replace(/[\s_.]/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 63);
+function namesCard() {
+  const n = S.names; if (!n) return "";
+  const f = S.dirty.names || n, dirty = !!S.dirty.names, sfx = dnsLabel(f.domain) || "home";
+  const first = dnsLabel(String(f.router).trim().split(/\s+/)[0]) || "router";
+  const D = S.devices, sample = D && D.list.find(d => d.online && d.net === "home" && !d.this);
+  const rows = f.hosts.map((h, i) => `<div class="hostrow"><div class="input"><input class="nm-host" id="nm-h-${i}-name" data-i="${i}" data-k="name" value="${esc(h.name)}" placeholder="name" aria-label="Name"><span class="unit">.${esc(sfx)}</span></div>
+      <div class="input"><input class="nm-host" id="nm-h-${i}-ip" data-i="${i}" data-k="ip" value="${esc(h.ip)}" placeholder="192.168.0.10" inputmode="decimal" aria-label="Address"></div>
+      <button class="iconbtn" data-act="nm-del" data-i="${i}" aria-label="Remove this name" title="Remove">${ic("x")}</button></div>`).join("");
+  return `<h2>Local names</h2>
   <div class="card">
-    <div class="card-h"><div style="flex:1"><h3>Limit each guest</h3><p>Caps every device on the guest Wi-Fi. A device's own cap wins over this.</p></div>
+    <div class="card-h"><div style="flex:1"><h3>Names and private lookups</h3>
+      <p>${f.enable === "on" ? `Open this dashboard at <b>${esc(first)}.${esc(sfx)}</b>, and reach any device as its name plus <b>.${esc(sfx)}</b>${sample ? `, like ${esc(dnsLabel(devName(sample)))}.${esc(sfx)}` : ""}.`
+        : "Give the router and every device a name you can type, like router.home."} Devices then ask the router for DNS, and it passes everything else on to the servers below.</p></div>
+      <label class="sw"><input type="checkbox" id="nm-enable" ${f.enable === "on" ? "checked" : ""} aria-label="Local names on"><span></span></label></div>
+    <div class="card-b">
+      <div class="field"><label for="nm-domain">Ending</label><div class="input short"><span class="unit" style="padding-left:0">.</span><input id="nm-domain" value="${esc(f.domain)}" maxlength="30" autocapitalize="off" spellcheck="false"></div>
+        <div class="help">Any word except "local", which phones and Macs look up differently.</div></div>
+      <div class="field"><label for="nm-router">This router's name</label><div class="input"><input id="nm-router" value="${esc(f.router)}" maxlength="80" autocapitalize="off" spellcheck="false"><span class="unit">.${esc(sfx)}</span></div>
+        <div class="help">Several names work too, separated by spaces.</div></div>
+      <div class="field"><label for="nm-doh">Encrypt lookups</label><label class="sw"><input type="checkbox" id="nm-doh" ${f.doh === "on" ? "checked" : ""}><span></span></label>
+        <div class="help">DNS over HTTPS: your internet provider can't see or change which sites are looked up. ${n.doh === "on" && n.enable === "on" ? (n.doh_ok
+          ? `<b style="color:var(--signal)">Working</b>${n.doh_answered ? `, ${n.doh_answered.toLocaleString()} lookups, about ${n.doh_ms} ms each` : ""}.`
+          : `<b style="color:var(--warn)">Not answering right now</b>; the plain servers below are used until it does.`) : ""}</div></div>
+      ${f.doh === "on" ? `<div class="field"><label for="nm-prov">Encrypted DNS service</label><div class="input short" style="max-width:240px"><select id="nm-prov" style="width:100%;background:transparent;border:0;color:inherit;font:inherit">
+          ${[["cloudflare", "Cloudflare (1.1.1.1)"], ["google", "Google (8.8.8.8)"], ["quad9", "Quad9 (9.9.9.9), blocks malware sites"]].map(([v, l]) => `<option value="${v}" ${f.provider === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>` : ""}
+      <div class="field"><label for="nm-up">${f.doh === "on" ? "Fallback, not encrypted" : "Look everything else up at"}</label><div class="input"><input id="nm-up" value="${esc(f.upstream)}" maxlength="80" inputmode="decimal" spellcheck="false"></div>
+        <div class="help">DNS servers, separated by spaces. 1.1.1.1 and 1.0.0.1 are Cloudflare.${f.doh === "on" ? " Used only while the encrypted service can't be reached, for example right after the router starts." : ""}</div></div>
+      <div class="field"><label>Your own names</label><div>${rows}<button class="btn sm" data-act="nm-add">Add a name</button></div>
+        <div class="help">For something with a fixed address, like a camera or a NAS. Devices get their own name without this.</div></div>
+    </div>
+    <div class="note">A device starts using this the next time it joins the Wi-Fi, or within about an hour. IoT devices keep using public DNS servers directly: they are not allowed to talk to the router.</div>
+    ${dirty ? `<div class="card-f"><button class="btn" data-act="nm-reset">Discard</button><button class="btn primary" data-act="nm-save">Save changes</button></div>` : ""}
+  </div>`;
+}
+function readNamesForm() {
+  const hosts = []; document.querySelectorAll(".nm-host").forEach(i => { (hosts[+i.dataset.i] = hosts[+i.dataset.i] || {})[i.dataset.k] = i.value.trim(); });
+  return { enable: $id("nm-enable").checked ? "on" : "off", domain: $id("nm-domain").value.trim(), router: $id("nm-router").value.trim(), upstream: $id("nm-up").value.trim(), hosts,
+           doh: $id("nm-doh").checked ? "on" : "off", provider: $id("nm-prov") ? $id("nm-prov").value : S.names.provider };
+}
+// The draft `f` becomes the state shown: used after reading the form, and directly
+// when a row was added or removed (re-reading the form then would undo that).
+function setNamesDraft(f, force) {
+  const n = S.names;
+  const same = ["enable", "domain", "router", "upstream", "doh", "provider"].every(k => f[k] === n[k]) && JSON.stringify(f.hosts) === JSON.stringify(n.hosts);
+  const was = !!S.dirty.names;
+  if (same) delete S.dirty.names; else S.dirty.names = f;
+  if (force || was !== !same) render();
+}
+function markNames(force) { setNamesDraft(readNamesForm(), force); }
+async function saveNames() {
+  const f = S.dirty.names; if (!f) return;
+  const hosts = f.hosts.filter(h => h.name || h.ip);
+  if (hosts.some(h => !dnsLabel(h.name) || !/^\d+\.\d+\.\d+\.\d+$/.test(h.ip))) return toast("Each of your own names needs a name and an address like 192.168.0.10.", true);
+  try {
+    const n = await iot("names", { operation: "write", enable: f.enable, domain: f.domain, router: f.router, upstream: f.upstream, doh: f.doh, provider: f.provider, hosts: hosts.map(h => `${dnsLabel(h.name)}=${h.ip}`).join(" ") });
+    if (!Array.isArray(n.hosts)) n.hosts = [];
+    S.names = n; delete S.dirty.names; render();
+    toast(n.enable === "on" ? `Saved. ${dnsLabel(n.router.split(" ")[0])}.${n.domain} works once a device rejoins the Wi-Fi.` : "Local names off");
+  } catch (e) { if (e instanceof AuthError) fail(e); else toast(e.code && e.code !== "-1" ? `Not saved: ${e.code}.` : "Not saved. Check the fields.", true); }
+}
+
+// The router's Wi-Fi networks, from the stock settings (S.wifi).
+function buildNets() {
+  const W = S.wifi, nets = [];
+  if (!W) return nets;
+  if (W.w2) {
+    if (W.smart || (W.w5 && W.w5.ssid === W.w2.ssid && W.w5.psk_key === W.w2.psk_key))
+      nets.push({ id: "main", ssid: W.w2.ssid, band: "2.4 and 5 GHz, Smart Connect", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
+    else {
+      nets.push({ id: "w2", ssid: W.w2.ssid, band: "2.4 GHz", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
+      if (W.w5) nets.push({ id: "w5", ssid: W.w5.ssid, band: "5 GHz", key: W.w5.psk_key, on: W.w5.enable === "on", edit: "wirelessSettingsAdv" });
+    }
+  }
+  if (W.g2) nets.push({ id: "g2", ssid: W.g2.ssid, band: "2.4 GHz", key: W.g2.psk_key, on: W.g2.enable === "on", edit: "guestNetworkAdv" });
+  if (W.g5) nets.push({ id: "g5", ssid: W.g5.ssid, band: "5 GHz", key: W.g5.psk_key, on: W.g5.enable === "on", edit: "guestNetworkAdv" });
+  if (S.iot) nets.push({ id: "iotnet", ssid: S.iot.ssid, band: "2.4 GHz", key: S.iot.password, on: S.iot.enable === "on" });
+  return nets;
+}
+function netCards(ids) {
+  const nets = (S.nets = buildNets()).filter(n => ids.includes(n.id));
+  if (!S.wifi) return `<div class="nets">${'<div class="card net"><span class="spin"></span></div>'.repeat(ids.length > 1 ? 2 : 1)}</div>`;
+  return `<div class="nets">${nets.map(n => `<div class="card net ${n.on ? "" : "off-net"}">
+      <div class="t">${ic(n.id === "iotnet" ? "iot" : /^g/.test(n.id) ? "guest" : "wifi")}<b>${esc(n.ssid)}</b><span class="spacer"></span>${n.on ? '<span class="tag you">On</span>' : '<span class="tag">Off</span>'}</div>
+      <div class="band">${esc(n.band)}</div>
+      ${n.key ? `<div class="pw"><code>${S.reveal[n.id] ? esc(n.key) : "•".repeat(Math.min(n.key.length, 14))}</code>
+        <button class="iconbtn" data-reveal="${n.id}" aria-label="Show password" title="Show password">${ic("eye")}</button>
+        <button class="iconbtn" data-copy="${n.id}" aria-label="Copy password" title="Copy password">${ic("copy")}</button>
+        <button class="iconbtn" data-qr="${n.id}" aria-label="Show QR code" title="QR code to join">${ic("qr")}</button></div>` : '<div class="muted" style="font-size:13px">Open network</div>'}
+      ${S.qr === n.id ? `<div class="qr" id="qrbox"></div>` : ""}
+      ${n.edit ? `<div style="margin-top:12px;font-size:13px"><a href="${FULL}" data-go="${n.edit}">Change name or password in TP-Link settings ${ic("ext").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')}</a></div>` : ""}
+    </div>`).join("")}</div>`;
+}
+
+// Networks: one page per network, with everything about it in one place.
+function viewNetworks() {
+  const D = S.devices, on = k => D ? D.list.filter(d => d.online && d.net === k).length : 0;
+  const seg = `<div class="seg" role="tablist" aria-label="Network">${SUBNETS.map(([k, l]) =>
+    `<button data-subnet="${k}" role="tab" aria-pressed="${S.net === k}" aria-selected="${S.net === k}">${l}<span class="n">${on(k)}</span></button>`).join("")}</div>`;
+  const sub = { home: "Your own devices. Only the ones you allow can join.", guest: "For visitors: internet only, kept away from your devices.", iot: "For smart devices: cut off from your home devices and this router." }[S.net];
+  const body = S.net === "guest" ? guestPage() : S.net === "iot" ? viewIot() : netCards(["main", "w2", "w5"]) + accessCard();
+  return pageHead("Networks", sub, seg) + body;
+}
+function guestPage() {
+  const g = S.guest, D = S.devices;
+  if (!g || !D) return netCards(["g2", "g5"]) + skel(2);
+  const f = S.dirty.guest || g, isDirty = !!S.dirty.guest;
+  const guests = sortDevices(D.list.filter(d => d.net === "guest" || d.fast));
+  return netCards(["g2", "g5"]) + `<h2>Speed for each guest</h2>
+  <div class="card">
+    <div class="card-h"><div style="flex:1"><h3>Limit each guest</h3><p>Caps every device on the guest Wi-Fi. A device's own speed cap wins over this.</p></div>
       <label class="sw"><input type="checkbox" id="g-enable" ${f.enable === "on" ? "checked" : ""} aria-label="Guest speed limit on"><span></span></label></div>
     <div class="card-b">
       <div class="field"><label for="g-down">Download</label><div class="input short"><input id="g-down" inputmode="numeric" value="${esc(f.down)}"><span class="unit">Mbps</span></div></div>
@@ -927,36 +1283,8 @@ function viewSpeed() {
     </div>
     ${isDirty ? `<div class="card-f"><button class="btn" data-act="g-reset">Discard</button><button class="btn primary" data-act="g-save">Save changes</button></div>` : ""}
   </div>
-  ${sectionList("Guests", guests.map(d => simpleRow(d, g.enable === "on" ? `<span class="muted" style="font-size:12.5px">Full speed</span>` + rowSwitch("fast", d, d.fast, "Full speed") : "")), "No one is on the guest Wi-Fi.")}`;
-}
-
-function viewWifi() {
-  const W = S.wifi;
-  if (!W) return `<h2>Wi-Fi networks</h2><div class="nets">${'<div class="card net"><span class="spin"></span></div>'.repeat(3)}</div>`;
-  const nets = [];
-  if (W.w2) {
-    if (W.smart || (W.w5 && W.w5.ssid === W.w2.ssid && W.w5.psk_key === W.w2.psk_key))
-      nets.push({ id: "main", ssid: W.w2.ssid, band: "2.4 GHz + 5 GHz · Smart Connect", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
-    else {
-      nets.push({ id: "w2", ssid: W.w2.ssid, band: "2.4 GHz", key: W.w2.psk_key, on: W.w2.enable === "on", edit: "wirelessSettingsAdv" });
-      if (W.w5) nets.push({ id: "w5", ssid: W.w5.ssid, band: "5 GHz", key: W.w5.psk_key, on: W.w5.enable === "on", edit: "wirelessSettingsAdv" });
-    }
-  }
-  if (W.g2) nets.push({ id: "g2", ssid: W.g2.ssid, band: "Guest · 2.4 GHz", key: W.g2.psk_key, on: W.g2.enable === "on", edit: "guestNetworkAdv" });
-  if (W.g5) nets.push({ id: "g5", ssid: W.g5.ssid, band: "Guest · 5 GHz", key: W.g5.psk_key, on: W.g5.enable === "on", edit: "guestNetworkAdv" });
-  if (S.iot) nets.push({ id: "iotnet", ssid: S.iot.ssid, band: "IoT · 2.4 GHz", key: S.iot.password, on: S.iot.enable === "on", tab: "iot" });
-  S.nets = nets;
-  return `<h2>Wi-Fi networks</h2><div class="nets">${nets.map(n => `<div class="card net ${n.on ? "" : "off-net"}">
-      <div class="t">${ic(n.id === "iotnet" ? "iot" : /^g/.test(n.id) ? "guest" : "wifi")}<b>${esc(n.ssid)}</b><span class="spacer"></span>${n.on ? '<span class="dot on"></span>' : '<span class="tag">Off</span>'}</div>
-      <div class="band">${esc(n.band)}</div>
-      ${n.key ? `<div class="pw"><code>${S.reveal[n.id] ? esc(n.key) : "•".repeat(Math.min(n.key.length, 14))}</code>
-        <button class="iconbtn" data-reveal="${n.id}" aria-label="Show password">${ic("eye")}</button>
-        <button class="iconbtn" data-copy="${n.id}" aria-label="Copy password">${ic("copy")}</button>
-        <button class="iconbtn" data-qr="${n.id}" aria-label="Show QR code">${ic("qr")}</button></div>` : '<div class="muted" style="font-size:13px">Open network</div>'}
-      ${S.qr === n.id ? `<div class="qr" id="qrbox"></div>` : ""}
-      <div style="margin-top:12px;font-size:13px">${n.tab ? `<a href="#${n.tab}" data-tab-link="${n.tab}">Edit on the IoT page</a>` : `<a href="${FULL}" data-go="${n.edit}">Edit in TP-Link settings ${ic("ext").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')}</a>`}</div>
-    </div>`).join("")}</div>
-  ${accessCard()}`;
+  ${sectionList("Guests", guests.map(d => simpleRow(d, g.enable === "on" ? `<span class="muted" style="font-size:13px">Full speed</span>` + rowSwitch("fast", d, d.fast, "Full speed") : "")), "No one is on the guest Wi-Fi.")}
+  <p class="muted" style="font-size:13px;margin:12px 2px 0;max-width:72ch">To let a guest use the home Wi-Fi, open them on the Devices page and choose Allow on home Wi-Fi. While they stay on the guest Wi-Fi, they see a page with the home Wi-Fi name and password.</p>`;
 }
 
 // Who can join the home network: our own allow list (iot.sh home_sync). The home
@@ -969,43 +1297,51 @@ function accessCard() {
   if (!D) return `<h2>Who can join the home network</h2>` + skel(3);
   if (!H) return `<h2>Who can join the home network</h2><div class="card"><div class="card-b" style="padding:18px">Couldn't read the allow list.</div></div>`;
   const on = D.allowOn, ssid = (S.wifi && S.wifi.w2 && S.wifi.w2.ssid) || "the home Wi-Fi";
-  const meshMacs = new Set(meshUnits(D).map(d => d.mac));
   const byMac = {}; D.list.concat(D.mesh).forEach(d => { byMac[d.mac] = d; });
   const busy = S.busy.ac, now = H.now || Math.floor(Date.now() / 1000);
   const left = Math.max(0, Math.round((H.open_left || 0) - (Date.now() - (S.homeAt || Date.now())) / 1000));
   const open = on && left > 0, mmss = x => `${Math.floor(x / 60)}:${String(x % 60).padStart(2, "0")}`;
   const allowed = D.white.map(x => {
-    const d = byMac[x.mac], mesh = meshMacs.has(x.mac), live = d && d.online || mesh;
+    const d = byMac[x.mac], mesh = x.mesh, live = d && d.online || mesh;
     const nm = d ? devName(d) : x.name || x.mac;
-    const meta = [x.mac, mesh ? "Mesh unit (the satellite itself)" : d && d.online ? whereText(d) : ago(now, x.seen)].join(" · ");
-    const right = (x.keep ? '<span class="tag" title="Never removed for being away">Always</span>' : "")
+    const meta = [x.mac, mesh ? "Mesh satellite" : d && d.online ? whereText(d) : ago(now, x.seen)].join(", ");
+    const expiring = +H.expire > 0;
+    const right = (expiring && x.keep ? '<span class="tag" title="Stays allowed however long it is away">Kept</span>' : "")
       + (d && d.this ? '<span class="tag you">This device</span>'
-        : `<button class="btn sm" data-act="ac-${x.keep ? "unkeep" : "keep"}" data-mac="${x.mac}" ${busy ? "disabled" : ""} title="${x.keep ? "Let it expire like the others" : "Never remove it for being away"}">${x.keep ? "Unpin" : "Pin"}</button>
+        : `${expiring ? `<button class="btn sm" data-act="ac-${x.keep ? "unkeep" : "keep"}" data-mac="${x.mac}" ${busy ? "disabled" : ""} title="${x.keep ? "Remove it after the same absence as the others" : "Keep it allowed however long it is away"}">${x.keep ? "Stop keeping" : "Keep"}</button>` : ""}
            <button class="btn sm" data-act="ac-remove" data-mac="${x.mac}" ${busy ? "disabled" : ""}>Remove</button>`);
-    return { live, nm, html: `<div class="row ${live ? "" : "offline"}">
+    return { live, nm, mesh, html: `<div class="row ${live ? "" : "offline"}">
       <div class="av">${ic(d && !mesh ? connIcon(d) : mesh ? "mesh" : "wifi")}<span class="dot ${live ? "on" : ""}"></span></div>
       <div style="min-width:0"><div class="nm"><span>${esc(nm)}</span>${d && d.net === "guest" ? '<span class="tag guest">On guest now</span>' : ""}</div><div class="meta mono">${esc(meta)}</div></div>
       <div class="right">${right}</div></div>` };
-  }).sort((a, b) => (b.live - a.live) || a.nm.localeCompare(b.nm, undefined, { sensitivity: "base" })).map(x => x.html);
+  }).sort((a, b) => (b.live - a.live) || a.nm.localeCompare(b.nm, undefined, { sensitivity: "base" }));
+  // The mesh satellite's entries fold into one line; Show brings them back, so
+  // nothing on the list is ever out of reach.
+  const meshRows = allowed.filter(x => x.mesh), devRows = allowed.filter(x => !x.mesh).map(x => x.html);
+  const meshLine = meshRows.length ? `<div class="row"><div class="av">${ic("mesh")}<span class="dot on"></span></div>
+      <div style="min-width:0"><div class="nm"><span>Mesh satellite</span></div><div class="meta">${meshRows.length} address${meshRows.length === 1 ? "" : "es"}, kept allowed so the satellite stays connected</div></div>
+      <div class="right"><button class="btn sm" data-act="mesh-toggle" aria-expanded="${!!S.showMesh}">${S.showMesh ? "Hide" : "Show"}</button></div></div>${S.showMesh ? meshRows.map(x => x.html).join("") : ""}` : "";
+  const listRows = devRows.concat(meshLine ? [meshLine] : []);
   const others = sortDevices(D.list.filter(d => d.net !== "iot" && !d.onWhite)).map(d => `<div class="row ${d.online ? "" : "offline"}">
     <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
     <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span>${d.net === "guest" ? '<span class="tag guest">Guest</span>' : ""}${isPrivateMac(d.mac) ? '<span class="tag" title="Private (random) address: the phone may show up with a new one later">Private address</span>' : ""}${(H.dropped || []).includes(d.mac.toLowerCase()) ? '<span class="tag blocked">Cut off</span>' : ""}</div>
-      <div class="meta mono">${esc([d.mac, d.ip, whereText(d)].filter(Boolean).join(" · "))}</div></div>
+      <div class="meta mono">${esc([d.mac, d.ip, whereText(d)].filter(Boolean).join(", "))}</div></div>
     <div class="right"><button class="btn sm" data-act="ac-allow" data-mac="${d.mac}" ${busy ? "disabled" : ""}>Allow</button></div></div>`);
   const exp = [[0, "Never"], [7, "After 7 days away"], [14, "After 14 days away"], [30, "After 30 days away"], [90, "After 90 days away"]];
   return `<h2>Who can join the home network</h2>
   <div class="card"><div class="card-h"><div style="flex:1"><h3>Only allowed devices</h3>
     <p>${!on ? "Off. Any device with the password can join. You can build the list first, then turn this on."
       : open ? `<b style="color:var(--warn)">Open to new devices · ${mmss(left)} left.</b> Connect the new device now; it is added as soon as it shows up.`
-      : `Only the ${D.white.length} devices below can use ${esc(ssid)}, on Wi-Fi, through the mesh satellite or on a cable. Others are turned away, even with the password. The guest Wi-Fi still lets in anyone with its password.`}</p></div>
+      : `Only the ${devRows.length} devices below${meshRows.length ? " and the mesh satellite" : ""} can use ${esc(ssid)}, on Wi-Fi, through the mesh satellite or on a cable. Others are turned away, even with the password. The guest Wi-Fi still lets in anyone with its password.`}</p></div>
     ${busy ? '<span class="spin"></span>' : ""}<label class="sw"><input type="checkbox" id="ac-on" ${on ? "checked" : ""} ${busy ? "disabled" : ""} aria-label="Only allowed devices can join the home network"><span></span></label></div>
-    <div class="card-b"><div class="field"><label for="ac-exp">Remove devices</label><div class="input short" style="max-width:240px"><select id="ac-exp" style="width:100%;background:transparent;border:0;color:inherit;font:inherit">${exp.map(([v, l]) => `<option value="${v}" ${+H.expire === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-      <div class="help">Devices not seen for this long are taken off the list. Pinned devices never are.</div></div></div>
-    <form class="acadd" id="ac-add"><div class="input"><input id="ac-name" maxlength="32" placeholder="Name" autocomplete="off"></div>
-      <div class="input"><input id="ac-mac" class="mono" placeholder="MAC, e.g. AA:BB:CC:DD:EE:FF" autocomplete="off"></div>
-      <button class="btn" ${busy ? "disabled" : ""}>Add</button></form>
+    <div class="card-b"><div class="field"><label for="ac-exp">Remove home access after absence</label><div class="input short" style="max-width:240px"><select id="ac-exp" style="width:100%;background:transparent;border:0;color:inherit;font:inherit">${exp.map(([v, l]) => `<option value="${v}" ${+H.expire === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="help">A device not seen for this long is taken off the list. This device and the mesh satellite always stay${+H.expire > 0 ? "; use Keep on others that should too" : ""}.</div></div>
+      <details class="addmac" ${S.addMac ? "open" : ""}><summary>Add a device by its MAC address</summary>
+        <form class="acadd" id="ac-add"><div class="input"><input id="ac-name" maxlength="32" placeholder="Name" autocomplete="off"></div>
+        <div class="input"><input id="ac-mac" class="mono" placeholder="MAC, e.g. AA:BB:CC:DD:EE:FF" autocomplete="off"></div>
+        <button class="btn" ${busy ? "disabled" : ""}>Add</button></form></details></div>
     ${on ? `<div class="card-f">${open ? `<button class="btn" data-act="ac-close">Lock now</button>` : `<button class="btn primary" data-act="ac-open">Allow new devices for 10 minutes</button>`}</div>` : ""}</div>
-  ${sectionList("Allowed", allowed, "The list is empty.")}
+  ${sectionList("Allowed", listRows, "The list is empty.").replace(`<span class="count">${listRows.length}</span>`, `<span class="count">${devRows.length}</span>`)}
   ${sectionList("Not on the list", others, "Every device seen is on the list.")}`;
 }
 
@@ -1061,7 +1397,9 @@ document.addEventListener("click", async ev => {
   const t = ev.target;
   // The stock UI ignores page links; iot-ui/locale.js (loaded inside it) opens this page once it is up.
   const gl = t.closest("[data-go]"); if (gl) { try { sessionStorage.setItem("ax10-go", gl.dataset.go); } catch (x) {} return; }
-  const tl = t.closest("[data-tab-link]"); if (tl) { ev.preventDefault(); go(tl.dataset.tabLink); return; }
+  const tl = t.closest("[data-tab-link]"); if (tl) { ev.preventDefault(); const r = route(tl.dataset.tabLink); go(r.tab, r.net); return; }
+  const wa = t.closest("[data-wauto]"); if (wa) { $id("w-auto").dataset.v = wa.dataset.wauto; markWan(true); return; }
+  const sn = t.closest("[data-subnet]"); if (sn) { go("networks", sn.dataset.subnet); return; }
   const f = t.closest("[data-filter]"); if (f) { S.filter = f.dataset.filter; S.open = null; render(); return; }
   const rv = t.closest("[data-reveal]"); if (rv) { S.reveal[rv.dataset.reveal] = !S.reveal[rv.dataset.reveal]; render(); return; }
   const cp = t.closest("[data-copy]"); if (cp) {
@@ -1096,16 +1434,24 @@ document.addEventListener("click", async ev => {
     }
     if (act === "forget") {
       const d = findDev(mac); if (!d) return;
-      if (!await confirmBox(`Forget ${devName(d)}?`, S.iot && S.iot.lock === "on" ? "It loses its fixed address and can no longer join the IoT network until you allow new devices." : "It loses its fixed address. If it joins again it gets a new one.", "Forget", true)) return;
-      try { await iot("device", { operation: "write", mac, pin: "off" }); await loadDevices(); render(); toast(`Forgot ${devName(d)}`); } catch (e) { fail(e); }
+      if (!await confirmBox(`Remove the fixed address of ${devName(d)}?`, S.iot && S.iot.lock === "on" ? "It can no longer join the IoT network until you allow new devices." : "If it joins again it gets a new address.", "Remove fixed address", true)) return;
+      try { await iot("device", { operation: "write", mac, pin: "off" }); await loadDevices(); render(); toast(`Fixed address removed: ${devName(d)}`); } catch (e) { fail(e); }
       return;
     }
     if (act === "conns-on") { S.conns = { mac }; render(); watchConns(); return; }
     if (act === "conns-off") { S.conns = null; watchConns(); render(); return; }
     if (act === "cap-remove") return setCap(mac, "");
+    if (act === "nm-save") return saveNames();
+    if (act === "nm-reset") { delete S.dirty.names; render(); return; }
+    if (act === "nm-add") { const f = readNamesForm(); f.hosts.push({ name: "", ip: "" }); setNamesDraft(f, true); return; }
+    if (act === "nm-del") { const f = readNamesForm(); f.hosts.splice(+a.dataset.i, 1); setNamesDraft(f, true); return; }
+    if (act === "mesh-toggle") { S.showMesh = !S.showMesh; render(); return; }
+    if (act === "off-toggle") { S.showOffline = !S.showOffline; S.open = null; render(); return; }
+    if (act === "forget-device") { const d = findDev(mac); return forgetDevices(d ? [d] : []); }
+    if (act === "forget-offline") return forgetDevices(shownDevices().filter(d => !d.online && canForget(d)));
     if (act === "ac-allow") { const d = findDev(mac); return acAllow(mac, d && (d.name || d.host)); }
     if (act === "ac-remove") return acRemove(mac);
-    if (act === "ac-keep" || act === "ac-unkeep") return acBusy(async () => { await homeAllow(mac, act === "ac-keep" ? "keep" : "unkeep"); toast(act === "ac-keep" ? "Pinned: never removed for being away" : "Unpinned"); });
+    if (act === "ac-keep" || act === "ac-unkeep") return acBusy(async () => { await homeAllow(mac, act === "ac-keep" ? "keep" : "unkeep"); toast(act === "ac-keep" ? "Kept: stays allowed however long it is away" : "No longer kept"); });
     if (act === "ac-open" || act === "ac-close") return acBusy(async () => { await iot("home_open", { operation: "write", seconds: act === "ac-open" ? 600 : 0 }); toast(act === "ac-open" ? "New devices can join for 10 minutes" : "Home network locked"); });
   }
   if (t.closest(".detail") || t.closest("input,label,button,a")) return;
@@ -1121,17 +1467,21 @@ document.addEventListener("change", ev => {
   if (i.dataset.field && i.dataset.mac) return setDevice(i.dataset.mac, i.dataset.field, i.checked);
   if (i.id === "iot-lock") return setLock(i.checked);
   if (i.id === "ac-on") return setAllowList(i.checked);
+  if (/^nm-/.test(i.id)) return markNames(true);
   if (i.id === "ac-exp") return acBusy(async () => { await iot("home", { operation: "write", expire: i.value }); toast(+i.value ? `Devices away for ${i.value} days are removed` : "Devices are never removed for being away"); });
   if (/^iot-/.test(i.id)) return markIot();
   if (/^g-/.test(i.id)) return markGuest();
   if (/^w-/.test(i.id)) return markWan();
+  if (/^nm-/.test(i.id) || i.classList.contains("nm-host")) return markNames();
 });
+document.addEventListener("toggle", ev => { const e = ev.target; if (!e.classList || !e.classList.contains("addmac")) return; if (e.id === "w-range") S.wRange = e.open; else S.addMac = e.open; }, true);
 document.addEventListener("input", ev => {
   const i = ev.target;
   if (i.id === "q") { S.q = i.value; S.open = null; render(); return; }
   if (/^iot-/.test(i.id)) return markIot();
   if (/^g-/.test(i.id)) return markGuest();
   if (/^w-/.test(i.id)) return markWan();
+  if (/^nm-/.test(i.id)) return markNames();
 });
 document.addEventListener("submit", ev => {
   if (ev.target.id === "ac-add") {
@@ -1174,7 +1524,7 @@ async function acRemove(mac) {
   const D = S.devices, d = findDev(mac) || D.mesh.find(m => m.mac === mac), nm = d ? devName(d) : mac;
   if (d && d.this) return toast("That's the device you're using; removing it would lock you out.", true);
   if (D.allowOn && D.white.length <= 1) return toast("That's the last device on the list. Turn the allow list off instead.", true);
-  const mesh = meshUnits(D).some(m => m.mac === mac) || MESH_RE.test(nm);
+  const mesh = (D.white.find(w => w.mac === mac) || {}).mesh || meshUnits(D).some(m => m.mac === mac) || MESH_RE.test(nm);   // for the warning only
   if (!await confirmBox(`Remove ${nm}?`, (mesh ? "This looks like mesh or Wi-Fi equipment; removing it can take the satellite and everything on it offline. " : "")
     + (D.allowOn ? "It is disconnected now and can't rejoin the home network. The guest Wi-Fi still works for it." : "It won't be able to join once the allow list is on."), "Remove", true)) return;
   return acBusy(async () => { await homeAllow(mac, "remove"); toast(`Removed ${nm}`); });
@@ -1186,7 +1536,9 @@ async function setAllowList(on) {
     return acBusy(async () => { await iot("home", { operation: "write", lock: "off" }); toast("Allow list off"); });
   }
   // Never lock out the device in use or the mesh satellite: pin them first.
-  const must = D.list.filter(d => d.this && !d.onWhite).concat(meshUnits(D).filter(m => !D.white.some(w => w.mac === m.mac)));
+  const have = new Set(D.white.map(w => w.mac));
+  const must = D.list.filter(d => d.this && !d.onWhite)
+    .concat(D.home.mesh_macs.map(m => m.toUpperCase()).filter(m => !have.has(m)).map(m => ({ mac: m, name: "Mesh satellite" })));
   const out = D.list.filter(d => d.online && d.net === "home" && !d.onWhite && !d.this);
   const msg = [`Only the ${D.white.length + must.length} devices on the list can use the home network.`,
     must.length ? `${must.map(devName).join(", ")} ${must.length === 1 ? "is" : "are"} added first so you stay connected.` : "",
@@ -1197,6 +1549,35 @@ async function setAllowList(on) {
     await iot("home", { operation: "write", lock: "on" });
     toast("Allow list on: only listed devices can use the home network");
   });
+}
+
+async function forgetDevices(list) {
+  if (!list.length) return;
+  const one = list.length === 1, nm = one ? devName(list[0]) : `${list.length} devices`;
+  const listed = list.filter(d => d.onWhite).length, online = list.filter(d => d.online).length;
+  const text = [(one ? "Its" : "Their") + " name, speed cap and other settings are cleared.",
+    listed ? (one ? "It is taken off the home allow list" : `${listed} of them are taken off the home allow list`) + (online && S.devices.allowOn ? ", so it is disconnected from the home network now." : ".") : "",
+    list.some(d => d.pinned) ? "An IoT device loses its fixed address and has to be let in again." : "",
+    online ? "It stays on this list while it is connected." : (one ? "It leaves this list, and comes back if it reconnects." : "They leave this list, and come back if they reconnect.")].filter(Boolean).join(" ");
+  if (!await confirmBox(`Forget ${nm}?`, text, "Forget", true)) return;
+  list.forEach(d => { S.busy[d.mac] = true; }); render();
+  let done = 0;
+  try {
+    for (let i = 0; i < list.length; i += 50) {          // the router takes at most 64 at a time
+      const part = list.slice(i, i + 50);
+      await iot("device", { operation: "write", forget: part.map(d => d.mac).join(",") });
+      done += part.length;
+    }
+    toast(`Forgot ${nm}`);
+  } catch (e) {
+    if (e instanceof AuthError) fail(e);
+    else toast(done ? `Forgot ${done} of ${list.length}; the rest failed. ${e.code || ""}` : `Nothing was forgotten. ${e.code && e.code !== "-1" ? e.code : ""}`, true);
+  }
+  if (list.some(d => d.mac === S.open)) { S.open = null; watchDetail(); }
+  list.forEach(d => { delete S.busy[d.mac]; });
+  await new Promise(r => setTimeout(r, 800));
+  try { await loadDevices(); } catch (e) { if (e instanceof AuthError) fail(e); }
+  render();
 }
 
 async function setLock(on) {
@@ -1243,18 +1624,28 @@ async function setCap(mac, cap) {
     await loadDevices(); render();
   } catch (e) { fail(e); }
 }
-function readWanForm() { return { enable: $id("w-enable").checked ? "on" : "off", down: $id("w-down").value.trim(), up: $id("w-up").value.trim(), prio: $id("w-prio").checked ? "on" : "off", guest_low: $id("w-glow").checked ? "on" : "off" }; }
-function markWan() {
-  const f = readWanForm(), w = S.shaping, same = ["enable", "down", "up", "prio", "guest_low"].every(k => String(f[k]) === String(w[k] || (k === "prio" || k === "guest_low" ? "off" : "")));
+function readWanForm() {
+  const v = (id, k) => $id(id) ? $id(id).value.trim() : (S.dirty.wan || S.shaping)[k] || "";
+  return { enable: $id("w-enable").checked ? "on" : "off", down: $id("w-down").value.trim(), up: $id("w-up").value.trim(), prio: $id("w-prio").checked ? "on" : "off", guest_low: $id("w-glow").checked ? "on" : "off",
+           auto: $id("w-auto").dataset.v, min_down: v("w-min-d", "min_down"), max_down: v("w-max-d", "max_down"), min_up: v("w-min-u", "min_up"), max_up: v("w-max-u", "max_up") };
+}
+function markWan(force) {
+  const f = readWanForm(), w = S.shaping;
+  const same = ["enable", "down", "up", "prio", "guest_low", "auto", "min_down", "max_down", "min_up", "max_up"].every(k => String(f[k]) === String(w[k] || (/^(prio|guest_low|auto)$/.test(k) ? "off" : "")));
   const was = !!S.dirty.wan;
-  if (same) delete S.dirty.wan; else S.dirty.wan = f;
-  if (was !== !same) render();
+  if (same) delete S.dirty.wan; else S.dirty.wan = Object.assign({}, w, f);
+  if (force || was !== !same) render();
 }
 async function saveWan() {
   const f = S.dirty.wan; if (!f) return;
   const d = +f.down, u = +f.up;
   if (f.enable === "on" && !(d >= 1 && d <= 1000 && u >= 1 && u <= 1000)) return toast("Speeds must be between 1 and 1000 Mbps.", true);
-  try { S.shaping = await iot("shaping", Object.assign({ operation: "write" }, f)); delete S.dirty.wan; render(); toast(f.enable === "on" ? `Whole connection capped at ${d}↓ ${u}↑ Mbps${f.prio === "on" ? ", calls and games first" : ""}${f.guest_low === "on" ? ", guests last" : ""}` : "Whole-connection limit off"); }
+  const rng = ["min_down", "max_down", "min_up", "max_up"].map(k => f[k]);
+  if (rng.some(v => v !== "" && !(/^\d+$/.test(v) && +v >= 1 && +v <= 1000))) return toast("The lowest and highest speeds are whole Mbps from 1 to 1000, or empty.", true);
+  if ((f.min_down && +f.min_down > d) || (f.max_down && +f.max_down < d) || (f.min_up && +f.min_up > u) || (f.max_up && +f.max_up < u)) return toast("The usual speed has to lie between the lowest and the highest.", true);
+  const send = { operation: "write" }; ["enable", "down", "up", "prio", "guest_low", "auto", "min_down", "max_down", "min_up", "max_up"].forEach(k => { send[k] = f[k]; });
+  try { S.shaping = await iot("shaping", send); delete S.dirty.wan; render();
+    toast(f.enable !== "on" ? "Whole-connection limit off" : (f.auto === "on" ? `Automatic limit on, starting at ${d}↓ ${u}↑ Mbps` : `Whole connection capped at ${d}↓ ${u}↑ Mbps`) + (f.prio === "on" ? ", calls and games first" : "") + (f.guest_low === "on" ? ", guests last" : "")); }
   catch (e) { fail(e); }
 }
 async function saveGuest() {
