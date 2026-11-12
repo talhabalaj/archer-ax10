@@ -100,6 +100,15 @@ Pi-hole-style local names, served by the stock dnsmasq (`iot_dns_on=1`):
 - DHCP hands out the router as DNS: option 6 in the stock `dhcp.lan.dhcp_option`
   (the previous value is kept in `iot_dns_prev6` and restored when switched off),
   and the DNS servers are stripped from `/etc/dhcp6s.conf` for DHCPv6.
+- TP-Link's `/etc/hotplug.d/iface/03-lanv6` writes the internet connection's IPv6
+  DNS servers back into `dhcp6s.conf` and restarts `dhcp6s` every time IPv6 comes
+  up: at boot and when the connection renews (seen 31 minutes after boot). A device
+  that asks in the gap keeps those servers for up to a day; a Mac listed them before
+  the router, so `router.home` failed. Our hook `04-ax10-dns6` (written while local
+  names are on; `/etc` is RAM) runs `ax10.sh dns6` right after, closing the gap to
+  about a second. Refusing outside IPv6 DNS instead was tried and dropped: macOS
+  took up to 16 s to fall back to the router. There is no `ip6tables` nat table
+  to redirect it. The first boot window (before ax10.sh starts) stays.
 - TP-Link's "dnsproxy" DNATs LAN DNS for the router to the ISP's servers
   (`prerouting_rule_dns`), so names never resolved; ACCEPT rules at the top of that
   chain keep queries for the router on the router.

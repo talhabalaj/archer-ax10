@@ -14,6 +14,15 @@
 # Apple devices never ask a DNS server for it.
 DHCP6S_CONF="${DHCP6S_CONF:-/etc/dhcp6s.conf}"
 DHCP6S_INIT="${DHCP6S_INIT:-/etc/init.d/dhcp6s}"
+# TP-Link's /etc/hotplug.d/iface/03-lanv6 rewrites the DHCPv6 settings, with the
+# internet connection's DNS servers in them, every time IPv6 comes up: at boot, and
+# again whenever the connection renews its IPv6 (measured: 31 minutes after boot).
+# A device that asks in the seconds before the watcher's next pass keeps those
+# servers for up to a day, and with them no local name resolves (a Mac did exactly
+# that). So while local names are on, a hook right after TP-Link's takes them out
+# at once. /etc is in RAM: the hook is written again after every boot.
+HOTPLUG_IFACE="${HOTPLUG_IFACE:-/etc/hotplug.d/iface}"
+DNS6_HOOK="$HOTPLUG_IFACE/04-ax10-dns6"
 NL='
 '
 dns_load() {
@@ -119,18 +128,12 @@ dns_sync() {
         log "DHCP now hands out ${want:+${want#6,} as }${want:-no particular} DNS server"
     fi
     # IPv6: withdraw the DNS servers handed out over DHCPv6 while this is on.
-    if [ -f "$DHCP6S_CONF" ]; then
-        if [ "$DNS_ON" = 1 ] && grep -q '^option domain-name-servers' "$DHCP6S_CONF"; then
-            grep -v '^option domain-name-servers' "$DHCP6S_CONF" > "$RUN/dhcp6s.new"; cat "$RUN/dhcp6s.new" > "$DHCP6S_CONF"; rm -f "$RUN/dhcp6s.new"
-            : > "$RUN/dhcp6s.stripped"
-            p6="$(cat /var/run/dhcp6s.pid 2>/dev/null)"
-            if [ -n "$p6" ] && kill "$p6" 2>/dev/null; then sleep 1; /usr/sbin/dhcp6s -c "$DHCP6S_CONF" -P /var/run/dhcp6s.pid "$LANBR" >/dev/null 2>&1; fi
-            log "IPv6 DNS servers no longer advertised: devices ask the router"
-        elif [ "$DNS_ON" != 1 ] && [ -e "$RUN/dhcp6s.stripped" ]; then
-            rm -f "$RUN/dhcp6s.stripped"
-            [ -x "$DHCP6S_INIT" ] && "$DHCP6S_INIT" restart >/dev/null 2>&1
-            log "IPv6 DNS servers advertised again"
-        fi
+    dns6_hook
+    if [ "$DNS_ON" = 1 ]; then dns6_strip
+    elif [ -e "$RUN/dhcp6s.stripped" ]; then
+        rm -f "$RUN/dhcp6s.stripped"
+        [ -x "$DHCP6S_INIT" ] && "$DHCP6S_INIT" restart >/dev/null 2>&1
+        log "IPv6 DNS servers advertised again"
     fi
     # TP-Link's "dnsproxy" does not proxy: its nat chain prerouting_rule_dns sends
     # every query addressed to the router on to the ISP's DNS server, so dnsmasq never
@@ -154,6 +157,31 @@ dns_sync() {
         dns_hosts | sort -u > "$RUN/hosts.new"
         if cmp -s "$RUN/hosts.new" "$RUN/hosts" 2>/dev/null; then rm -f "$RUN/hosts.new"
         else mv "$RUN/hosts.new" "$RUN/hosts"; ${DNSMASQ_HUP:-killall -HUP dnsmasq} 2>/dev/null; fi
+    fi
+}
+dns6_strip() {   # take the DNS servers out of TP-Link's DHCPv6 settings, if they're back
+    [ -f "$DHCP6S_CONF" ] && grep -q '^option domain-name-servers' "$DHCP6S_CONF" || return 0
+    grep -v '^option domain-name-servers' "$DHCP6S_CONF" > "$RUN/dhcp6s.new"; cat "$RUN/dhcp6s.new" > "$DHCP6S_CONF"; rm -f "$RUN/dhcp6s.new"
+    : > "$RUN/dhcp6s.stripped"
+    p6="$(cat /var/run/dhcp6s.pid 2>/dev/null)"
+    if [ -n "$p6" ] && kill "$p6" 2>/dev/null; then sleep 1; /usr/sbin/dhcp6s -c "$DHCP6S_CONF" -P /var/run/dhcp6s.pid "$LANBR" >/dev/null 2>&1; fi
+    log "IPv6 DNS servers no longer advertised: devices ask the router"
+}
+dns6_hook() {   # the hotplug hook after TP-Link's 03-lanv6, while local names are on
+    if [ "$DNS_ON" = 1 ] && [ -d "$HOTPLUG_IFACE" ]; then
+        # hotplug-call sources each script in a subshell. The hook only looks; the
+        # change runs as `ax10.sh dns6`, in the background, so it takes the run lock
+        # (waiting out a pass) without holding up TP-Link's later scripts.
+        cat > "$DNS6_HOOK.new" <<EOF
+# Written by ax10.sh (local names): 03-lanv6 just handed out the internet
+# connection's DNS servers over DHCPv6 again; take them out now.
+if [ "\$ACTION" = ifup ] && [ "\$INTERFACE" = lanv6 ] && grep -q '^option domain-name-servers' "$DHCP6S_CONF" 2>/dev/null; then
+    /bin/sh "$SELF" dns6 >/dev/null 2>&1 &
+fi
+EOF
+        if cmp -s "$DNS6_HOOK.new" "$DNS6_HOOK" 2>/dev/null; then rm -f "$DNS6_HOOK.new"; else mv -f "$DNS6_HOOK.new" "$DNS6_HOOK"; fi
+    else
+        rm -f "$DNS6_HOOK" "$DNS6_HOOK.new" 2>/dev/null
     fi
 }
 dhcp_block() {

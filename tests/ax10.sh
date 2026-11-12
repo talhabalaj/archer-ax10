@@ -169,7 +169,7 @@ lock_free() { "$PY" "$T/lockrun.py" "$T/run/run.lock" 0 /bin/sh -c : 2>/dev/null
 # iot <uci stub> <script> <args...>: run ax10.sh with every host touch-point stubbed.
 iot() {
   u="$1"; s="$2"; shift 2
-  env WAN_DEV="${WAN_DEV:-none}" UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" DHCP6S_CONF="$T/dhcp6s.conf" DHCP6S_INIT="$T/bin/none" DNSMASQ_HUP=true COMMIT_FLASH="$T/bin/none" DOH_WARMUP=0 DNSMASQ_BIN="$T/bin/dnsmasq-test" DNSMASQ_MAIN="$T/dnsmasq.conf" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
+  env WAN_DEV="${WAN_DEV:-none}" UCI="$u" WL="$T/bin/wl" LUA="$T/bin/lua" DHCP6S_CONF="$T/dhcp6s.conf" DHCP6S_INIT="$T/bin/none" HOTPLUG_IFACE="$T/hotplug" DNSMASQ_HUP=true COMMIT_FLASH="$T/bin/none" DOH_WARMUP=0 DNSMASQ_BIN="$T/bin/dnsmasq-test" DNSMASQ_MAIN="$T/dnsmasq.conf" HAPD_CLI="$T/bin/hostapd_cli" BRCTL="$T/bin/brctl" IP="$T/bin/ip" \
       IPT="$T/bin/iptables" IPT6="$T/bin/ip6tables" TC="$T/bin/tc" \
       MOUNT="$T/bin/mount" UMOUNT="$T/bin/umount" PROC_MOUNTS="$T/mounts" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
@@ -775,7 +775,7 @@ EOF
 chmod +x "$T/bin/uci9"
 printf '%s\n' "1000 aa:bb:cc:dd:ee:07 192.168.0.50 laptop *" > "$T/leases"
 echo "3,192.168.0.1 6,1.1.1.1,1.0.0.1" > "$T/dhcp_opt"; echo 1 > "$T/dns_on"
-printf 'option domain-name-servers 2001:db8::1;\n\noption x y;\n' > "$T/dhcp6s.conf"; : > "$T/calls"
+mkdir -p "$T/hotplug"; printf 'option domain-name-servers 2001:db8::1;\n\noption x y;\n' > "$T/dhcp6s.conf"; : > "$T/calls"
 iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 [ "$(cat "$T/dhcp_opt")" = "3,192.168.0.1 6,192.168.0.1" ] || fail "DHCP not handing out the router as DNS: $(cat "$T/dhcp_opt")"
 for l in "192.168.0.1 router.ho-me" "192.168.0.1 talha.ho-me" "192.168.0.9 nas.ho-me" "192.168.50.187 cam.ho-me" "192.168.0.50 living-room-tv.ho-me"; do
@@ -802,6 +802,23 @@ has "iptables -t nat -I prerouting_rule_dns 1 -i br-lan -d 192.168.0.1 -p udp --
 has "iptables -t nat -I prerouting_rule_dns 1 -i br-lan -d 192.168.0.1 -p tcp --dport 53 -j ACCEPT"
 grep -q "domain-name-servers" "$T/dhcp6s.conf" && fail "IPv6 DNS servers still advertised"
 grep -q "option x y" "$T/dhcp6s.conf" || fail "other DHCPv6 options lost"
+# The hotplug hook after TP-Link's 03-lanv6: it starts `ax10.sh dns6` when IPv6 comes
+# up with the DNS servers back, and does nothing otherwise.
+hook="$T/hotplug/04-ax10-dns6"
+[ -f "$hook" ] || fail "IPv6 DNS hotplug hook not written"
+printf 'option domain-name-servers 2001:db8::1;\n\noption x y;\n' > "$T/dhcp6s.conf"
+mkdir -p "$T/hk"; printf '#!/bin/sh\necho "$*" >> "%s/hk/ran"\n' "$T" > "$T/hk/sh"; chmod +x "$T/hk/sh"
+sed "s#/bin/sh #$T/hk/sh #" "$hook" > "$T/hk/hook"
+rm -f "$T/hk/ran"; ( ACTION=ifup INTERFACE=wan; . "$T/hk/hook" ); ( ACTION=ifdown INTERFACE=lanv6; . "$T/hk/hook" ); sleep 1
+[ -e "$T/hk/ran" ] && fail "hook ran for another interface or event"
+( ACTION=ifup INTERFACE=lanv6; . "$T/hk/hook" )
+i=0; while [ $i -lt 30 ] && [ ! -e "$T/hk/ran" ]; do sleep 0.1; i=$((i + 1)); done
+grep -q " dns6$" "$T/hk/ran" 2>/dev/null || fail "hook did not start ax10.sh dns6: ran: $(cat "$T/hk/ran" 2>/dev/null) conf: $(cat "$T/dhcp6s.conf") hook: $(cat "$T/hk/hook")"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" dns6 >/dev/null 2>&1 || true
+grep -q "domain-name-servers" "$T/dhcp6s.conf" && fail "ax10.sh dns6 left the IPv6 DNS servers in"
+grep -q "option x y" "$T/dhcp6s.conf" || fail "ax10.sh dns6 lost other DHCPv6 options"
+rm -f "$T/hk/ran"; ( ACTION=ifup INTERFACE=lanv6; . "$T/hk/hook" ); sleep 1
+[ -e "$T/hk/ran" ] && fail "hook ran although the DNS servers were already out"
 # DNS over HTTPS: the forwarder runs against the chosen provider; dnsmasq uses only it
 # while it answers, and the plain servers while it doesn't.
 mkdir -p "$T/run/files/helpers"; : > "$T/run/files/helpers/doh.lua"; : > "$T/run/files/helpers/cacert.pem"; echo 1 > "$T/doh_on"; : > "$T/doh_healthy"; : > "$T/calls"
@@ -823,6 +840,7 @@ iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 [ "$(cat "$T/dhcp_opt")" = "3,192.168.0.1 6,1.1.1.1,1.0.0.1" ] || fail "DHCP DNS not put back as it was: $(cat "$T/dhcp_opt")"
 grep -q "^domain=\|no-resolv" "$T/dnsmasq.conf" && fail "local-names lines left in dnsmasq.conf"
 has "iptables -t nat -D prerouting_rule_dns -i br-lan -d 192.168.0.1 -p udp --dport 53 -j ACCEPT"
+[ -e "$T/hotplug/04-ax10-dns6" ] && fail "IPv6 DNS hotplug hook left in place with local names off"
 : > "$T/leases"; rm -f "$T/dhcp6s.conf"
 
 # --- speed limits don't need the IoT network (uci7 has it switched off).
