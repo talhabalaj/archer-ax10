@@ -202,6 +202,8 @@ h2 .count { color: var(--ink-3); font-weight: 500; font-size: 14px; }
 .capform .input { height: 34px; max-width: 150px; }
 .offline .nm, .offline .av, .offline .cell { opacity: .6; }
 .right { display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 13px; }
+.right:has(.pair) { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+.pair { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .chev { color: var(--ink-3); transition: transform 160ms var(--ease-out); }
 .row.open .chev { transform: rotate(90deg); }
 .detail { padding: 6px 16px 18px 64px; background: var(--panel-2); border-top: 1px solid var(--line); }

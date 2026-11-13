@@ -90,7 +90,7 @@ function deviceRow(d) {
   const tags = [d.this && '<span class="tag you">This device</span>', d.blocked && '<span class="tag blocked">Blocked</span>',
     d.online && D.allowOn && d.net === "home" && !d.onWhite && '<span class="tag no" title="Not on the home Wi-Fi allow list">Not allowed</span>',
     d.net === "guest" && d.online && d.onWhite && D.allowOn && '<span class="tag cap" title="On the home allow list: it sees a page with the home Wi-Fi password instead of internet">Sent to home Wi-Fi</span>',
-    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>',
+    d.net === "iot" && !d.internet && '<span class="tag">No internet</span>', d.net === "iot" && d.reach && '<span class="tag cap" title="Can open connections to your home devices on any port">Reaches home</span>', d.net === "guest" && d.fast && !d.cap && '<span class="tag">Full speed</span>',
     d.cap && `<span class="tag cap" title="Speed cap">${capText(d.cap)}</span>`].filter(Boolean).join("");
   const conn = d.online ? `${esc(whereText(d))}${d.rssi ? sigBars(d.rssi) : ""}` : esc(d.seen ? ago(D.now, d.seen) : "Offline");
   const mob = [NET_NAME[d.net], d.online ? whereText(d) : (d.seen ? ago(D.now, d.seen) : "Offline"), d.ip].filter(Boolean).join(", ");
@@ -125,7 +125,7 @@ function capEditor(d) {
 function deviceDetail(d) {
   const D = S.devices, busy = S.busy[d.mac];
   const toggles = [];
-  if (d.net === "iot") toggles.push(toggle("internet", d, d.internet, "Internet access"));
+  if (d.net === "iot") toggles.push(toggle("internet", d, d.internet, "Internet access"), toggle("reach", d, d.reach, "Can reach home devices (any port)"));
   if (d.net === "guest" && D.guest_limit) toggles.push(toggle("fast", d, d.fast, "Full speed (skip guest limit)"));
   if (d.net === "home" && D.iot_enabled && D.lan_mode === "selected") toggles.push(toggle("allowed", d, d.allowed, "Can reach IoT devices"));
   const canBlock = !d.this;

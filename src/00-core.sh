@@ -23,7 +23,8 @@
 #
 #
 #   home LAN  -> IoT        allowed   (apps / inverter-link can reach devices)
-#   IoT       -> home LAN   blocked   (except replies, and iot_allow_lan exceptions)
+#   IoT       -> home LAN   blocked   (except replies, iot_allow_lan exceptions, and
+#                                      IoT MACs in iot_lan_open: any port)
 #   IoT       -> router     DHCP, DNS and ping only (no web GUI / SSH)
 #   IoT       -> internet   allowed, except MACs listed in iot_noinet
 #
@@ -51,7 +52,7 @@
 #   ax10.sh usage        data used: per day, per month, per device this month
 #   ax10.sh reboot       save the usage log, then reboot
 #   ax10.sh sync         apply everything now (after forget-device / entry, which only save)
-#   ax10.sh entry caps|noinet|guest_fast|lan_allow <mac> <value|on|off>   one device's setting
+#   ax10.sh entry caps|noinet|guest_fast|lan_allow|lan_open <mac> <value|on|off>   one device's setting
 #   ax10.sh forget <mac>   drop an IoT device's fixed address (not re-pinned from its lease)
 #   ax10.sh set caps "aa:bb:cc:dd:ee:03=5/2"   cap a device at 5 Mbps down, 2 up
 #   ax10.sh set <key> <value>   save a setting (iot_ prefix optional), e.g.
@@ -111,6 +112,7 @@ load() {
     MDNS="$(cfg mdns '')"               # IoT addresses whose AirPlay/Spotify home devices see (24-iot-mdns.sh)
     LAN_MODE="$(cfg lan_mode all)"      # all | selected
     LAN_ALLOW="$(cfg lan_allow '')"     # home MACs allowed to reach IoT (mode selected)
+    LAN_OPEN="$(cfg lan_open '')"       # IoT MACs allowed to reach home devices, any port
 }
 log() { mkdir -p "$RUN"; echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s $*" >> "$LOG"; }
 trim_log() { if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ]; then tail -n 200 "$LOG" > "$LOG.1" && mv "$LOG.1" "$LOG"; fi; }

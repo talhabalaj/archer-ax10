@@ -11,6 +11,7 @@ status() {
     echo "static:    ${STATIC:-none}"
     echo "lock:      $([ "$(cfg lock 0)" = 1 ] && { lock_open && echo "on, open to new devices" || echo "on ($($WL -i "$VIF" macmode 2>/dev/null) = allow list)"; } || echo off)"
     echo "allow-lan: ${ALLOW_LAN:-none}"
+    echo "iot->home any port: ${LAN_OPEN:-none}"
     if mdns_running; then echo "speakers seen from home: $(echo $(mdns_ips)) ($(tr '\n' ' ' < "$RUN/mdns.stat" 2>/dev/null))"; else echo "speakers seen from home: ${MDNS:+not running }${MDNS:-none}"; fi
     echo "home->iot: $LAN_MODE$([ "$LAN_MODE" = selected ] && echo " (${LAN_ALLOW:-nobody})")"
     firewall_ok && echo "firewall:  ok" || echo "firewall:  MISSING/outdated"

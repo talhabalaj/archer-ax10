@@ -2,11 +2,13 @@
 const findDev = mac => S.devices && S.devices.list.find(d => d.mac === mac);
 async function setDevice(mac, field, value) {
   const d = findDev(mac); if (!d) return;
+  if (field === "reach" && value && !await confirmBox(`Let ${devName(d)} reach your home devices?`,
+    "It can open connections to every device on your home network, on any port, as if it weren't on the IoT network. It still can't reach this router.", "Allow", true)) { render(); return; }
   const before = d[field];
   d[field] = value; render();                                   // optimistic
   try {
     await iot("device", { operation: "write", mac, [field]: field === "name" ? value : (value ? "on" : "off") });
-    if (field !== "name") toast(({ internet: value ? "Internet on" : "Internet off", fast: value ? "Full speed on" : "Guest limit applies again", allowed: value ? "Can reach IoT devices" : "Can no longer reach IoT devices" })[field] + " · " + devName(d));
+    if (field !== "name") toast(({ internet: value ? "Internet on" : "Internet off", fast: value ? "Full speed on" : "Guest limit applies again", allowed: value ? "Can reach IoT devices" : "Can no longer reach IoT devices", reach: value ? "Can reach home devices on any port" : "Kept away from home devices again" })[field] + " · " + devName(d));
   } catch (e) { d[field] = before; render(); fail(e); }
 }
 async function setBlocked(mac, on) {
@@ -79,6 +81,7 @@ document.addEventListener("click", async ev => {
     if (act === "conns-on") { S.conns = { mac }; render(); watchConns(); return; }
     if (act === "conns-off") { S.conns = null; watchConns(); render(); return; }
     if (act === "cap-remove") return setCap(mac, "");
+    if (act === "reach-off") return setDevice(mac, "reach", false);
     if (act === "rl-del") { const gone = a.dataset.rule, list = (S.iot.allow_lan || "").split(/\s+/).filter(Boolean);
       return list.includes(gone) ? saveRules(list.filter(x => x !== gone), `Rule removed: ${gone}`) : undefined; }
     if (act === "nm-save") return saveNames();

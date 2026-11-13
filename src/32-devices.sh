@@ -22,7 +22,7 @@ forget_devices() {
     $UCI set "$SEC.iot_home_allow=$(echo $a)" && $UCI set "$SEC.iot_home_keep=$(echo $k)" || return 1
     # Space-separated lists whose entries start with the MAC ("mac", "mac=...", "mac,...").
     pinned=""
-    for key in caps noinet guest_fast lan_allow static; do
+    for key in caps noinet guest_fast lan_allow lan_open static; do
         v="$(cfg "$key" '')"; [ -n "$v" ] || continue
         out=""; for e in $v; do
             em="$(echo "${e%%[=,]*}" | tr 'A-F-' 'a-f:')"
@@ -50,11 +50,11 @@ unhide() {
     $UCI set "$SEC.iot_hidden_devices=$(echo $out)" && commit_cfg >/dev/null
     log "forgotten device(s) back on the network:$back"
 }
-# entry_set <caps|noinet|guest_fast|lan_allow> <mac> <value|on|off>: change one
+# entry_set <caps|noinet|guest_fast|lan_allow|lan_open> <mac> <value|on|off>: change one
 # device's entry in a per-device list, under the run lock, so the dashboard never
 # writes a stale copy of the list. caps takes "down/up" in Mbps, or off.
 entry_set() {
-    case "$1" in caps|noinet|guest_fast|lan_allow) ;; *) echo "ax10.sh: entry caps|noinet|guest_fast|lan_allow <mac> <value|on|off>" >&2; return 1 ;; esac
+    case "$1" in caps|noinet|guest_fast|lan_allow|lan_open) ;; *) echo "ax10.sh: entry caps|noinet|guest_fast|lan_allow|lan_open <mac> <value|on|off>" >&2; return 1 ;; esac
     mac="$(echo "$2" | tr 'A-F-' 'a-f:')"; valid_mac "$mac" || { echo "ax10.sh: bad MAC '$2'" >&2; return 1; }
     new=""
     case "$1:$3" in

@@ -103,7 +103,7 @@ local function set_names(changes)
 end
 local function set_name(mac, name) return set_names({ [mac] = name or "" }) end
 
--- One device's entry in a per-device list (caps, noinet, guest_fast, lan_allow),
+-- One device's entry in a per-device list (caps, noinet, guest_fast, lan_allow, lan_open),
 -- changed by ax10.sh under its run lock, so the watcher and other requests never
 -- write a stale copy of the list. Every writer of these lists goes through here.
 local function set_entry(key, mac, value)
@@ -394,6 +394,7 @@ local function devices()
     local nm, gif = names(), guest_ifaces()
     local blocked, ac_enable, ac_mode = blocklist()
     local noinet, fast, allow = words(get("noinet", "")), words(get("guest_fast", "")), words(get("lan_allow", ""))
+    local open = words(get("lan_open", ""))
     local cp = caps()
     local pins = {}
     for _, e in ipairs(words(get("static", ""))) do
@@ -428,7 +429,7 @@ local function devices()
             mac = mac:upper(), ip = ip or "", host = (host ~= "*" and host) or "",
             name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
             net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
-            internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac),
+            internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac), reach = has(open, mac),
             cap = cp[mac] or false, pinned = pins[mac] or false, seen = last[mac],
         }
         local r, x = rows[#rows], st[mac]
@@ -457,7 +458,7 @@ local function devices()
         af:close()
     end
     for m, c in pairs(stock) do if c.on then add(m, c.ip, c.name) end end
-    for _, l in ipairs({ noinet, fast, allow }) do for _, m in ipairs(l) do add(m, nil, nil) end end
+    for _, l in ipairs({ noinet, fast, allow, open }) do for _, m in ipairs(l) do add(m, nil, nil) end end
     for m in pairs(blocked) do add(m, nil, nil) end
     for m in pairs(cp) do add(m, nil, nil) end
     return { list = rows, t = t, now = os.time(), lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
@@ -620,7 +621,8 @@ local function connections(form)
 end
 
 
--- Change one device: any of name, internet (IoT), allowed (home -> IoT), fast (guest).
+-- Change one device: any of name, internet (IoT), reach (IoT -> home, any port),
+-- allowed (home -> IoT), fast (guest).
 local requester_mac
 local function write_device(form)
     if form.forget then
@@ -648,7 +650,7 @@ local function write_device(form)
     if not mac:match(MAC_PAT) then return false, "-1" end
     if form.name ~= nil and not set_name(mac, form.name) then return false, BUSY end
     local changed = false
-    for field, key in pairs({ internet = "noinet", allowed = "lan_allow", fast = "guest_fast" }) do
+    for field, key in pairs({ internet = "noinet", reach = "lan_open", allowed = "lan_allow", fast = "guest_fast" }) do
         local v = form[field]
         if v == "on" or v == "off" then
             -- noinet lists devices WITHOUT internet, so it is the inverse of the switch.

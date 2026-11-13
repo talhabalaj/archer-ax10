@@ -76,6 +76,9 @@ firewall() {
         allow_rule "$a" || { log "IoT -> home rule skipped, not proto:port[-port][@ip]: $a"; continue; }
         $IPT -A $CH_FWD -i $BR -o br-lan ${AR_S:+-s "$AR_S"} -p "$AR_P" --dport "$AR_D" -j ACCEPT
     done
+    # IoT devices switched to "can reach home devices": any port, any home device (by
+    # MAC, so it holds without a fixed address). Still not the router (CH_IN).
+    for m in $LAN_OPEN; do $IPT -A $CH_FWD -i $BR -o br-lan -m mac --mac-source "$m" -j ACCEPT; done
     $IPT -A $CH_FWD -i $BR -o br+ -j DROP
     for m in $NOINET; do $IPT -A $CH_FWD -i $BR -m mac --mac-source "$m" -j DROP; done
     $IPT -A $CH_FWD -i $BR -j ACCEPT
@@ -106,11 +109,11 @@ firewall() {
 
     # Broadcom flow cache can keep forwarding already-accelerated flows.
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$MDNS" > "$RUN/fw.sig"
+    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS" > "$RUN/fw.sig"
     fw_dump > "$RUN/fw.snap"
 }
 firewall_ok() {
-    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$MDNS" ] &&
+    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS" ] &&
     $IPT -C FORWARD -i $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C FORWARD -o $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C $CH_FWD -i $BR -j ACCEPT 2>/dev/null &&

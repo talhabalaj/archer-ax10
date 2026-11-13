@@ -18,6 +18,7 @@ case "\$*" in
   *iot_enabled*) echo "1" ;;
   *network.lan.ipaddr*) echo "192.168.0.1" ;;
   *iot_noinet*) echo "aa:bb:cc:dd:ee:02" ;;
+  *iot_lan_open*) echo "aa:bb:cc:dd:ee:05" ;;
   *iot_static*) echo "aa:bb:cc:dd:ee:01,192.168.50.10" ;;
   *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353 udp:6001-6010@192.168.50.137 tcp:9-1 icmp:1 tcp:80@1.2.3 tcp:80;x tcp:70000 tcp:81@192.168.50.010" ;;
   *) exit 1 ;;
@@ -208,6 +209,12 @@ has "iptables -A AX10_IOT_FWD -i br-iot -m mac --mac-source aa:bb:cc:dd:ee:02 -j
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.10 -p tcp --dport 8899 -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -p udp --dport 5353 -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.137 -p udp --dport 6001:6010 -j ACCEPT"
+# An IoT device switched to "can reach home devices": every port, home bridge only,
+# before the drop to the home side; still nothing to the router.
+open_ln="$(grep -n 'AX10_IOT_FWD -i br-iot -o br-lan -m mac --mac-source aa:bb:cc:dd:ee:05 -j ACCEPT' "$T/rules" | cut -d: -f1)"
+drop_ln="$(grep -n 'AX10_IOT_FWD -i br-iot -o br+ -j DROP' "$T/rules" | cut -d: -f1)"
+[ -n "$open_ln" ] && [ -n "$drop_ln" ] && [ "$open_ln" -lt "$drop_ln" ] || fail "any-port rule for an IoT device missing or after the drop ($open_ln/$drop_ln)"
+grep -q 'AX10_IOT_IN.*ee:05' "$T/rules" && fail "any-port IoT device was let into the router"
 [ "$(grep -c "AX10_IOT_FWD -i br-iot -o br-lan.*ACCEPT" "$T/calls")" -ge 3 ] && ! grep -E "AX10_IOT_FWD -i br-iot -o br-lan.*(icmp|9:1|1\.2\.3 |70000|;x|\.010|dport 81 )" "$T/calls" >/dev/null || fail "a malformed IoT -> home rule reached iptables: $(grep 'br-iot -o br-lan' "$T/calls")"
 has "iptables -A AX10_IOT_IN -j DROP"
 has "dnsmasq restart"
@@ -619,7 +626,7 @@ cat > "$T/bin/uci7" <<EOF
 case "\$*" in
   "-q get openvpn.archer_boot.iot_home_"*|"-q get openvpn.archer_boot.iot_enabled") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
   "-q get openvpn.archer_boot.iot_usage_"*) k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
-  "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget"|"-q get openvpn.archer_boot.iot_caps"|"-q get openvpn.archer_boot.iot_noinet"|"-q get openvpn.archer_boot.iot_guest_fast"|"-q get openvpn.archer_boot.iot_lan_allow"|"-q get openvpn.archer_boot.iot_hidden"|"-q get openvpn.archer_boot.iot_hidden_devices") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
+  "-q get openvpn.archer_boot.iot_static"|"-q get openvpn.archer_boot.iot_forget"|"-q get openvpn.archer_boot.iot_caps"|"-q get openvpn.archer_boot.iot_noinet"|"-q get openvpn.archer_boot.iot_guest_fast"|"-q get openvpn.archer_boot.iot_lan_allow"|"-q get openvpn.archer_boot.iot_lan_open"|"-q get openvpn.archer_boot.iot_hidden"|"-q get openvpn.archer_boot.iot_hidden_devices") k="\${3#openvpn.archer_boot.}"; cat "$T/u/\$k" 2>/dev/null ;;
   "set openvpn.archer_boot.iot_"*) kv="\${2#openvpn.archer_boot.}"; echo "\${kv#*=}" > "$T/u/\${kv%%=*}" ;;
   "-q delete openvpn.archer_boot.iot_usage_"*) rm -f "$T/u/\${3#openvpn.archer_boot.}" ;;
   "add_list openvpn.archer_boot.iot_usage_"*) kv="\${2#openvpn.archer_boot.}"; f="$T/u/\${kv%%=*}"; v="\${kv#*=}"
@@ -715,12 +722,13 @@ rm -f "$T/u/iot_static" "$T/u/iot_forget"
 echo 0 > "$T/u/iot_home_lock"
 echo "aa:bb:cc:00:00:20 AA-BB-CC-00-00-90 aa:bb:cc:00:00:91" > "$T/u/iot_home_allow"; echo "aa:bb:cc:00:00:91" > "$T/u/iot_home_keep"
 echo "aa:bb:cc:00:00:90=5/2 aa:bb:cc:00:00:20=3/3" > "$T/u/iot_caps"; echo "AA:BB:CC:00:00:91" > "$T/u/iot_noinet"
-echo "aa:bb:cc:00:00:90 aa:bb:cc:00:00:20" > "$T/u/iot_guest_fast"; echo "aa:bb:cc:00:00:90" > "$T/u/iot_lan_allow"
+echo "aa:bb:cc:00:00:90 aa:bb:cc:00:00:20" > "$T/u/iot_guest_fast"; echo "aa:bb:cc:00:00:90" > "$T/u/iot_lan_allow"; echo "aa:bb:cc:00:00:91 aa:bb:cc:00:00:20" > "$T/u/iot_lan_open"
 echo "aa:bb:cc:00:00:91,192.168.50.20" > "$T/u/iot_static"; : > "$T/u/iot_forget"; : > "$T/u/iot_hidden_devices"; echo 1 > "$T/u/iot_hidden"
 echo "aa:bb:cc:00:00:90=1700000001 aa:bb:cc:00:00:20=1700000002" > "$T/u/iot_home_seen"
 h forget-device aa:bb:cc:00:00:91,AA-BB-CC-00-00-90 || fail "forget-device failed"
 grep -qi "00[:-]00[:-]9[01]" "$T/u/iot_home_allow" "$T/u/iot_home_keep" "$T/u/iot_caps" "$T/u/iot_guest_fast" "$T/u/iot_lan_allow" && fail "forget-device left allow list, pin, cap or switch entries"
 grep -qi "00:91" "$T/u/iot_noinet" "$T/u/iot_static" && fail "forget-device left settings or the IoT pin"
+[ "$(cat "$T/u/iot_lan_open")" = "aa:bb:cc:00:00:20" ] || fail "forget-device: any-port list is '$(cat "$T/u/iot_lan_open")'"
 grep -q "00:00:90" "$T/u/iot_home_seen" && fail "forget-device left the last-seen time"
 grep -q "aa:bb:cc:00:00:20=3/3" "$T/u/iot_caps" || fail "forget-device dropped another device's cap"
 grep -q "aa:bb:cc:00:00:20" "$T/u/iot_guest_fast" || fail "forget-device dropped another device's switch"
@@ -748,9 +756,11 @@ grep -q "aa:bb:cc:00:00:99" "$T/u/iot_hidden_devices" && fail "a device given a 
 h entry caps aa:bb:cc:00:00:99 off; [ "$(cat "$T/u/iot_caps")" = "aa:bb:cc:00:00:20=3/3" ] || fail "entry caps off left the cap"
 h entry noinet aa:bb:cc:00:00:99 on; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_noinet" || fail "entry noinet on did not save"
 h entry noinet aa:bb:cc:00:00:99 off; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_noinet" && fail "entry noinet off left the entry"
+h entry lan_open AA:BB:CC:00:00:99 on; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_lan_open" || fail "entry lan_open on did not save"
+h entry lan_open aa:bb:cc:00:00:99 off; grep -q "aa:bb:cc:00:00:99" "$T/u/iot_lan_open" && fail "entry lan_open off left the entry"
 h entry caps aa:bb:cc:00:00:99 "5/2;reboot" && fail "entry accepted a bad cap"
 h entry static aa:bb:cc:00:00:99 on && fail "entry accepted a list it does not own"
-rm -f "$T/u/iot_caps" "$T/u/iot_noinet" "$T/u/iot_guest_fast" "$T/u/iot_lan_allow" "$T/u/iot_static" "$T/u/iot_forget" "$T/u/iot_hidden_devices" "$T/u/iot_hidden" "$T/u/iot_home_seen"
+rm -f "$T/u/iot_caps" "$T/u/iot_noinet" "$T/u/iot_guest_fast" "$T/u/iot_lan_allow" "$T/u/iot_lan_open" "$T/u/iot_static" "$T/u/iot_forget" "$T/u/iot_hidden_devices" "$T/u/iot_hidden" "$T/u/iot_home_seen"
 
 # --- local names: hosts file, dnsmasq lines, DHCP hands out the router, and back again.
 cat > "$T/bin/uci9" <<EOF

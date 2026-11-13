@@ -20,7 +20,7 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
 | From → to | Result |
 | --- | --- |
 | Home LAN → IoT | allowed (apps, inverter-link) |
-| IoT → home LAN | blocked, except replies and `iot_allow_lan` exceptions (the IoT tab's "What IoT devices can reach" table) |
+| IoT → home LAN | blocked, except replies, `iot_allow_lan` exceptions (the IoT tab's "What IoT devices can reach" table), and IoT MACs in `iot_lan_open`, which may use any port (the device's "Home" switch) |
 | IoT → router | DHCP, DNS and ping only (no web UI, no SSH) |
 | IoT → internet | allowed, except MACs in `iot_noinet` (switching a device off also cuts its open connections) |
 | IoT, IPv6 | off: disabled on `br-iot` and dropped by `ip6tables` (`AX10_IOT6`); the IoT network is IPv4-only |
@@ -47,6 +47,7 @@ sh /tmp/ax10.sh set allow_lan "tcp:8899@192.168.50.10"          # inverter-link 
 #   rules: proto:port or proto:first-last, optionally @<IoT address>; malformed ones are skipped
 #   e.g. "tcp:8899@192.168.50.10 tcp:8123@192.168.50.137 udp:6001-6010"
 sh /tmp/ax10.sh set noinet "<camera-mac>"                       # optional
+sh /tmp/ax10.sh entry lan_open <iot-mac> on && sh /tmp/ax10.sh sync   # optional: one device reaches home, any port
 sh /tmp/ax10.sh set enabled 1
 sh /tmp/ax10.sh ui      # install the web page
 sh /tmp/ax10.sh start   # apply + register the watcher

@@ -21,7 +21,8 @@ function viewIot() {
   ${joinCard(c, iotDevs)}
   ${sectionList("IoT devices", iotDevs.map(d => simpleRow(d,
       (d.pinned ? `<span class="tag" title="This device always gets ${esc(d.pinned)}">Fixed ${esc(d.pinned.split(".").pop() === d.pinned ? d.pinned : "." + d.pinned.split(".").pop())}</span>` : "")
-      + `<span class="muted" style="font-size:12.5px">Internet</span>` + rowSwitch("internet", d, d.internet, "Internet access")
+      + `<span class="pair"><span class="muted" style="font-size:12.5px">Internet</span>${rowSwitch("internet", d, d.internet, "Internet access")}</span>`
+      + `<span class="pair" title="Can open connections to your home devices on any port"><span class="muted" style="font-size:12.5px">Home</span>${rowSwitch("reach", d, d.reach, "Can reach home devices on any port")}</span>`
       + (d.pinned && (!d.online || c.lock === "on") ? `<button class="btn sm" data-act="forget" data-mac="${d.mac}">Remove fixed address</button>` : ""))),
     "Nothing has joined the IoT network yet.")}
   <h2>Who can reach IoT devices</h2>
@@ -54,11 +55,18 @@ function rulesCard(c, iotDevs) {
         <div class="meta">${esc([what, where].filter(Boolean).join(" · "))} → your home network</div></div>
       <div class="right"><button class="btn sm" data-act="rl-del" data-rule="${esc(w)}" ${S.rulesBusy ? "disabled" : ""} aria-label="Remove this rule">Remove</button></div></div>`;
   });
+  // IoT devices switched to "Home" (iot_lan_open): every port, matched by MAC.
+  const open = iotDevs.filter(d => d.reach).map(d => `<div class="row ${d.online ? "" : "offline"}">
+      <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
+      <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span></div>
+        <div class="meta">Any port, TCP and UDP → your home network</div></div>
+      <div class="right"><button class="btn sm" data-act="reach-off" data-mac="${d.mac}" aria-label="Remove this rule">Remove</button></div></div>`);
+  rows.unshift(...open);
   const opts = iotDevs.filter(d => d.pinned || d.ip).map(d => { const ip = d.pinned || d.ip;
     return `<option value="${esc(ip)}" ${S.ruleDev === ip ? "selected" : ""}>${esc(devName(d))} (${esc(ip)})${d.pinned ? "" : " · address not fixed"}</option>`; }).join("");
-  return `<h2>What IoT devices can reach<span class="count">${rules.length}</span></h2>
+  return `<h2>What IoT devices can reach<span class="count">${rows.length}</span></h2>
   <div class="card"><div class="card-h"><div style="flex:1"><h3>Exceptions to the IoT network's isolation</h3>
-    <p>IoT devices can't open connections to your home network, except for the rules below. Replies to connections your own devices open always get through.</p></div></div>
+    <p>IoT devices can't open connections to your home network, except for the rules below. Replies to connections your own devices open always get through. To let one device reach everything, switch on Home next to it above.</p></div></div>
     ${rows.length ? `<div class="rules">${rows.join("")}</div>` : `<div class="note">No exceptions: IoT devices can't reach anything on your home network.</div>`}
     <div class="card-b"><form class="acadd" id="rl-add">
       <div class="input"><select id="rl-dev" aria-label="Which IoT device" style="width:100%;background:transparent;border:0;color:inherit;font:inherit"><option value="">Any IoT device</option>${opts}</select></div>
