@@ -5,7 +5,8 @@
 #   router.home         the router (iot_dns_router, several names allowed)
 #   <hostname>.home     every device, by the name it gave DHCP (dnsmasq does this
 #                       itself once it has a domain)
-#   <dashboard name>.home, and custom records (iot_dns_hosts "name=ip ...")
+#   <dashboard name>.home  (to the device's newest lease, see dns_named), and custom
+#                       records (iot_dns_hosts "name=ip ...")
 # For any of it to resolve, devices must ask the router: DHCP hands out the router
 # as DNS server (the stock setting dhcp.lan.dhcp_option, also shown in TP-Link's
 # DHCP page), and the IPv6 DNS servers TP-Link advertises over DHCPv6 are withdrawn
@@ -52,11 +53,33 @@ dns_hosts() {   # the hosts file: router names, custom records, dashboard names 
         valid_ip4 "$ip" && [ -n "$l" ] && echo "$ip $l.$DNS_DOMAIN"
     done
     [ -f "$LEASES" ] || return 0
-    $UCI -q -d "$NL" get "$SEC.iot_names" 2>/dev/null | while IFS= read -r e; do
-        mac="$(echo "${e%%=*}" | tr 'A-F-' 'a-f:')"; l="$(dns_label "${e#*=}")"; [ -n "$l" ] || continue
-        ip="$(awk -v m="$mac" 'tolower($2)==m {print $3; exit}' "$LEASES")"
-        valid_ip4 "$ip" && echo "$ip $l.$DNS_DOMAIN"
-    done
+    dns_named | while read -r ip l; do valid_ip4 "$ip" && echo "$ip $l.$DNS_DOMAIN"; done
+}
+# "ip label" for each dashboard name. A name can belong to several leases: the named
+# device's own (a computer that was on Ethernet and is now on Wi-Fi has a lease for
+# each card, and one card can hold two), and any other device whose own DHCP name is
+# the same. The name goes to the lease renewed last, the device that is here now, the
+# way dnsmasq treats its own DHCP names. (Hosts file names win over DHCP names, so a
+# dashboard name pinned to the first lease sent a name to a card that was unplugged.)
+# "Renewed last" is the latest expiry: right while both leases come from the same
+# range; an IoT lease (12 h) can outlast a newer home one (2 h) of the same name.
+# Labels are made the way dns_label does it.
+dns_named() {
+    $UCI -q -d "$NL" get "$SEC.iot_names" 2>/dev/null | awk -v leases="$LEASES" '
+    function lab(s) { s = tolower(s); gsub(/[ _.]/, "-", s); gsub(/[^a-z0-9-]/, "", s); gsub(/-+/, "-", s); sub(/^-/, "", s); sub(/-$/, "", s); return substr(s, 1, 63) }
+    { i = index($0, "="); if (!i) next
+      m = tolower(substr($0, 1, i - 1)); gsub(/-/, ":", m); l = lab(substr($0, i + 1))
+      if (l != "") { name[m] = l; want[l] = 1 } }
+    END {
+        while ((getline line < leases) > 0) {
+            if (split(line, f, " ") < 4) continue
+            m = tolower(f[2]); t = f[1] + 0; if (t == 0) t = 2147483647   # 0: never expires
+            l = (m in name) ? name[m] : lab(f[4])
+            if (l == "" || !(l in want)) continue
+            if (!(l in best) || t > best[l]) { best[l] = t; ip[l] = f[3] }
+        }
+        for (l in ip) print ip[l], l
+    }'
 }
 dns_block() {   # dnsmasq lines, inside our block in dnsmasq.conf
     [ "$DNS_ON" = 1 ] || return 0

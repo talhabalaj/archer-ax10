@@ -782,6 +782,17 @@ for l in "192.168.0.1 router.ho-me" "192.168.0.1 talha.ho-me" "192.168.0.9 nas.h
   grep -qxF "$l" "$T/run/hosts" || fail "hosts file lacks '$l': $(cat "$T/run/hosts")"
 done
 grep -q "bad\|no-lease" "$T/run/hosts" && fail "hosts file has a bad record or a device without an address"
+# A dashboard name goes to the newest lease: of the named device's leases, and of other
+# devices that call themselves the same (a computer moved from Ethernet to Wi-Fi).
+printf '%s\n' "1000 aa:bb:cc:dd:ee:07 192.168.0.50 laptop *" "3000 aa:bb:cc:dd:ee:07 192.168.0.51 laptop *" > "$T/leases"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+grep -qxF "192.168.0.51 living-room-tv.ho-me" "$T/run/hosts" || fail "name not on the device's newest lease: $(grep living "$T/run/hosts")"
+printf '%s\n' "3000 aa:bb:cc:dd:ee:07 192.168.0.51 laptop *" "4000 aa:bb:cc:dd:ee:99 192.168.0.70 Living-Room-TV *" "5000 aa:bb:cc:dd:ee:98 192.168.0.71 * *" > "$T/leases"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+[ "$(grep -c living-room-tv "$T/run/hosts")" = 1 ] && grep -qxF "192.168.0.70 living-room-tv.ho-me" "$T/run/hosts" || fail "name not on the newer device of the same name: $(grep living "$T/run/hosts")"
+grep -q "192.168.0.71" "$T/run/hosts" && fail "a device without a name got one"
+printf '%s\n' "1000 aa:bb:cc:dd:ee:07 192.168.0.50 laptop *" > "$T/leases"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 for l in "domain=ho-me" "local=/ho-me/" "addn-hosts=$T/run/hosts" "no-resolv" "server=1.1.1.1" "server=9.9.9.9"; do
   grep -qxF "$l" "$T/dnsmasq.conf" || fail "dnsmasq.conf lacks '$l'"
 done

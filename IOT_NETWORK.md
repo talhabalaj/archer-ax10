@@ -94,7 +94,10 @@ Pi-hole-style local names, served by the stock dnsmasq (`iot_dns_on=1`):
 - Every device gets `<hostname>.<suffix>` (suffix `iot_dns_domain`, default `home`,
   editable on the dashboard's Internet tab), the router gets the names in
   `iot_dns_router` (e.g. `router`), and `iot_dns_hosts` adds fixed ones
-  (`name=ip`). dnsmasq runs with `domain=`, `local=/<suffix>/`,
+  (`name=ip`). A dashboard name goes to the newest lease among the named device's
+  leases and any other device's of the same DHCP name (hosts-file names beat DHCP
+  names, so pinning it to the first lease once sent a name to a computer's unplugged
+  Ethernet card). dnsmasq runs with `domain=`, `local=/<suffix>/`,
   `addn-hosts=$RUN/hosts`, `no-resolv` and our `server=` lines; the config is checked
   with `dnsmasq --test` before use and rolled back if it fails.
 - DHCP hands out the router as DNS: option 6 in the stock `dhcp.lan.dhcp_option`
