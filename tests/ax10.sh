@@ -20,7 +20,7 @@ case "\$*" in
   *iot_noinet*) echo "aa:bb:cc:dd:ee:02" ;;
   *iot_lan_open*) echo "aa:bb:cc:dd:ee:05" ;;
   *iot_static*) echo "aa:bb:cc:dd:ee:01,192.168.50.10" ;;
-  *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353 udp:6001-6010@192.168.50.137 tcp:9-1 icmp:1 tcp:80@1.2.3 tcp:80;x tcp:70000 tcp:81@192.168.50.010" ;;
+  *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353 udp:6001-6010@192.168.50.137 tcp:9-1 icmp:1 tcp:80@1.2.3 tcp:80;x tcp:70000 tcp:81@192.168.50.010 tcp:8123@192.168.50.137>192.168.0.20 any@192.168.50.11>192.168.0.21 any>192.168.0.22 tcp:82>1.2.3 any:83 tcp:84>192.168.0.5>192.168.0.6 tcp:85@192.168.50.137>192.168.0.020" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -209,6 +209,11 @@ has "iptables -A AX10_IOT_FWD -i br-iot -m mac --mac-source aa:bb:cc:dd:ee:02 -j
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.10 -p tcp --dport 8899 -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -p udp --dport 5353 -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.137 -p udp --dport 6001:6010 -j ACCEPT"
+# With a home address (">ip") the rule reaches only that home device; "any" is every port.
+has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.137 -d 192.168.0.20 -p tcp --dport 8123 -j ACCEPT"
+has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.11 -d 192.168.0.21 -j ACCEPT"
+has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -d 192.168.0.22 -j ACCEPT"
+grep -E "AX10_IOT_FWD -i br-iot -o br-lan.*(dport 8[2345] |192\.168\.0\.0?20 .*dport 85|192\.168\.0\.[56] )" "$T/calls" && fail "a malformed IoT -> home rule with a home address reached iptables"
 # An IoT device switched to "can reach home devices": every port, home bridge only,
 # before the drop to the home side; still nothing to the router.
 open_ln="$(grep -n 'AX10_IOT_FWD -i br-iot -o br-lan -m mac --mac-source aa:bb:cc:dd:ee:05 -j ACCEPT' "$T/rules" | cut -d: -f1)"

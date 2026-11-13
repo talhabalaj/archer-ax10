@@ -83,7 +83,7 @@ document.addEventListener("click", async ev => {
     if (act === "cap-remove") return setCap(mac, "");
     if (act === "reach-off") return setDevice(mac, "reach", false);
     if (act === "rl-del") { const gone = a.dataset.rule, list = (S.iot.allow_lan || "").split(/\s+/).filter(Boolean);
-      return list.includes(gone) ? saveRules(list.filter(x => x !== gone), `Rule removed: ${gone}`) : undefined; }
+      return list.includes(gone) ? saveRules(list.filter(x => x !== gone), "Rule removed") : undefined; }
     if (act === "nm-save") return saveNames();
     if (act === "nm-reset") { delete S.dirty.names; render(); return; }
     if (act === "nm-add") { const f = readNamesForm(); f.hosts.push({ name: "", ip: "" }); setNamesDraft(f, true); return; }
@@ -109,6 +109,7 @@ document.addEventListener("change", ev => {
   const i = ev.target;
   if (i.dataset.field && i.dataset.mac) return setDevice(i.dataset.mac, i.dataset.field, i.checked);
   if (i.id === "iot-lock") return setLock(i.checked);
+  if (/^rl-/.test(i.id)) { S.ruleForm = ruleForm(); if (i.id === "rl-proto") $id("rl-port").disabled = i.value === "any"; return; }
   if (i.id === "ac-on") return setAllowList(i.checked);
   if (/^nm-/.test(i.id)) return markNames(true);
   if (i.id === "ac-exp") return acBusy(async () => { await iot("home", { operation: "write", expire: i.value }); toast(+i.value ? `Devices away for ${i.value} days are removed` : "Devices are never removed for being away"); });
@@ -229,20 +230,35 @@ async function forgetDevices(list) {
 async function saveRules(list, msg) {
   if (S.rulesBusy) return;
   S.rulesBusy = true; render();
-  try { S.iot = await iot("settings", Object.assign({ operation: "write" }, S.iot, { allow_lan: list.join(" ") })); S.iotLoadedAt = Date.now(); toast(msg); }
+  let ok = false;
+  try { S.iot = await iot("settings", Object.assign({ operation: "write" }, S.iot, { allow_lan: list.join(" ") })); S.iotLoadedAt = Date.now(); toast(msg); ok = true; }
   catch (e) { fail(e); }
   S.rulesBusy = false; render();
+  return ok;
 }
-function addRule() {
-  const ip = $id("rl-dev").value, proto = $id("rl-proto").value, port = $id("rl-port").value.trim().replace(/\s*[–:]\s*|\s+-\s+/g, "-");
-  const m = /^(\d+)(?:-(\d+))?$/.exec(port), a = m && +m[1], b = m && m[2] ? +m[2] : a;
-  if (!m || a < 1 || b > 65535 || b < a) return toast("The port is a number from 1 to 65535, or a range like 6001-6010.", true);
-  const rule = `${proto}:${a}${b !== a ? "-" + b : ""}${ip ? "@" + ip : ""}`;
+const ruleForm = () => ({ from: $id("rl-dev").value, to: $id("rl-to").value, proto: $id("rl-proto").value, port: $id("rl-port").value.trim() });
+async function addRule() {
+  if (S.rulesBusy) return;
+  const f = S.ruleForm = ruleForm();
+  let what = "any", ports = "any port";
+  if (f.proto !== "any") {
+    const port = f.port.replace(/\s*[–:]\s*|\s+-\s+/g, "-");
+    const m = /^(\d+)(?:-(\d+))?$/.exec(port), a = m && +m[1], b = m && m[2] ? +m[2] : a;
+    if (!m || a < 1 || b > 65535 || b < a) return toast("The port is a number from 1 to 65535, or a range like 6001-6010.", true);
+    what = `${f.proto}:${a}${b !== a ? "-" + b : ""}`; ports = `${f.proto.toUpperCase()} ${b !== a ? `ports ${a}–${b}` : `port ${a}`}`;
+  }
+  const rule = what + (f.from ? "@" + f.from : "") + (f.to ? ">" + f.to : "");
   const list = (S.iot.allow_lan || "").split(/\s+/).filter(Boolean);
   if (list.includes(rule)) return toast("That rule is already there.", true);
-  S.ruleDev = ip;
-  const d = ip && S.devices && S.devices.list.find(x => x.pinned === ip || x.ip === ip);
-  return saveRules(list.concat(rule), `${d ? devName(d) : ip || "Every IoT device"} can now reach ${proto.toUpperCase()} ${b !== a ? `ports ${a}–${b}` : `port ${a}`} on your home network`);
+  const D = S.devices ? S.devices.list : [];
+  const fd = f.from && D.find(x => x.net === "iot" && (x.pinned === f.from || x.ip === f.from));
+  const td = f.to && D.find(x => x.net === "home" && x.ip === f.to);
+  const who = fd ? devName(fd) : f.from || "Every IoT device", where = td ? devName(td) : f.to || "every home device";
+  if (what === "any" && !f.from && !f.to && !await confirmBox("Let every IoT device reach every home device?",
+    "That turns the IoT network's isolation off: any IoT device can open connections to any home device, on any port.", "Allow", true)) return;
+  // The form is disabled while saving, so the draft is still this one: keep the
+  // devices and protocol for the next rule, clear the port.
+  if (await saveRules(list.concat(rule), `${who} can now reach ${where} on ${ports}`)) { S.ruleForm = Object.assign({}, f, { port: "" }); render(); }
 }
 async function setLock(on) {
   if (on && S.devices && !S.devices.list.some(d => d.net === "iot" && d.pinned)) { toast("No known IoT devices yet; locking now would keep everything out.", true); render(); return; }

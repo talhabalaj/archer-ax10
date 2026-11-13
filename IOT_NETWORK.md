@@ -44,8 +44,9 @@ sh /tmp/ax10.sh set ssid "wifi-iot"
 sh /tmp/ax10.sh set key  "<8-63 chars>"
 sh /tmp/ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"   # inverter logger
 sh /tmp/ax10.sh set allow_lan "tcp:8899@192.168.50.10"          # inverter-link callback
-#   rules: proto:port or proto:first-last, optionally @<IoT address>; malformed ones are skipped
-#   e.g. "tcp:8899@192.168.50.10 tcp:8123@192.168.50.137 udp:6001-6010"
+#   rules: tcp|udp:port, tcp|udp:first-last, or any (all ports and protocols), then optionally
+#   @<IoT address> (one IoT device) and >home address (one home device); malformed ones are skipped
+#   e.g. "tcp:8899@192.168.50.10 tcp:8123@192.168.50.137>192.168.0.20 udp:6001-6010"
 sh /tmp/ax10.sh set noinet "<camera-mac>"                       # optional
 sh /tmp/ax10.sh entry lan_open <iot-mac> on && sh /tmp/ax10.sh sync   # optional: one device reaches home, any port
 sh /tmp/ax10.sh set enabled 1

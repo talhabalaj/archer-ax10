@@ -196,8 +196,35 @@ h2 .count { color: var(--ink-3); font-weight: 500; font-size: 14px; }
 .addmac { border-top: 1px solid var(--line); padding-top: 12px; }
 .addmac summary { cursor: pointer; font-size: 13.5px; font-weight: 500; color: var(--signal); width: max-content; }
 .acadd .input { flex: 1 1 180px; }
-.rules { border-top: 1px solid var(--line); }
-.rules .row:first-child { border-top: 0; }
+/* IoT -> home rules: a From / To / Port table; stacked cards on phones. */
+.rtable { width: 100%; border-collapse: collapse; font-size: 13.5px; border-top: 1px solid var(--line); }
+.rtable th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; padding: 10px 12px 8px 16px; white-space: nowrap; background: var(--panel-2); }
+.rtable td { padding: 10px 12px 10px 16px; border-top: 1px solid var(--line); vertical-align: top; }
+.rtable th:first-child, .rtable td:first-child { width: 36%; }
+.rtable td.rx { text-align: right; width: 1%; white-space: nowrap; vertical-align: middle; padding-right: 16px; }
+.rtable .rc { display: flex; gap: 8px; align-items: flex-start; }
+.rtable .rc .dot { position: static; flex: none; width: 8px; height: 8px; margin-top: 6px; border: 0; }
+.rtable .rn { font-weight: 600; overflow-wrap: anywhere; }
+.rtable .rs { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.rtable .rw { color: var(--warn); }
+.rh { font-size: 13px; font-weight: 600; margin: 4px 0 8px; }
+.rform { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.4fr) 120px 130px auto; gap: 10px; align-items: end; }
+.rf { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rf > span { font-size: 12px; color: var(--ink-3); }
+.rf .input { width: 100%; }
+.sel { width: 100%; background: transparent; border: 0; color: inherit; font: inherit; min-width: 0; }
+.rf input:disabled { opacity: .45; }
+@media (max-width: 760px) {
+  .rform { grid-template-columns: 1fr 1fr; }
+  .rform .btn { grid-column: 1 / -1; }
+  .rtable thead { display: none; }
+  .rtable, .rtable tbody, .rtable tr, .rtable td { display: block; width: auto !important; }
+  .rtable tr { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  .rtable td { border: 0; padding: 0; }
+  .rtable td[data-l]::before { content: attr(data-l); display: block; font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+  .rtable td[data-l="Port"] { grid-column: 1 / 3; }
+  .rtable td.rx { grid-column: 3; grid-row: 1 / 3; align-self: center; padding: 0; }
+}
 .capform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 .capform .input { height: 34px; max-width: 150px; }
 .offline .nm, .offline .av, .offline .cell { opacity: .6; }

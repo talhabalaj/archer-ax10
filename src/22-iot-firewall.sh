@@ -40,13 +40,19 @@ FW_VER=3
 # this after a rebuild and firewall_ok() compares, so a missing, extra or
 # reordered rule triggers a rebuild. If this iptables has no -S, both sides
 # are empty and the -C checks below still apply.
-# One IoT -> home rule: "proto:port", "proto:first-last", either with "@iot-ip" to
-# allow just that device (the dashboard's IoT tab writes these). Sets AR_P (tcp or
-# udp), AR_D (the port, or first:last as iptables takes a range) and AR_S (the IoT
-# address, or empty for every IoT device).
+# One IoT -> home rule: what [@from] [>to], written by the dashboard's IoT tab.
+#   what: "tcp:port", "tcp:first-last" (or udp), or "any" for every port and protocol
+#   from: the IoT address it applies to (none: every IoT device)
+#   to:   the home address it may reach (none: every home device)
+# e.g. tcp:8123@192.168.50.137>192.168.0.20. Sets AR_P (tcp, udp, or empty for any),
+# AR_D (the port, or first:last as iptables takes a range), AR_S and AR_T (the
+# addresses, or empty).
 allow_rule() {
-    r="${1%%@*}"; AR_S=""
-    if [ "$r" != "$1" ]; then AR_S="${1#*@}"; valid_ip4 "$AR_S" || return 1; fi
+    w="$1"; AR_S=""; AR_T=""; AR_P=""; AR_D=""
+    case "$w" in *">"*) AR_T="${w#*>}"; w="${w%%>*}"; valid_ip4 "$AR_T" || return 1 ;; esac
+    r="${w%%@*}"
+    if [ "$r" != "$w" ]; then AR_S="${w#*@}"; valid_ip4 "$AR_S" || return 1; fi
+    [ "$r" = any ] && return 0
     AR_P="${r%%:*}"; AR_D="$(echo "${r#*:}" | tr - :)"
     case "$AR_P" in tcp|udp) ;; *) return 1 ;; esac
     case "$AR_D" in ''|*[!0-9:]*|*:*:*|:*|*:) return 1 ;; esac
@@ -73,8 +79,8 @@ firewall() {
     # the inverter-link logger callback. One that doesn't parse is skipped, never
     # passed to iptables half-understood.
     for a in $ALLOW_LAN; do
-        allow_rule "$a" || { log "IoT -> home rule skipped, not proto:port[-port][@ip]: $a"; continue; }
-        $IPT -A $CH_FWD -i $BR -o br-lan ${AR_S:+-s "$AR_S"} -p "$AR_P" --dport "$AR_D" -j ACCEPT
+        allow_rule "$a" || { log "IoT -> home rule skipped, not tcp|udp:port[-port] or any, [@ip] [>ip]: $a"; continue; }
+        $IPT -A $CH_FWD -i $BR -o br-lan ${AR_S:+-s "$AR_S"} ${AR_T:+-d "$AR_T"} ${AR_P:+-p "$AR_P" --dport "$AR_D"} -j ACCEPT
     done
     # IoT devices switched to "can reach home devices": any port, any home device (by
     # MAC, so it holds without a fixed address). Still not the router (CH_IN).

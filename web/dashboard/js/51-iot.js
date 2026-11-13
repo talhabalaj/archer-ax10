@@ -32,49 +32,69 @@ function viewIot() {
   ${rulesCard(c, iotDevs)}`;
 }
 
-// What IoT devices may open to the home network (iot_allow_lan). Each rule is
-// "proto:port", "proto:first-last", either with "@<IoT address>" for one device only.
+// What IoT devices may open to the home network (iot_allow_lan), as a table:
+// from (an IoT device, or any), to (a home device, or any), and which port. A rule is
+// "tcp:8123", "udp:6001-6010" or "any" (every port), then "@<IoT address>" for one
+// IoT device and ">home address" for one home device, e.g.
+// tcp:8123@192.168.50.137>192.168.0.20. IoT devices with their Home switch on
+// (iot_lan_open) are listed too: any port, any home device.
 const PORT_NAMES = { 80: "web page", 443: "web page (HTTPS)", 554: "camera stream (RTSP)", 1400: "Sonos", 1883: "MQTT",
   5353: "device discovery (mDNS)", 8096: "Jellyfin", 8123: "Home Assistant", 8883: "MQTT over TLS", 8899: "inverter link", 32400: "Plex" };
+const IP_RE = "((?:(?:0|[1-9]\\d{0,2})\\.){3}(?:0|[1-9]\\d{0,2}))";
+const RULE_RE = new RegExp(`^(?:(tcp|udp):(\\d+)(?:[-:](\\d+))?|(any))(?:@${IP_RE})?(?:>${IP_RE})?$`);
+const ipOk = ip => !ip || ip.split(".").every(n => +n <= 255);
 function parseRule(w) {
-  const m = /^(tcp|udp):(\d+)(?:[-:](\d+))?(?:@((?:(?:0|[1-9]\d{0,2})\.){3}(?:0|[1-9]\d{0,2})))?$/.exec(w);
-  return m ? { proto: m[1], from: +m[2], to: m[3] ? +m[3] : 0, ip: m[4] || "" } : null;
+  const m = RULE_RE.exec(w);
+  if (!m || !(ipOk(m[5]) && ipOk(m[6]))) return null;
+  const a = m[2] ? +m[2] : 0, b = m[3] ? +m[3] : 0;
+  if (m[1] && (a < 1 || a > 65535 || (m[3] && (b < a || b > 65535)))) return null;      // as the firewall reads it
+  return { proto: m[1] || "any", from: a, to: b, ip: m[5] || "", dst: m[6] || "" };
+}
+const portText = r => r.proto === "any" ? "Any port" : `${r.proto.toUpperCase()} ${r.to && r.to !== r.from ? `${r.from}–${r.to}` : r.from}`;
+const sel = (id, label, opts) => `<label class="rf"><span>${label}</span><div class="input"><select id="${id}" class="sel" ${S.rulesBusy ? "disabled" : ""}>${opts}</select></div></label>`;
+function ruleCell(name, sub, warn, d) {
+  return `<div class="rc">${d ? `<span class="dot ${d.online ? "on" : ""}" title="${d.online ? "Online" : "Offline"}"></span>` : ""}<div style="min-width:0">
+    <div class="rn">${esc(name)}</div>${sub || warn ? `<div class="rs">${sub ? `<span class="mono">${esc(sub)}</span>` : ""}${warn ? `<span class="rw">${esc(warn)}</span>` : ""}</div>` : ""}</div></div>`;
 }
 function rulesCard(c, iotDevs) {
+  const homes = sortDevices((S.devices ? S.devices.list : []).filter(d => d.net === "home" && d.ip));
   const rules = (c.allow_lan || "").split(/\s+/).filter(Boolean);
-  const devAt = ip => iotDevs.find(d => d.pinned === ip) || iotDevs.find(d => d.ip === ip);
-  const rows = rules.map((w, i) => {
-    const r = parseRule(w), d = r && r.ip ? devAt(r.ip) : null;
-    const who = !r ? w : !r.ip ? "Any IoT device" : d ? devName(d) : r.ip;
-    const port = r && (r.to && r.to !== r.from ? `ports ${r.from}–${r.to}` : `port ${r.from}`);
-    const what = r ? `${r.proto.toUpperCase()} ${port}${PORT_NAMES[r.from] && !r.to ? " · " + PORT_NAMES[r.from] : ""}` : "Not understood; it has no effect";
-    const where = r && r.ip ? (d ? r.ip + (d.pinned === r.ip ? "" : " (address not fixed)") : r.ip + " · no device has this address now") : "";
-    return `<div class="row ${d && !d.online ? "offline" : ""}">
-      <div class="av">${ic(d ? connIcon(d) : "iot")}${d ? `<span class="dot ${d.online ? "on" : ""}"></span>` : ""}</div>
-      <div style="min-width:0"><div class="nm"><span>${esc(who)}</span></div>
-        <div class="meta">${esc([what, where].filter(Boolean).join(" · "))} → your home network</div></div>
-      <div class="right"><button class="btn sm" data-act="rl-del" data-rule="${esc(w)}" ${S.rulesBusy ? "disabled" : ""} aria-label="Remove this rule">Remove</button></div></div>`;
-  });
-  // IoT devices switched to "Home" (iot_lan_open): every port, matched by MAC.
-  const open = iotDevs.filter(d => d.reach).map(d => `<div class="row ${d.online ? "" : "offline"}">
-      <div class="av">${ic(connIcon(d))}<span class="dot ${d.online ? "on" : ""}"></span></div>
-      <div style="min-width:0"><div class="nm"><span>${esc(devName(d))}</span></div>
-        <div class="meta">Any port, TCP and UDP → your home network</div></div>
-      <div class="right"><button class="btn sm" data-act="reach-off" data-mac="${d.mac}" aria-label="Remove this rule">Remove</button></div></div>`);
-  rows.unshift(...open);
-  const opts = iotDevs.filter(d => d.pinned || d.ip).map(d => { const ip = d.pinned || d.ip;
-    return `<option value="${esc(ip)}" ${S.ruleDev === ip ? "selected" : ""}>${esc(devName(d))} (${esc(ip)})${d.pinned ? "" : " · address not fixed"}</option>`; }).join("");
+  const iotAt = ip => iotDevs.find(d => d.pinned === ip) || iotDevs.find(d => d.ip === ip);
+  const homeAt = ip => homes.find(d => d.ip === ip);
+  const busy = S.rulesBusy ? "disabled" : "";
+  const fromCell = ip => { if (!ip) return ruleCell("Any IoT device"); const d = iotAt(ip);
+    return ruleCell(d ? devName(d) : "Nobody has this address", ip, d ? (d.pinned === ip ? "" : "address may change") : "", d); };
+  const toCell = ip => { if (!ip) return ruleCell("Any home device"); const d = homeAt(ip);
+    return ruleCell(d ? devName(d) : "Nobody has this address now", ip, "", d); };
+  const tr = (from, to, r, btn) => `<tr><td data-l="From">${from}</td><td data-l="To">${to}</td>
+    <td data-l="Port"><div class="rn">${esc(portText(r))}</div>${r.proto !== "any" && !r.to && PORT_NAMES[r.from] ? `<div class="rs">${esc(PORT_NAMES[r.from])}</div>` : r.proto === "any" ? `<div class="rs">All protocols</div>` : ""}</td>
+    <td class="rx">${btn}</td></tr>`;
+  const rows = [];
+  iotDevs.filter(d => d.reach).forEach(d => rows.push(tr(ruleCell(devName(d), d.pinned || d.ip, "Home switch on", d), ruleCell("Any home device"), { proto: "any" },
+    `<button class="btn sm" data-act="reach-off" data-mac="${d.mac}" ${busy} aria-label="Remove: ${esc(devName(d))} to any home device">Remove</button>`)));
+  rules.forEach(w => { const r = parseRule(w);
+    rows.push(r ? tr(fromCell(r.ip), toCell(r.dst), r, `<button class="btn sm" data-act="rl-del" data-rule="${esc(w)}" ${busy} aria-label="Remove this rule">Remove</button>`)
+      : `<tr><td colspan="3" data-l="Rule"><div class="rn mono">${esc(w)}</div><div class="rs"><span class="rw">Not understood; it has no effect</span></div></td>
+         <td class="rx"><button class="btn sm" data-act="rl-del" data-rule="${esc(w)}" ${busy}>Remove</button></td></tr>`); });
+  const f = S.ruleForm || {};
+  const iotOpts = `<option value="">Any IoT device</option>` + iotDevs.filter(d => d.pinned || d.ip).map(d => { const ip = d.pinned || d.ip;
+    return `<option value="${esc(ip)}" ${f.from === ip ? "selected" : ""}>${esc(devName(d))} · ${esc(ip)}${d.pinned ? "" : " (may change)"}</option>`; }).join("")
+    + (f.from && !iotDevs.some(d => (d.pinned || d.ip) === f.from) ? `<option value="${esc(f.from)}" selected>${esc(f.from)} · no device has it now</option>` : "");
+  const homeOpts = `<option value="">Any home device</option>` + homes.map(d =>
+    `<option value="${esc(d.ip)}" ${f.to === d.ip ? "selected" : ""}>${esc(devName(d))} · ${esc(d.ip)}</option>`).join("")
+    + (f.to && !homes.some(d => d.ip === f.to) ? `<option value="${esc(f.to)}" selected>${esc(f.to)} · no device has it now</option>` : "");
+  const protoOpts = [["tcp", "TCP"], ["udp", "UDP"], ["any", "Any port"]].map(([v, l]) => `<option value="${v}" ${(f.proto || "tcp") === v ? "selected" : ""}>${l}</option>`).join("");
   return `<h2>What IoT devices can reach<span class="count">${rows.length}</span></h2>
   <div class="card"><div class="card-h"><div style="flex:1"><h3>Exceptions to the IoT network's isolation</h3>
-    <p>IoT devices can't open connections to your home network, except for the rules below. Replies to connections your own devices open always get through. To let one device reach everything, switch on Home next to it above.</p></div></div>
-    ${rows.length ? `<div class="rules">${rows.join("")}</div>` : `<div class="note">No exceptions: IoT devices can't reach anything on your home network.</div>`}
-    <div class="card-b"><form class="acadd" id="rl-add">
-      <div class="input"><select id="rl-dev" aria-label="Which IoT device" style="width:100%;background:transparent;border:0;color:inherit;font:inherit"><option value="">Any IoT device</option>${opts}</select></div>
-      <div class="input short" style="flex:0 0 96px"><select id="rl-proto" aria-label="Protocol" style="width:100%;background:transparent;border:0;color:inherit;font:inherit"><option value="tcp">TCP</option><option value="udp">UDP</option></select></div>
-      <div class="input short" style="flex:0 1 190px"><input id="rl-port" class="mono" placeholder="Port, e.g. 8123" list="rl-ports" autocomplete="off" inputmode="numeric" aria-label="Port or range, e.g. 6001-6010"></div>
+    <p>IoT devices can't open connections to your home network, except as listed here. Replies to connections your own devices open always get through. None of this opens the router itself.</p></div></div>
+    ${rows.length ? `<table class="rtable"><thead><tr><th>From (IoT)</th><th>To (home)</th><th>Port</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+      : `<div class="note">No exceptions: IoT devices can't reach anything on your home network.</div>`}
+    <div class="card-b"><h4 class="rh">Add a rule</h4><form class="rform" id="rl-add">
+      ${sel("rl-dev", "From", iotOpts)}${sel("rl-to", "To", homeOpts)}${sel("rl-proto", "Protocol", protoOpts)}
+      <label class="rf rp"><span>Port</span><div class="input"><input id="rl-port" class="mono" placeholder="e.g. 8123" value="${esc(f.port || "")}" list="rl-ports" autocomplete="off" inputmode="numeric" aria-label="Port or range, e.g. 6001-6010" ${f.proto === "any" || S.rulesBusy ? "disabled" : ""}></div></label>
       <datalist id="rl-ports">${Object.entries(PORT_NAMES).map(([p, n]) => `<option value="${p}">${esc(n)}</option>`).join("")}</datalist>
-      <button class="btn primary" ${S.rulesBusy ? "disabled" : ""}>Add rule</button></form>
-      <div class="meta" style="margin-top:6px">A port (8123) or a range (6001-6010) on any home device. Pick a device with a fixed address, so the rule keeps pointing at it.</div></div>
+      <button class="btn primary" ${busy}>Add rule</button></form>
+      <div class="meta" style="margin-top:8px;white-space:normal">A port (8123) or a range (6001-6010). Pick devices with a fixed address so the rule keeps pointing at them. Home addresses come from the router's DHCP; reserve one in TP-Link's settings if it must not change.</div></div>
   </div>`;
 }
 

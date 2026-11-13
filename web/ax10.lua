@@ -245,25 +245,34 @@ local function read_settings()
 end
 
 -- IoT -> home rules (iot_allow_lan), as ax10.sh's allow_rule reads them: "tcp:8123",
--- "udp:6001-6010", either with "@<IoT address>". Returns the rules cleaned up, or nil
--- and the first one that isn't a rule.
+-- "udp:6001-6010" or "any", then optionally "@<IoT address>" and ">home address".
+-- Returns the rules cleaned up, or nil and the first one that isn't a rule.
 local function clean_rules(s)
+    local function ip_ok(ip)
+        local o = { ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+        if #o ~= 4 then return false end
+        for _, n in ipairs(o) do if tonumber(n) > 255 or n:match("^0%d") then return false end end   -- 010 would be octal to iptables
+        return true
+    end
+    -- what[@from][>to]: tcp:80, udp:6001-6010 or any; IoT address; home address.
     local out = {}
     for w in tostring(s or ""):gmatch("%S+") do
-        local r, ip = w:match("^([^@]+)@(.*)$")
+        local r, to = w:match("^([^>]+)>(.*)$")
         if not r then r = w end
-        local ok = true
-        if ip then
-            local o = { ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
-            ok = #o == 4
-            for _, n in ipairs(o) do if tonumber(n) > 255 or n:match("^0%d") then ok = false end end   -- 010 would be octal to iptables
+        local what, from = r:match("^([^@]+)@(.*)$")
+        if not what then what = r end
+        if (from and not ip_ok(from)) or (to and not ip_ok(to)) then return nil, w end
+        local rule
+        if what == "any" then rule = "any"
+        else
+            local proto, a, b = what:match("^(%l+):(%d+)[%-:](%d+)$")
+            if not proto then proto, a = what:match("^(%l+):(%d+)$") end
+            a, b = tonumber(a), tonumber(b)
+            if (proto ~= "tcp" and proto ~= "udp") or not a or a < 1 or a > 65535
+                or (b and (b < a or b > 65535)) then return nil, w end
+            rule = proto .. ":" .. a .. ((b and b ~= a) and ("-" .. b) or "")
         end
-        local proto, a, b = r:match("^(%l+):(%d+)[%-:](%d+)$")
-        if not proto then proto, a = r:match("^(%l+):(%d+)$") end
-        a, b = tonumber(a), tonumber(b)
-        if not ok or (proto ~= "tcp" and proto ~= "udp") or not a or a < 1 or a > 65535
-            or (b and (b < a or b > 65535)) then return nil, w end
-        out[#out + 1] = proto .. ":" .. a .. ((b and b ~= a) and ("-" .. b) or "") .. (ip and ("@" .. ip) or "")
+        out[#out + 1] = rule .. (from and ("@" .. from) or "") .. (to and (">" .. to) or "")
     end
     return table.concat(out, " ")
 end
@@ -282,7 +291,7 @@ local function write_settings(form)
     if key ~= nil then opts.key = key end
     if form.allow_lan ~= nil then
         local rules, bad = clean_rules(form.allow_lan)
-        if not rules then return false, "not a rule: " .. bad .. " (it looks like tcp:8123, udp:6001-6010, either with @ and an IoT address)" end
+        if not rules then return false, "not a rule: " .. bad .. " (it looks like tcp:8123, udp:6001-6010 or any, then optionally @<IoT address> and >home address)" end
         opts.allow_lan = rules
     end
     if form.lan_mode == "all" or form.lan_mode == "selected" then opts.lan_mode = form.lan_mode end
