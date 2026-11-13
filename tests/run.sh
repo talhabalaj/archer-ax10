@@ -26,6 +26,7 @@ if [ -n "$LUAC" ]; then
   "$LUAC" -p web/ax10.lua
   "$LUAC" -p helpers/doh.lua
   "$LUAC" -p helpers/autorate.lua
+  "$LUAC" -p helpers/mdns.lua
 elif [ -n "$CI" ]; then
   echo "ERROR: no luac found in CI" >&2
   exit 1
@@ -36,6 +37,11 @@ fi
 echo "== doh.lua HTTP parser"
 LUA_BIN="$(command -v lua5.1 || command -v lua || true)"
 if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/doh_parse.lua helpers/doh.lua
+elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
+else echo "SKIP: no lua found"; fi
+
+echo "== mdns.lua packets"
+if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/mdns_parse.lua helpers/mdns.lua
 elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
 else echo "SKIP: no lua found"; fi
 

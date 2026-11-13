@@ -20,7 +20,7 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
 | From → to | Result |
 | --- | --- |
 | Home LAN → IoT | allowed (apps, inverter-link) |
-| IoT → home LAN | blocked, except replies and `iot_allow_lan` exceptions |
+| IoT → home LAN | blocked, except replies and `iot_allow_lan` exceptions (the IoT tab's "What IoT devices can reach" table) |
 | IoT → router | DHCP, DNS and ping only (no web UI, no SSH) |
 | IoT → internet | allowed, except MACs in `iot_noinet` (switching a device off also cuts its open connections) |
 | IoT, IPv6 | off: disabled on `br-iot` and dropped by `ip6tables` (`AX10_IOT6`); the IoT network is IPv4-only |
@@ -44,6 +44,8 @@ sh /tmp/ax10.sh set ssid "wifi-iot"
 sh /tmp/ax10.sh set key  "<8-63 chars>"
 sh /tmp/ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"   # inverter logger
 sh /tmp/ax10.sh set allow_lan "tcp:8899@192.168.50.10"          # inverter-link callback
+#   rules: proto:port or proto:first-last, optionally @<IoT address>; malformed ones are skipped
+#   e.g. "tcp:8899@192.168.50.10 tcp:8123@192.168.50.137 udp:6001-6010"
 sh /tmp/ax10.sh set noinet "<camera-mac>"                       # optional
 sh /tmp/ax10.sh set enabled 1
 sh /tmp/ax10.sh ui      # install the web page
@@ -63,6 +65,27 @@ publishing.
 inverter-link: the phone is on another subnet, so automatic discovery won't find
 the logger. Add it by IP (192.168.50.10). The logger connects back to the phone
 on TCP 8899, which is what the `allow_lan` exception permits.
+
+## Speakers on the IoT network (AirPlay, Spotify Connect)
+
+Phones find speakers by mDNS (multicast 224.0.0.251:5353), which stays inside one
+network. `iot_mdns` (`all`, or IoT addresses) starts `helpers/mdns.lua`, a narrow
+reflector the firmware lacks (no avahi; nixio's multicast options work):
+
+- IoT → home: answers from the chosen IoT devices about the services in
+  `iot_mdns_services` (default `_airplay._tcp _raop._tcp _spotify-connect._tcp`), and
+  address records of the host names those services' SRV records point to (learned
+  for 75 minutes). A device's other services (e.g. ESPHome) are not repeated.
+- Home → IoT: questions about those services or learned host names, so the device
+  answers; its answer comes back the first way. The router also asks every 5 minutes.
+- Packets go out from the router's own address on each side (as avahi's reflector
+  does), TTL 255, at most 40 per second each way. The router accepts UDP 5353 from
+  the chosen devices only (`AX10_IOT_IN`); nothing else listens on 5353 here.
+- Playing still needs the usual paths: home → IoT (all home devices, or the selected
+  ones) for AirPlay 7000/5000/6001-6010 and the high ports, Spotify's 4070; and
+  `udp:319-320` in `iot_allow_lan`, since AirPlay 2's PTP timing goes both ways.
+- The device must answer mDNS questions itself; one that drops incoming 5353 shows
+  up only for a while after it announces.
 
 ## Home allow list and join-home page
 

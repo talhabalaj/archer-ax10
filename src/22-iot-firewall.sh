@@ -40,6 +40,19 @@ FW_VER=3
 # this after a rebuild and firewall_ok() compares, so a missing, extra or
 # reordered rule triggers a rebuild. If this iptables has no -S, both sides
 # are empty and the -C checks below still apply.
+# One IoT -> home rule: "proto:port", "proto:first-last", either with "@iot-ip" to
+# allow just that device (the dashboard's IoT tab writes these). Sets AR_P (tcp or
+# udp), AR_D (the port, or first:last as iptables takes a range) and AR_S (the IoT
+# address, or empty for every IoT device).
+allow_rule() {
+    r="${1%%@*}"; AR_S=""
+    if [ "$r" != "$1" ]; then AR_S="${1#*@}"; valid_ip4 "$AR_S" || return 1; fi
+    AR_P="${r%%:*}"; AR_D="$(echo "${r#*:}" | tr - :)"
+    case "$AR_P" in tcp|udp) ;; *) return 1 ;; esac
+    case "$AR_D" in ''|*[!0-9:]*|*:*:*|:*|*:) return 1 ;; esac
+    for n in $(echo "$AR_D" | tr : ' '); do [ "$n" -ge 1 ] 2>/dev/null && [ "$n" -le 65535 ] || return 1; done
+    case "$AR_D" in *:*) [ "${AR_D%:*}" -le "${AR_D#*:}" ] || return 1 ;; esac
+}
 fw_dump() { $IPT -S $CH_FWD 2>/dev/null; $IPT -S $CH_IN 2>/dev/null; $IPT -t nat -S $CH_NAT 2>/dev/null; $IPT6 -S $CH_IOT6 2>/dev/null; }
 firewall() {
     # filter: chains are flushed and refilled, jumps added once.
@@ -56,11 +69,12 @@ firewall() {
     # open connection, must reach the no-inet drops below, so that switching a
     # device's Internet off also cuts what it already has open.
     $IPT -A $CH_FWD -i $BR -o br+ -m state --state ESTABLISHED,RELATED -j ACCEPT
-    # Narrow IoT -> LAN exceptions: "proto:port" or "proto:port@iot-ip",
-    # e.g. tcp:8899@192.168.50.10 for the inverter-link logger callback.
+    # Narrow IoT -> LAN exceptions (see allow_rule), e.g. tcp:8899@192.168.50.10 for
+    # the inverter-link logger callback. One that doesn't parse is skipped, never
+    # passed to iptables half-understood.
     for a in $ALLOW_LAN; do
-        r="${a%%@*}"; src=""; [ "$r" != "$a" ] && src="-s ${a#*@}"
-        $IPT -A $CH_FWD -i $BR -o br-lan $src -p "${r%%:*}" --dport "${r#*:}" -j ACCEPT
+        allow_rule "$a" || { log "IoT -> home rule skipped, not proto:port[-port][@ip]: $a"; continue; }
+        $IPT -A $CH_FWD -i $BR -o br-lan ${AR_S:+-s "$AR_S"} -p "$AR_P" --dport "$AR_D" -j ACCEPT
     done
     $IPT -A $CH_FWD -i $BR -o br+ -j DROP
     for m in $NOINET; do $IPT -A $CH_FWD -i $BR -m mac --mac-source "$m" -j DROP; done
@@ -75,6 +89,11 @@ firewall() {
     $IPT -A $CH_IN -p udp --dport 53 -j ACCEPT
     $IPT -A $CH_IN -p tcp --dport 53 -j ACCEPT
     $IPT -A $CH_IN -p icmp -j ACCEPT
+    # mDNS from the devices whose speakers home devices see (24-iot-mdns.sh).
+    for a in $(mdns_ips); do
+        if [ "$a" = all ]; then $IPT -A $CH_IN -p udp --dport 5353 -j ACCEPT
+        else $IPT -A $CH_IN -s "$a" -p udp --dport 5353 -j ACCEPT; fi
+    done
     $IPT -A $CH_IN -j DROP
     $IPT -C INPUT -i $BR -j $CH_IN 2>/dev/null || $IPT -I INPUT 1 -i $BR -j $CH_IN
 
@@ -87,11 +106,11 @@ firewall() {
 
     # Broadcom flow cache can keep forwarding already-accelerated flows.
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" > "$RUN/fw.sig"
+    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$MDNS" > "$RUN/fw.sig"
     fw_dump > "$RUN/fw.snap"
 }
 firewall_ok() {
-    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW" ] &&
+    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$MDNS" ] &&
     $IPT -C FORWARD -i $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C FORWARD -o $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C $CH_FWD -i $BR -j ACCEPT 2>/dev/null &&

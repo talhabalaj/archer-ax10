@@ -59,6 +59,7 @@
 #                     ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
 #                     ax10.sh set noinet "aa:bb:cc:dd:ee:02"
 #                     ax10.sh set allow_lan "tcp:8899@192.168.50.10"
+#                     ax10.sh set mdns all   (IoT speakers' AirPlay/Spotify seen from home; or IoT addresses)
 #                     ax10.sh set lan_mode selected; ax10.sh set lan_allow "<phone-mac>"
 #                     ax10.sh set enabled 1
 # ============================================================
@@ -107,6 +108,7 @@ load() {
     NOINET="$(cfg noinet '')"
     STATIC="$(cfg static '')"
     ALLOW_LAN="$(cfg allow_lan '')"
+    MDNS="$(cfg mdns '')"               # IoT addresses whose AirPlay/Spotify home devices see (24-iot-mdns.sh)
     LAN_MODE="$(cfg lan_mode all)"      # all | selected
     LAN_ALLOW="$(cfg lan_allow '')"     # home MACs allowed to reach IoT (mode selected)
 }

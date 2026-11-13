@@ -244,6 +244,30 @@ local function read_settings()
     }
 end
 
+-- IoT -> home rules (iot_allow_lan), as ax10.sh's allow_rule reads them: "tcp:8123",
+-- "udp:6001-6010", either with "@<IoT address>". Returns the rules cleaned up, or nil
+-- and the first one that isn't a rule.
+local function clean_rules(s)
+    local out = {}
+    for w in tostring(s or ""):gmatch("%S+") do
+        local r, ip = w:match("^([^@]+)@(.*)$")
+        if not r then r = w end
+        local ok = true
+        if ip then
+            local o = { ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+            ok = #o == 4
+            for _, n in ipairs(o) do if tonumber(n) > 255 or n:match("^0%d") then ok = false end end   -- 010 would be octal to iptables
+        end
+        local proto, a, b = r:match("^(%l+):(%d+)[%-:](%d+)$")
+        if not proto then proto, a = r:match("^(%l+):(%d+)$") end
+        a, b = tonumber(a), tonumber(b)
+        if not ok or (proto ~= "tcp" and proto ~= "udp") or not a or a < 1 or a > 65535
+            or (b and (b < a or b > 65535)) then return nil, w end
+        out[#out + 1] = proto .. ":" .. a .. ((b and b ~= a) and ("-" .. b) or "") .. (ip and ("@" .. ip) or "")
+    end
+    return table.concat(out, " ")
+end
+
 local function write_settings(form)
     local ssid, key = form.ssid, form.password
     if form.enable == "on" then
@@ -256,7 +280,11 @@ local function write_settings(form)
     }
     if ssid ~= nil then opts.ssid = ssid end
     if key ~= nil then opts.key = key end
-    if form.allow_lan ~= nil then opts.allow_lan = form.allow_lan end
+    if form.allow_lan ~= nil then
+        local rules, bad = clean_rules(form.allow_lan)
+        if not rules then return false, "not a rule: " .. bad .. " (it looks like tcp:8123, udp:6001-6010, either with @ and an IoT address)" end
+        opts.allow_lan = rules
+    end
     if form.lan_mode == "all" or form.lan_mode == "selected" then opts.lan_mode = form.lan_mode end
     if form.lock == "on" or form.lock == "off" then opts.lock = form.lock == "on" and "1" or "0" end
     if not save(opts) then return false, BUSY end

@@ -19,7 +19,7 @@ case "\$*" in
   *network.lan.ipaddr*) echo "192.168.0.1" ;;
   *iot_noinet*) echo "aa:bb:cc:dd:ee:02" ;;
   *iot_static*) echo "aa:bb:cc:dd:ee:01,192.168.50.10" ;;
-  *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353" ;;
+  *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353 udp:6001-6010@192.168.50.137 tcp:9-1 icmp:1 tcp:80@1.2.3 tcp:80;x tcp:70000 tcp:81@192.168.50.010" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -207,6 +207,8 @@ has "iptables -A AX10_IOT_FWD -i br-iot -o br+ -j DROP"
 has "iptables -A AX10_IOT_FWD -i br-iot -m mac --mac-source aa:bb:cc:dd:ee:02 -j DROP"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.10 -p tcp --dport 8899 -j ACCEPT"
 has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -p udp --dport 5353 -j ACCEPT"
+has "iptables -A AX10_IOT_FWD -i br-iot -o br-lan -s 192.168.50.137 -p udp --dport 6001:6010 -j ACCEPT"
+[ "$(grep -c "AX10_IOT_FWD -i br-iot -o br-lan.*ACCEPT" "$T/calls")" -ge 3 ] && ! grep -E "AX10_IOT_FWD -i br-iot -o br-lan.*(icmp|9:1|1\.2\.3 |70000|;x|\.010|dport 81 )" "$T/calls" >/dev/null || fail "a malformed IoT -> home rule reached iptables: $(grep 'br-iot -o br-lan' "$T/calls")"
 has "iptables -A AX10_IOT_IN -j DROP"
 has "dnsmasq restart"
 has "iptables -t nat -A AX10_IOT_NAT -s 192.168.50.0/24 ! -o br+ -j MASQUERADE"
@@ -765,6 +767,8 @@ case "\$*" in
   *"get openvpn.archer_boot.iot_dns_prev6"*) cat "$T/prev6" 2>/dev/null ;;
   "set openvpn.archer_boot.iot_dns_prev6="*) v="\$*"; echo "\${v#set openvpn.archer_boot.iot_dns_prev6=}" > "$T/prev6" ;;
   *"get openvpn.archer_boot.iot_names"*) printf '%s\n' "aa:bb:cc:dd:ee:07=Living Room TV" "aa:bb:cc:00:00:55=No Lease" ;;
+  *iot_mdns_services*) cat "$T/mdns_svc" 2>/dev/null || exit 1 ;;
+  *iot_mdns*) cat "$T/mdns" 2>/dev/null || exit 1 ;;
   "-q get dhcp.lan.dhcp_option") cat "$T/dhcp_opt" ;;
   "set dhcp.lan.dhcp_option="*) v="\$*"; echo "\${v#set dhcp.lan.dhcp_option=}" > "$T/dhcp_opt" ;;
   "commit dhcp") ;;
@@ -845,6 +849,30 @@ grep -q "127.0.0.1#5053" "$T/dnsmasq.conf" && fail "dnsmasq still pointed at a f
 echo 0 > "$T/doh_on"
 iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 [ -e "$T/run/doh.pid" ] && fail "DNS-over-HTTPS forwarder left running after it was switched off"
+# Speakers seen from home: the mDNS helper runs for the listed IoT addresses only
+# (valid, on the IoT network), the router takes their mDNS, and both go when unset.
+: > "$T/run/files/helpers/mdns.lua"; echo "192.168.50.137 10.0.0.5 bad;rm 192.168.50.999" > "$T/mdns"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+i=0; while [ $i -lt 30 ] && ! grep -qF "mdns.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "lua $T/run/files/helpers/mdns.lua 192.168.50.1 192.168.0.1 192.168.50.137 _airplay._tcp _raop._tcp _spotify-connect._tcp $T/run/mdns.stat"
+has "iptables -A AX10_IOT_IN -s 192.168.50.137 -p udp --dport 5353 -j ACCEPT"
+grep -E "AX10_IOT_IN.*(10\.0\.0\.5|999|rm)" "$T/calls" >/dev/null && fail "a bad address got the router's mDNS port"
+[ "$(grep -n "AX10_IOT_IN -s 192.168.50.137" "$T/calls" | cut -d: -f1)" -lt "$(grep -n "AX10_IOT_IN -j DROP" "$T/calls" | tail -1 | cut -d: -f1)" ] || fail "mDNS accept comes after the IoT input drop"
+: > "$T/calls"; iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+grep -qF "mdns.lua" "$T/calls" && fail "mDNS helper restarted although nothing changed"
+printf '_airplay._tcp bad;x _x\n' > "$T/mdns_svc"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+i=0; while [ $i -lt 30 ] && ! grep -qF "mdns.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "mdns.lua 192.168.50.1 192.168.0.1 192.168.50.137 _airplay._tcp $T/run/mdns.stat"
+# "all": every IoT device's speakers, and the router takes mDNS from any of them.
+echo "192.168.50.137 all" > "$T/mdns"; rm -f "$T/mdns_svc"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+i=0; while [ $i -lt 30 ] && ! grep -qF "mdns.lua" "$T/calls"; do sleep 0.1; i=$((i + 1)); done
+has "mdns.lua 192.168.50.1 192.168.0.1 all _airplay._tcp _raop._tcp _spotify-connect._tcp $T/run/mdns.stat"
+has "iptables -A AX10_IOT_IN -p udp --dport 5353 -j ACCEPT"
+grep -qF "AX10_IOT_IN -s 192.168.50.137 -p udp --dport 5353" "$T/calls" && fail "per-address mDNS rule next to the all-devices one"
+rm -f "$T/mdns" "$T/mdns_svc"; iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+[ -e "$T/run/mdns.pid" ] && fail "mDNS helper left running after the list was emptied"
 # Off again: DHCP hands out the upstream servers, the dnsmasq lines go.
 echo 0 > "$T/dns_on"
 iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true

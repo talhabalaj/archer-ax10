@@ -196,6 +196,8 @@ h2 .count { color: var(--ink-3); font-weight: 500; font-size: 14px; }
 .addmac { border-top: 1px solid var(--line); padding-top: 12px; }
 .addmac summary { cursor: pointer; font-size: 13.5px; font-weight: 500; color: var(--signal); width: max-content; }
 .acadd .input { flex: 1 1 180px; }
+.rules { border-top: 1px solid var(--line); }
+.rules .row:first-child { border-top: 0; }
 .capform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 .capform .input { height: 34px; max-width: 150px; }
 .offline .nm, .offline .av, .offline .cell { opacity: .6; }

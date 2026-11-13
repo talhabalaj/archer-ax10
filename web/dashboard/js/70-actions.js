@@ -79,6 +79,8 @@ document.addEventListener("click", async ev => {
     if (act === "conns-on") { S.conns = { mac }; render(); watchConns(); return; }
     if (act === "conns-off") { S.conns = null; watchConns(); render(); return; }
     if (act === "cap-remove") return setCap(mac, "");
+    if (act === "rl-del") { const gone = a.dataset.rule, list = (S.iot.allow_lan || "").split(/\s+/).filter(Boolean);
+      return list.includes(gone) ? saveRules(list.filter(x => x !== gone), `Rule removed: ${gone}`) : undefined; }
     if (act === "nm-save") return saveNames();
     if (act === "nm-reset") { delete S.dirty.names; render(); return; }
     if (act === "nm-add") { const f = readNamesForm(); f.hosts.push({ name: "", ip: "" }); setNamesDraft(f, true); return; }
@@ -122,6 +124,7 @@ document.addEventListener("input", ev => {
   if (/^nm-/.test(i.id)) return markNames();
 });
 document.addEventListener("submit", ev => {
+  if (ev.target.id === "rl-add") { ev.preventDefault(); return addRule(); }
   if (ev.target.id === "ac-add") {
     ev.preventDefault();
     const raw = $id("ac-mac").value.trim().toUpperCase().replace(/[-.\s]/g, ":");
@@ -218,6 +221,26 @@ async function forgetDevices(list) {
   render();
 }
 
+// IoT -> home rules: saved at once, like the switches.
+// One save at a time: each starts from the list the last one returned.
+async function saveRules(list, msg) {
+  if (S.rulesBusy) return;
+  S.rulesBusy = true; render();
+  try { S.iot = await iot("settings", Object.assign({ operation: "write" }, S.iot, { allow_lan: list.join(" ") })); S.iotLoadedAt = Date.now(); toast(msg); }
+  catch (e) { fail(e); }
+  S.rulesBusy = false; render();
+}
+function addRule() {
+  const ip = $id("rl-dev").value, proto = $id("rl-proto").value, port = $id("rl-port").value.trim().replace(/\s*[–:]\s*|\s+-\s+/g, "-");
+  const m = /^(\d+)(?:-(\d+))?$/.exec(port), a = m && +m[1], b = m && m[2] ? +m[2] : a;
+  if (!m || a < 1 || b > 65535 || b < a) return toast("The port is a number from 1 to 65535, or a range like 6001-6010.", true);
+  const rule = `${proto}:${a}${b !== a ? "-" + b : ""}${ip ? "@" + ip : ""}`;
+  const list = (S.iot.allow_lan || "").split(/\s+/).filter(Boolean);
+  if (list.includes(rule)) return toast("That rule is already there.", true);
+  S.ruleDev = ip;
+  const d = ip && S.devices && S.devices.list.find(x => x.pinned === ip || x.ip === ip);
+  return saveRules(list.concat(rule), `${d ? devName(d) : ip || "Every IoT device"} can now reach ${proto.toUpperCase()} ${b !== a ? `ports ${a}–${b}` : `port ${a}`} on your home network`);
+}
 async function setLock(on) {
   if (on && S.devices && !S.devices.list.some(d => d.net === "iot" && d.pinned)) { toast("No known IoT devices yet; locking now would keep everything out.", true); render(); return; }
   try {
@@ -227,11 +250,11 @@ async function setLock(on) {
 }
 function readIotForm() {
   return { enable: $id("iot-enable").checked ? "on" : "off", ssid: $id("iot-ssid").value, password: $id("iot-pw").value,
-           hidden: $id("iot-hidden").checked ? "on" : "off", allow_lan: $id("iot-allow").value.trim(), lan_mode: S.iot.lan_mode };
+           hidden: $id("iot-hidden").checked ? "on" : "off", lan_mode: S.iot.lan_mode };
 }
 function markIot() {
   const f = readIotForm(), c = S.iot;
-  const same = ["enable", "ssid", "password", "hidden", "allow_lan"].every(k => (f[k] || "") === (c[k] || ""));
+  const same = ["enable", "ssid", "password", "hidden"].every(k => (f[k] || "") === (c[k] || ""));
   const was = !!S.dirty.iot;
   if (same) delete S.dirty.iot; else S.dirty.iot = Object.assign({}, c, f);
   if (was !== !same) render();
@@ -241,7 +264,7 @@ async function saveIot() {
   if (f.enable === "on" && (f.ssid.length < 1 || f.ssid.length > 32)) return toast("The network name needs 1 to 32 characters.", true);
   if (f.enable === "on" && (f.password.length < 8 || f.password.length > 63)) return toast("The password needs 8 to 63 characters.", true);
   try {
-    S.iot = await iot("settings", Object.assign({ operation: "write" }, f));
+    S.iot = await iot("settings", Object.assign({ operation: "write" }, f, { allow_lan: S.iot.allow_lan, lock: S.iot.lock }));
     delete S.dirty.iot; render(); toast("Saved. IoT devices reconnect in a few seconds.");
     await loadDevices(); render();
   } catch (e) { fail(e); }

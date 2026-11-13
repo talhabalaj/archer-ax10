@@ -42,8 +42,8 @@ dns_load() {
 # A name as a DNS label: lower case, letters digits and dashes.
 # (Line breaks go first: sed and cut work line by line and would pass them through.)
 dns_label() { printf '%s' "$1" | tr -d '\n\r' | tr 'A-Z _.' 'a-z---' | sed 's/[^a-z0-9-]//g; s/--*/-/g; s/^-//; s/-$//' | cut -c1-63; }
-valid_ip4() {   # four numbers 0-255, nothing else
-    case "$1" in *[!0-9.]*|'') return 1 ;; esac
+valid_ip4() {   # four numbers 0-255, nothing else (no leading zeros: iptables reads 010 as 8)
+    case "$1" in *[!0-9.]*|''|0[0-9]*|*.0[0-9]*) return 1 ;; esac
     echo "$1" | awk -F. 'NF != 4 { exit 1 } { for (i = 1; i <= 4; i++) if ($i == "" || $i > 255) exit 1 }'
 }
 dns_hosts() {   # the hosts file: router names, custom records, dashboard names of devices with a lease

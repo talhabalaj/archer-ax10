@@ -24,6 +24,7 @@ apply() {
         vif_open_guard
     fi
     firewall_ok || { firewall; log "firewall (re)applied"; }
+    mdns_sync
     autopin
     dns_sync
     dhcp_sync
@@ -57,6 +58,7 @@ iot_teardown() {
     # dnsmasq: the block as it should be now, in one go. The IoT lines leave it
     # (iot_on is false here), the local-names lines stay, and it restarts once.
     dns_load; dhcp_sync
+    mdns_stop
     firewall_remove
     orig="$(cat "$RUN/orig_bridge" 2>/dev/null)"; orig="${orig:-br-lan}"
     vif_release
