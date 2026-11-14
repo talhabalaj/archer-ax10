@@ -11,6 +11,8 @@ case "$1" in
     *) holds "$RUNLOCK" || with_lock "$RUNLOCK" "${LOCK_WAIT}" "$@" ;;
 esac
 
+# A command for a part that comes in extra.sh (src/95-extra.sh) says so when it isn't loaded.
+need_extra() { [ -n "$EXTRA_LOADED" ] || { echo "ax10.sh: $1 comes with the downloaded files (extra.sh), which aren't loaded" >&2; exit 1; }; }
 case "$1" in
     apply) mkdir -p "$RUN"; rm -f "$RUN/iot.stopped"; apply ;;   # asked for by hand: a manual stop no longer holds
     watch)   # the watcher: a pass every INTERVAL seconds, each in its own process holding the run lock
@@ -22,6 +24,7 @@ case "$1" in
     pass)
         rm -f "$RUN/sync.want"          # this pass applies whatever was asked for up to now
         run_all
+        extra_retry
         alerts_sync
         lifeline_guard
         ipv6_guard
@@ -121,6 +124,7 @@ case "$1" in
     guard) mkdir -p "$RUN"; lifeline_guard; ipv6_guard ;;
     dns6) mkdir -p "$RUN"; dns_load; [ "$DNS_ON" = 1 ] && dns6_strip ;;   # run by the IPv6 hotplug hook (see dns6_hook)   # what the watcher checks besides the rules
     load)    # a load reading now (two, 2 s apart, on a first run), then the last few
+        need_extra "the router load log"
         load_guard; [ -f "$RUN/load.log" ] || { sleep 2; load_guard; }
         echo "uptime   busy  network  load   down kbit/s  up kbit/s"
         tail -n "${2:-8}" "$RUN/load.log" 2>/dev/null | awk '{ printf "%-8s %3d%%  %5d%%  %5s  %11d  %9d\n", $1, $2, $3, $4, $5, $6 }' ;;
@@ -128,10 +132,12 @@ case "$1" in
         usage_on && { usage_sync; usage_save; echo "$(epoch)" > "$RUN/usage.saved"; log "usage log saved; rebooting"; }
         ${REBOOT:-/sbin/reboot} ;;
     usage)   # count up to now, then show the log: days, months, devices this month
+        need_extra "data usage"
         usage_sync
         awk '{ printf "%-34s %9.2f GB down %9.2f GB up\n", $1, $2 / 1073741824, $3 / 1073741824 }' "$RUN/usage" ;;
-    alerts) alerts_sync ;;          # one alerts pass now (the watcher does this every pass)
+    alerts) need_extra "alerts"; alerts_sync ;;          # one alerts pass now (the watcher does this every pass)
     alert-test)
+        need_extra "alerts"
         alerts_on || { echo "ax10.sh: alerts are off (set mqtt_host first)" >&2; exit 1; }
         alert test "Test alert from the router"; alerts_discovery; alerts_flush now
         if mq_waiting; then echo "not sent: $(cat "$RUN/alerts.err" 2>/dev/null); queued for the next try" >&2; exit 1; fi

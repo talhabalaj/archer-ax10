@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")/.."
 sh scripts/build.sh >/dev/null
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-{ sed -n '/^mq_clean() {/,/^}/p' ax10.sh; grep '^has_line() ' ax10.sh; } > "$T/f.sh"
+{ sed -n '/^mq_clean() {/,/^}/p' build/ax10-files/extra.sh; grep '^has_line() ' ax10.sh; } > "$T/f.sh"
 . "$T/f.sh"
 fails=0
 t() { got="$(printf '%s' "$2" | mq_clean "$3")"; [ "$got" = "$4" ] || { echo "FAIL: $1: got [$got] want [$4]"; fails=$((fails + 1)); }; }

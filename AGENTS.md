@@ -12,7 +12,7 @@ does and what we learned about the router; this file is about how to work.
 
 | Path | What |
 | --- | --- |
-| `src/*.sh` | Everything on the router, one file per job (IoT network, home allow list, join-home page, devices, names + DNS over HTTPS, speed limits, usage, load, UI install, guards, status, the watcher, commands). `scripts/build.sh` joins them, in name order, into `ax10.sh`. |
+| `src/*.sh` | Everything on the router, one file per job (IoT network, home allow list, join-home page, devices, names + DNS over HTTPS, speed limits, usage, load, UI install, guards, status, the watcher, commands). `scripts/build.sh` joins them, in name order, into `ax10.sh`. `src/extra/*.sh` (speaker relay, usage, load, MQTT alerts) are built into `extra.sh` in the downloaded files instead, so the copy of `ax10.sh` saved in flash stays small; see `src/95-extra.sh`. |
 | `ax10.sh` | **Built, not edited, not tracked.** The single file that is deployed (`/tmp/ax10.sh`), released, saved in flash and tested. `tests/run.sh` builds it first. |
 | `web/ax10.lua` | LuCI controller: the dashboard's backend (`/admin/ax10?form=...`). |
 | `web/dashboard/` | The dashboard's source: `page.html`, `style.css`, `js/*.js`; built into one self-contained `web/dashboard.html`. |

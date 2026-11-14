@@ -4,6 +4,7 @@
 #   web/dashboard.html   the dashboard, served at / (https://192.168.0.1/)
 #   web/ax10.lua         its backend, a LuCI controller at /admin/ax10
 #   helpers/             DNS over HTTPS, the automatic speed limit, CA certificates
+#   extra.sh             the parts of ax10.sh kept out of its copy in flash (95-extra)
 # The web root is on the read-only squashfs, so the dashboard is bind-mounted over
 # the stock root page (a redirect to /webpages/index.html), and the controller goes
 # into a RAM copy of the controller directory. Nothing else of TP-Link's UI is
@@ -33,15 +34,27 @@ bind_file() {   # bind_file <src> <dst>: show <src> at existing file <dst> (re-b
 # carry a valid signature (see boot.sh).
 SIGN_PUB="${SIGN_PUB:-/tmp/archer-sign.pub}"
 ui_fetch() {
-    [ -f "$UI_SRC/web/ax10.lua" ] && return 0
-    mkdir -p "$UI_SRC"
+    # Kept while they match this ax10.sh (extra.sh carries the build stamp); files left
+    # from another release (ax10.sh replaced without a reboot) are fetched again. The new
+    # ones are checked and unpacked aside first: a failed download keeps what is there.
+    [ -f "$UI_SRC/web/ax10.lua" ] && extra_matches && return 0
+    mkdir -p "$RUN"
     curl -4 -L -k -fs -m 60 "$SRC/ax10-files.tar.gz" -o "$RUN/files.tgz" || return 1
     if [ -s "$SIGN_PUB" ]; then
         curl -4 -L -k -fs -m 30 "$SRC/ax10-files.tar.gz.sig" -o "$RUN/files.tgz.sig" &&
             openssl dgst -sha256 -verify "$SIGN_PUB" -signature "$RUN/files.tgz.sig" "$RUN/files.tgz" >/dev/null 2>&1 ||
             { log "ax10-files.tar.gz: signature check failed, not installing"; rm -f "$RUN/files.tgz"*; return 1; }
     fi
-    gzip -dc "$RUN/files.tgz" | tar xf - -C "$UI_SRC" && rm -f "$RUN/files.tgz"*
+    rm -rf "$UI_SRC.new"; mkdir -p "$UI_SRC.new"
+    gzip -dc "$RUN/files.tgz" | tar xf - -C "$UI_SRC.new" || { rm -rf "$UI_SRC.new" "$RUN/files.tgz"*; return 1; }
+    rm -f "$RUN/files.tgz"*
+    # Only files of this build go in: a release published between the download of
+    # ax10.sh and of these (both are "latest") would bring another build's extra.sh.
+    if [ ! -f "$UI_SRC.new/web/ax10.lua" ] || ! EXTRA="$UI_SRC.new/extra.sh" extra_matches; then
+        rm -rf "$UI_SRC.new"; log "ax10-files.tar.gz is from another build than this ax10.sh; kept the files there were"; return 1
+    fi
+    rm -rf "$UI_SRC.old"; [ -d "$UI_SRC" ] && mv "$UI_SRC" "$UI_SRC.old"
+    mv "$UI_SRC.new" "$UI_SRC" && rm -rf "$UI_SRC.old"
 }
 # What earlier versions changed in TP-Link's UI: its Advanced > Wireless pages, menu,
 # module list and language files (overlays), and its login page (a redirect to us).

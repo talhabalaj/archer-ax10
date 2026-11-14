@@ -9,6 +9,9 @@ ln -s ../../br-lan "$T/net/wl1.4/brport/bridge"
 ln -s ../../br-lan "$T/net/wl1.1/brport/bridge"
 : > "$T/inittab"; : > "$T/calls"
 : > "$T/arp"; : > "$T/leases"
+# The parts of ax10.sh that come with the downloaded files (src/95-extra.sh), in place
+# as on a router that has the release.
+mkdir -p "$T/run/files"; cp "$ROOT/build/ax10-files/extra.sh" "$T/run/files/extra.sh"
 # ax10.sh sees a grep with BusyBox 1.19's options only (the router's): -x, for one, is
 # not there, and a script using it would quietly never match. (ax10.sh sets its own
 # PATH; AX10_TEST_PATH goes in front of it.) Each call is counted, to show it is used.
@@ -931,6 +934,12 @@ i=0; while [ $i -lt 30 ] && ! grep -qF "mdns.lua" "$T/calls"; do sleep 0.1; i=$(
 has "mdns.lua 192.168.50.1 192.168.0.1 all _airplay._tcp _raop._tcp _spotify-connect._tcp $T/run/mdns.stat"
 has "iptables -A AX10_IOT_IN -p udp --dport 5353 -j ACCEPT"
 grep -qF "AX10_IOT_IN -s 192.168.50.137 -p udp --dport 5353" "$T/calls" && fail "per-address mDNS rule next to the all-devices one"
+# Without extra.sh (a boot from the copy in flash) the firewall comes out the same:
+# built then, it must not keep the relay's port shut once extra.sh loads.
+mv "$T/run/files/extra.sh" "$T/extra.keep"; rm -f "$T/run/fw.sig"; : > "$T/calls"
+iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
+mv "$T/extra.keep" "$T/run/files/extra.sh"
+has "iptables -A AX10_IOT_IN -p udp --dport 5353 -j ACCEPT"
 rm -f "$T/mdns" "$T/mdns_svc"; iot "$T/bin/uci9" "$ROOT/ax10.sh" apply >/dev/null 2>&1 || true
 [ -e "$T/run/mdns.pid" ] && fail "mDNS helper left running after the list was emptied"
 # Off again: DHCP hands out the upstream servers, the dnsmasq lines go.
@@ -1058,6 +1067,15 @@ ar "Mon 02:57"; grep -q "$day=325/52" "$T/u/iot_usage_days" || fail "usage: not 
 # `ax10.sh reboot` saves the log first, so a planned reboot loses nothing.
 wanc 20 9; REBOOT=true WAN_DEV=wan0 USAGE_BOOT="$BOOTID" iot "$T/bin/uci7" "$ROOT/ax10.sh" reboot >/dev/null 2>&1 || true
 grep -q "$day=330/54" "$T/u/iot_usage_days" || fail "usage: reboot did not save the log first ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
+# Without extra.sh, `reboot` still saves the log in RAM; with no log in RAM (a boot from
+# the copy in flash), what is in flash is kept, never replaced by an empty save.
+mv "$T/run/files/extra.sh" "$T/extra.keep"; cp "$T/run/usage" "$T/usage.keep"
+echo "T:$day 2097152000 1048576" > "$T/run/usage"
+REBOOT=true iot "$T/bin/uci7" "$ROOT/ax10.sh" reboot >/dev/null 2>&1 || true
+grep -q "$day=2000/1" "$T/u/iot_usage_days" || fail "usage: reboot without extra.sh did not save the log ($(cat "$T/u/iot_usage_days" 2>/dev/null))"
+rm -f "$T/run/usage"; REBOOT=true iot "$T/bin/uci7" "$ROOT/ax10.sh" reboot >/dev/null 2>&1 || true
+grep -q "$day=2000/1" "$T/u/iot_usage_days" || fail "usage: a reboot with no log in RAM emptied the saved one"
+mv "$T/extra.keep" "$T/run/files/extra.sh"; mv "$T/usage.keep" "$T/run/usage"
 # Device history: the previous calendar month is kept on the 1st of March, May and July too.
 if date -d @0 +%Y >/dev/null 2>&1; then
   for d in 2026-03-01 2026-05-01 2026-07-01 2026-01-01; do
@@ -1273,6 +1291,49 @@ grep -q "brctl addbr br-iot\|brctl addif br-iot" "$T/calls" && fail "the watcher
 grep -q "dhcp-range=set:iot" "$T/dnsmasq.conf" && fail "IoT addresses handed out again after stop"
 : > "$T/calls"; run start >/dev/null 2>&1 || true
 has "brctl addif br-iot wl1.4"
+
+# --- extra.sh: without it (a boot from the copy in flash), or from another build, the
+# rest of ax10.sh runs and its stand-ins do nothing.
+mv "$T/run/files/extra.sh" "$T/extra.keep"
+st="$(iot "$T/bin/uci" "$ROOT/ax10.sh" status 2>/dev/null)" || true
+echo "$st" | grep -q "^extras:    not loaded: waiting for the downloaded files" || fail "missing extra.sh not reported: $(echo "$st" | grep extras)"
+: > "$T/calls"; iot "$T/bin/uci" "$ROOT/ax10.sh" pass >/dev/null 2>&1 || fail "a pass failed without extra.sh"
+iot "$T/bin/uci" "$ROOT/ax10.sh" usage 2>&1 | grep -q "data usage comes with the downloaded files" || fail "ax10.sh usage without extra.sh didn't say why"
+sed '2s/.*/# ax10-build: 0-0/' "$T/extra.keep" > "$T/run/files/extra.sh"
+st="$(iot "$T/bin/uci" "$ROOT/ax10.sh" status 2>/dev/null)" || true
+echo "$st" | grep -q "^extras:    not loaded: extra.sh is from another release" || fail "extra.sh from another build loaded"
+mv "$T/extra.keep" "$T/run/files/extra.sh"
+st="$(iot "$T/bin/uci" "$ROOT/ax10.sh" status 2>/dev/null)" || true
+echo "$st" | grep -q "^extras:    loaded" || fail "matching extra.sh not loaded"
+
+# --- fetching the files: a bundle of another build is not swapped in (the files there
+# stay, and say so); one of this build is. While the files there are from another
+# build, the watcher fetches again, every 10 minutes at most.
+mkdir -p "$T/srv/x"; cp -R "$ROOT/build/ax10-files/." "$T/srv/x/"; cp "$T/run/files/extra.sh" "$T/extra.keep"
+sed '2s/.*/# ax10-build: 9-9/' "$T/extra.keep" > "$T/srv/x/extra.sh"
+(cd "$T/srv/x" && tar -czf "$T/srv/ax10-files.tar.gz" .)
+cat > "$T/bb/curl" <<EOF
+#!/bin/sh
+echo "curl \$*" >> "$T/calls"
+o=""; u=""; while [ \$# -gt 0 ]; do case "\$1" in -o) o="\$2"; shift ;; http*) u="\$1" ;; esac; shift; done
+[ -f "$T/srv/\${u##*/}" ] && cp "$T/srv/\${u##*/}" "\$o"
+EOF
+chmod +x "$T/bb/curl"
+sed '2s/.*/# ax10-build: 1-1/' "$T/extra.keep" > "$T/run/files/extra.sh"; : > "$T/run/iot.log"
+SIGN_PUB="$T/nokey" iot "$T/bin/uci" "$ROOT/ax10.sh" ui >/dev/null 2>&1 || true
+grep -q "^# ax10-build: 1-1" "$T/run/files/extra.sh" || fail "a bundle of another build replaced the files"
+grep -q "from another build" "$T/run/iot.log" || fail "a bundle of another build not logged"
+cp "$T/extra.keep" "$T/srv/x/extra.sh"; (cd "$T/srv/x" && tar -czf "$T/srv/ax10-files.tar.gz" .)
+: > "$T/calls"; rm -f "$T/run/extra.retry"
+SIGN_PUB="$T/nokey" iot "$T/bin/uci" "$ROOT/ax10.sh" pass >/dev/null 2>&1 || true
+grep -q "^curl .*ax10-files.tar.gz" "$T/calls" || fail "files of another build not fetched again by the watcher"
+cmp -s "$T/run/files/extra.sh" "$T/extra.keep" || fail "this build's files not swapped in"
+st="$(iot "$T/bin/uci" "$ROOT/ax10.sh" status 2>/dev/null)" || true
+echo "$st" | grep -q "^extras:    loaded" || fail "extras not loaded after the fetch"
+sed '2s/.*/# ax10-build: 1-1/' "$T/extra.keep" > "$T/run/files/extra.sh"; { if [ -r /proc/uptime ]; then cut -d. -f1 /proc/uptime; else date +%s; fi; } > "$T/run/extra.retry"; : > "$T/calls"   # (now_s's clock)
+SIGN_PUB="$T/nokey" iot "$T/bin/uci" "$ROOT/ax10.sh" pass >/dev/null 2>&1 || true
+grep -q "^curl " "$T/calls" && fail "files fetched again within 10 minutes"
+cp "$T/extra.keep" "$T/run/files/extra.sh"; rm -f "$T/bb/curl" "$T/run/extra.retry"
 
 # --- alerts over MQTT: learned quietly first, then each change once; queued while the
 # broker is down; the password only in the helper's environment.

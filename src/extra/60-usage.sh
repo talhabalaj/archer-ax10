@@ -49,18 +49,8 @@ usage_load() {   # the log as saved in flash -> $RUN/usage (bytes)
       for e in $(cfg usage_devs ''); do echo "D:${e%%=*} ${e#*=}"; done
     } | awk '{ split($2, v, "/"); if (v[1] ~ /^[0-9]+$/ && v[2] ~ /^[0-9]+$/) printf "%s %.0f %.0f\n", $1, v[1] * 1048576, v[2] * 1048576 }' > "$RUN/usage"
 }
-# Saved as UCI lists, one short entry each: TP-Link's startup cuts any single saved
-# value to 2465 characters, and the devices of two months in one value would pass that.
-usage_save() {   # $RUN/usage -> flash, in whole MB
-    for k in days:T: months:M: devs:D:; do
-        key="$SEC.iot_usage_${k%%:*}"; p="${k#*:}"
-        $UCI -q delete "$key"
-        awk -v p="$p" 'index($1, p) == 1 { printf "%s=%.0f/%.0f\n", substr($1, 3), $2 / 1048576, $3 / 1048576 }' "$RUN/usage" |
-            while read -r e; do $UCI add_list "$key=$e"; done
-    done
-    commit_cfg >/dev/null
-}
-usage_on() { [ "$(cfg usage_on 1)" = 1 ]; }       # counting is on unless iot_usage_on=0
+# usage_save and usage_on are in ax10.sh itself (src/95-extra.sh): `reboot` saves the log
+# even when this file isn't loaded.
 # TP-Link's own scheduled reboot (System Tools > Reboot Schedule: settings
 # autoreboot.reboot, run by cron) doesn't go through us: is it due in the next 5
 # minutes? (AUTOREBOOT_NOW="Mon 02:57" stands in for the clock in the tests.)

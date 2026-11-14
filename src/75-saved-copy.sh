@@ -2,8 +2,9 @@
 # A copy of ax10.sh in flash, started by the boot hook before anything is downloaded,
 # so the home allow list and the IoT network are up within seconds of every boot,
 # with or without internet. The router keeps no files
-# across a reboot, only its settings (a 128 KB flash partition, about a fifth used),
-# so the copy is a setting: ax10.sh gzipped and base64'd (about 57 KB), in chunks of
+# across a reboot, only its settings (a 128 KB flash partition, shared with TP-Link's),
+# so the copy is a setting: ax10.sh gzipped and base64'd (about 58 KB; what waits for
+# the download anyway is in extra.sh, see 95-extra), in chunks of
 # 1000 characters, with the release's own signature. (TP-Link's startup cuts every
 # list value to 2465 characters as it loads the settings: 4000-character chunks came
 # back cut short after a reboot, and the copy no longer verified. Seen on the router.) The boot hook (scripts/signed-hook.sh) checks that

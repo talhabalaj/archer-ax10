@@ -7,19 +7,14 @@
 # into the IoT network. Nothing else crosses: no other service of any device.
 # Reaching the speaker afterwards is the usual rules: home -> IoT (every home device,
 # or the selected ones), and for AirPlay 2 the IoT -> home exception for its timing
-# (udp:319-320@<device> in iot_allow_lan).
+# (udp:319-320@<device> in iot_allow_lan). mdns_ips, mdns_running and mdns_stop are in
+# ax10.sh itself (src/95-extra.sh): the firewall and the IoT teardown use them.
 MDNS_SVC_DEFAULT="_airplay._tcp _raop._tcp _spotify-connect._tcp"
-mdns_ips() {     # "all", or the listed IoT addresses that are valid and on the IoT network
-    for a in $(cfg mdns ''); do [ "$a" = all ] && { echo all; return; }; done
-    for a in $(cfg mdns ''); do valid_ip4 "$a" && case "$a" in "$PREFIX".*) echo "$a" ;; esac; done
-}
 mdns_services() {   # _name._tcp / _name._udp, nothing else
     for v in $(cfg mdns_services "$MDNS_SVC_DEFAULT"); do
         case "$v" in *[!A-Za-z0-9._-]*) continue ;; _?*._tcp|_?*._udp) echo "$v" ;; esac
     done
 }
-mdns_running() { pid_live "$RUN/mdns.pid" mdns.lua; }
-mdns_stop() { pid_kill "$RUN/mdns.pid" mdns.lua; rm -f "$RUN/mdns.sig" "$RUN/mdns.stat"; }
 mdns_sync() {
     m_ips="$(echo $(mdns_ips))"; m_svc="$(echo $(mdns_services))"
     if [ -z "$m_ips" ] || [ -z "$m_svc" ] || [ ! -f "$UI_SRC/helpers/mdns.lua" ]; then

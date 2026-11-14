@@ -38,6 +38,7 @@ Every download is checked against the release key saved on the router
 | Path | What |
 | --- | --- |
 | `src/*.sh` | Everything on the router, one file per job; `scripts/build.sh` joins them into `ax10.sh` |
+| `src/extra/*.sh` | The parts that wait for the downloaded files (speaker relay, usage, load, MQTT alerts): built into `extra.sh` in `ax10-files.tar.gz`, loaded by `ax10.sh` |
 | `web/` | The dashboard (source in `web/dashboard/`, built into one page) and its LuCI backend `web/ax10.lua` |
 | `helpers/` | DNS-over-HTTPS forwarder, automatic speed limit, CA certificates |
 | `boot.sh` | What the hook runs once the release downloads |
