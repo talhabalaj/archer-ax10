@@ -27,6 +27,7 @@ if [ -n "$LUAC" ]; then
   "$LUAC" -p helpers/doh.lua
   "$LUAC" -p helpers/autorate.lua
   "$LUAC" -p helpers/mdns.lua
+  "$LUAC" -p helpers/mqtt.lua
 elif [ -n "$CI" ]; then
   echo "ERROR: no luac found in CI" >&2
   exit 1
@@ -44,6 +45,14 @@ echo "== mdns.lua packets"
 if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/mdns_parse.lua helpers/mdns.lua
 elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
 else echo "SKIP: no lua found"; fi
+
+echo "== mqtt.lua packets"
+if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/mqtt_packets.lua helpers/mqtt.lua
+elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
+else echo "SKIP: no lua found"; fi
+
+echo "== alerts: device names made safe for JSON"
+sh tests/mq_clean.sh
 
 echo "== dashboard backend: which network a device is on"
 if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/device_net.lua web/ax10.lua

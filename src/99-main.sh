@@ -22,6 +22,7 @@ case "$1" in
     pass)
         rm -f "$RUN/sync.want"          # this pass applies whatever was asked for up to now
         run_all
+        alerts_sync
         lifeline_guard
         ipv6_guard
         load_guard
@@ -129,6 +130,12 @@ case "$1" in
     usage)   # count up to now, then show the log: days, months, devices this month
         usage_sync
         awk '{ printf "%-34s %9.2f GB down %9.2f GB up\n", $1, $2 / 1073741824, $3 / 1073741824 }' "$RUN/usage" ;;
+    alerts) alerts_sync ;;          # one alerts pass now (the watcher does this every pass)
+    alert-test)
+        alerts_on || { echo "ax10.sh: alerts are off (set mqtt_host first)" >&2; exit 1; }
+        alert test "Test alert from the router"; alerts_discovery; alerts_flush now
+        if mq_waiting; then echo "not sent: $(cat "$RUN/alerts.err" 2>/dev/null); queued for the next try" >&2; exit 1; fi
+        echo "sent" ;;
     set)
         [ -n "$2" ] || { echo "usage: ax10.sh set <key> <value>" >&2; exit 1; }
         k="${2#iot_}"

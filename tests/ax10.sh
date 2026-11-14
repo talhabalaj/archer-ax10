@@ -9,6 +9,25 @@ ln -s ../../br-lan "$T/net/wl1.4/brport/bridge"
 ln -s ../../br-lan "$T/net/wl1.1/brport/bridge"
 : > "$T/inittab"; : > "$T/calls"
 : > "$T/arp"; : > "$T/leases"
+# ax10.sh sees a grep with BusyBox 1.19's options only (the router's): -x, for one, is
+# not there, and a script using it would quietly never match. (ax10.sh sets its own
+# PATH; AX10_TEST_PATH goes in front of it.) Each call is counted, to show it is used.
+REAL_GREP="$(command -v grep)"
+mkdir -p "$T/bb"
+cat > "$T/bb/grep" <<EOF
+#!/bin/sh
+echo x >> "$T/grep_calls"
+for a in "\$@"; do
+  case "\$a" in
+    --) break ;;
+    -?*) case "\${a#-}" in *[!HhnlLoqvsriwFEcmABCef0-9]*) echo "grep: invalid option in \$a (BusyBox 1.19)" >&2; exit 2 ;; esac
+         case "\$a" in -*e|-*f|-*m|-*A|-*B|-*C) break ;; esac ;;
+    *) break ;;
+  esac
+done
+exec "$REAL_GREP" "\$@"
+EOF
+chmod +x "$T/bb/grep"
 
 cat > "$T/bin/uci" <<EOF
 #!/bin/sh
@@ -64,6 +83,7 @@ EOF
 # iptables: remembers appended/inserted rules so -C works after the first apply.
 cat > "$T/bin/iptables" <<EOF
 #!/bin/sh
+PATH="\${PATH#$T/bb:}"   # (a stand-in itself runs on this machine: its grep, not the BusyBox one)
 echo "iptables \$*" >> "$T/calls"
 args="\$*"; tbl=filter
 case "\$1" in -t) tbl=\$2; shift 2; args="\$*";; esac
@@ -103,6 +123,7 @@ printf '%s\n' 'nvram set ${CONFIG_WIFI}_map="3" # BH BSS + FH BSS' 'nvram set ${
 # $T/tc_keep: "class del" fails, as the kernel's does while a filter points at the class.
 cat > "$T/bin/tc" <<'EOF'
 #!/bin/sh
+PATH="${PATH#@T@/bb:}"   # (a stand-in itself runs on this machine: its grep, not the BusyBox one)
 echo "tc $*" >> "@T@/calls"
 case "$1 $2" in
   "qdisc add") case "$*" in *" root handle 1: htb"*) echo "$4 htb" >> "@T@/qdiscs" ;; *" ingress") echo "$4 ingress" >> "@T@/qdiscs" ;; esac ;;
@@ -121,6 +142,7 @@ sed "s#@T@#$T#g" "$T/bin/tc" > "$T/tc.new" && mv "$T/tc.new" "$T/bin/tc"
 # ip6tables: same rule memory as iptables, in its own files.
 cat > "$T/bin/ip6tables" <<EOF
 #!/bin/sh
+PATH="\${PATH#$T/bb:}"   # (a stand-in itself runs on this machine: its grep, not the BusyBox one)
 echo "ip6tables \$*" >> "$T/calls"
 args="\$*"; tbl=filter
 case "\$1" in -t) tbl=\$2; shift 2; args="\$*";; esac
@@ -177,7 +199,7 @@ iot() {
       NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/ax10.sh" LEGACY_SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" \
       ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true CLIENTS="$T/clients.json" MESH_LIST="$T/mesh.json" \
       LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" UBUS="$T/bin/ubus" PATH="$T/bin:$PATH" \
-      LOCKRUN="$PY $T/lockrun.py" WATCH_BUSY_SLEEP=0 \
+      LOCKRUN="$PY $T/lockrun.py" WATCH_BUSY_SLEEP=0 AX10_TEST_PATH="$T/bb" PING="$T/bin/ping" BOOT_GRACE="${BOOT_GRACE:-0}" \
       sh "$s" "$@"
 }
 run() { iot "$T/bin/uci" "$ROOT/ax10.sh" "$@"; }
@@ -668,6 +690,10 @@ cat > "$T/bin/lua" <<EOF
 #!/bin/sh
 echo "lua \$*" >> "$T/calls"
 case "\$*" in *"doh.lua check"*) [ -f "$T/doh_healthy" ]; exit ;; esac
+case "\$1" in *mqtt.lua)
+    echo "mqtt user=\$MQTT_USER pass=\$MQTT_PASS" >> "$T/mqtt_env"
+    if [ -f "$T/mqtt_ok" ]; then cat "\$5" >> "$T/mqtt_sent"; exit 0; else echo "no answer from \$2:\$3" >&2; exit 1; fi ;;
+esac
 exec sleep 30
 EOF
 chmod +x "$T/bin/lua"; mkdir -p "$T/www/js/libs"; : > "$T/www/js/libs/jquery.min.js"; : > "$T/www/js/libs/jquery.qrcode.min.js"
@@ -1129,7 +1155,8 @@ cat > "$T/bin/pidof" <<EOF
 EOF
 chmod +x "$T/bin/pidof"
 guard() { DHCP6C_DIR="$1" DHCP6C_BIN="$T/bin/dhcp6c" PIDOF="$T/bin/pidof" DHCP6C_SETTLE=0 iot "$T/bin/uci10" "$ROOT/ax10.sh" guard >/dev/null 2>&1 || true; }
-started() { i=0; while [ $i -lt 10 ] && ! grep -q "^dhcp6c " "$T/calls"; do sleep 0.1; i=$((i + 1)); done; grep -q "^dhcp6c " "$T/calls"; }
+# (Up to 5 s: dhcp6c is started in the background, and a busy machine is slow to get to it.)
+started() { i=0; while [ $i -lt 50 ] && ! grep -q "^dhcp6c " "$T/calls"; do sleep 0.1; i=$((i + 1)); done; grep -q "^dhcp6c " "$T/calls"; }
 rm -f "$T/run/dhcp6c.miss" "$T/run/dhcp6c.tries" "$T/pidof_out"; : > "$T/calls"
 guard "$T/nowhere"; guard "$T/nowhere"
 started && fail "IPv6 client started although it has no config"
@@ -1246,5 +1273,112 @@ grep -q "brctl addbr br-iot\|brctl addif br-iot" "$T/calls" && fail "the watcher
 grep -q "dhcp-range=set:iot" "$T/dnsmasq.conf" && fail "IoT addresses handed out again after stop"
 : > "$T/calls"; run start >/dev/null 2>&1 || true
 has "brctl addif br-iot wl1.4"
+
+# --- alerts over MQTT: learned quietly first, then each change once; queued while the
+# broker is down; the password only in the helper's environment.
+cat > "$T/bin/uci12" <<EOF
+#!/bin/sh
+case "\$*" in
+  *iot_mqtt_host*) echo "192.168.0.5" ;;
+  *iot_mqtt_port*) echo "1884" ;;
+  *iot_mqtt_user*) echo "ax10" ;;
+  *iot_mqtt_pass*) echo "s3cret" ;;
+  *) exec "$T/bin/uci6" "\$@" ;;
+esac
+EOF
+cat > "$T/bin/ubus" <<EOF
+#!/bin/sh
+case "\$*" in *network.interface.internet*) [ -f "$T/wan_up" ] && echo '	"up": true,' || echo '	"up": false,' ;; *) exit 1 ;; esac
+EOF
+cat > "$T/bin/ping" <<EOF
+#!/bin/sh
+echo "ping \$*" >> "$T/calls"; [ -f "$T/ping_ok" ]
+EOF
+chmod +x "$T/bin/uci12" "$T/bin/ubus" "$T/bin/ping"
+al() { iot "$T/bin/uci12" "$ROOT/ax10.sh" alerts >/dev/null 2>&1 || true; }
+sent() { grep -c "$1" "$T/mqtt_sent" 2>/dev/null || true; }
+ev() { grep -c "\"event_type\":\"$1\"" "$T/mqtt_sent" 2>/dev/null || true; }   # events sent of that type
+mesh() { printf '{ "easymesh_client_list": [ { "StationGrid": [], "device": { "status": "%s", "product_name": "Archer C6", "mac": "AA-BB-CC-00-00-40" } } ] }' "$1" > "$T/mesh.json"; }
+rm -f "$T/run/alerts."* "$T/mqtt_ok" "$T/mqtt_sent" "$T/mqtt_env" "$T/home_on" "$T/run/home_drop"
+: > "$T/wan_up"; : > "$T/ping_ok"; mesh CONNECTED; : > "$T/calls"
+al
+grep -q "^homeassistant/event/ax10/alert/config	" "$T/run/alerts.ret" || fail "discovery not kept for sending"
+grep -q '"event_types":\[.*"new_device"' "$T/run/alerts.ret" || fail "event types missing from discovery"
+grep -q "^ax10/internet	ON$" "$T/run/alerts.ret" || fail "internet state not kept for sending"
+grep -q "^ax10/satellite	ON$" "$T/run/alerts.ret" || fail "satellite state not kept for sending"
+[ -f "$T/run/alerts.ret.dirty" ] || fail "retained messages not marked unsent"
+grep -q '"event_type"' "$T/run/alerts.q" 2>/dev/null && fail "events on the first pass (it only learns then)"
+[ -f "$T/run/alerts.fail" ] || fail "broker down not noted"
+grep -q "s3cret" "$T/calls" && fail "MQTT password on a command line"
+# The broker answers again: everything goes, with the login from the environment.
+: > "$T/mqtt_ok"; rm -f "$T/run/alerts.fail"; al
+[ "$(sent 'ax10/internet	ON')" = 1 ] || fail "queued state not sent once"
+[ -s "$T/run/alerts.q" ] && fail "queue not emptied after sending"
+grep -q "user=ax10 pass=s3cret" "$T/mqtt_env" || fail "login not passed to the helper"
+al; [ "$(sent 'homeassistant/event/ax10/alert/config')" = 1 ] || fail "discovery sent again without a change"
+# Internet: one lost ping is nothing; two in a row is an outage; then back, with how long.
+rm -f "$T/ping_ok"; al; [ "$(ev internet_down)" = 0 ] || fail "one lost ping reported as an outage"
+al; [ "$(ev internet_down)" = 1 ] || fail "outage not reported"
+grep -q "ax10/internet	OFF" "$T/mqtt_sent" || fail "internet sensor not off"
+rm -f "$T/wan_up"; al; [ "$(ev internet_down)" = 1 ] || fail "outage reported twice"
+: > "$T/wan_up"; : > "$T/ping_ok"; al
+grep -q '"event_type":"internet_up","message":"Internet connection back after [0-9]' "$T/mqtt_sent" || fail "return not reported"
+# New devices: a home client never seen (its name cleaned for JSON) and an IoT lease; the
+# devices known from the start are not new.
+cp "$T/clients.json" "$T/clients.keep"; cp "$T/leases" "$T/leases.keep"
+sed 's/}}$/},"AA-BB-CC-00-00-50":{"mac":"AA-BB-CC-00-00-50","ip":"192.168.0.50","connect_status":1,"guest":"NON_GUEST","name":"Pho\\\\ne"}}/' "$T/clients.keep" > "$T/clients.json"
+echo "1700000000 aa:bb:cc:00:00:51 192.168.50.51 plug *" >> "$T/leases"
+al
+grep -q '"event_type":"new_device","message":"New device on the home network: Phone (192.168.0.50, aa:bb:cc:00:00:50)","mac":"aa:bb:cc:00:00:50","network":"home","ip":"192.168.0.50","name":"Phone"' "$T/mqtt_sent" || fail "new home device not reported: $(grep new_device "$T/mqtt_sent")"
+grep -q '"event_type":"new_device".*"mac":"aa:bb:cc:00:00:51","network":"iot"' "$T/mqtt_sent" || fail "new IoT device not reported"
+grep -q '"event_type":"new_device".*aa:bb:cc:00:00:0[456]' "$T/mqtt_sent" && fail "a known device reported as new"
+al; [ "$(ev new_device)" = 2 ] || fail "new devices reported more than once"
+mv "$T/clients.keep" "$T/clients.json"; mv "$T/leases.keep" "$T/leases"
+# The satellite goes offline and comes back.
+mesh DISCONNECTED; al; [ "$(ev satellite_offline)" = 0 ] || fail "one look without the satellite reported as offline"
+al
+grep -q '"event_type":"satellite_offline","message":"Mesh satellite offline: Archer_C6 (aa:bb:cc:00:00:40)"' "$T/mqtt_sent" || fail "satellite offline not reported"
+grep -q "ax10/satellite	OFF" "$T/mqtt_sent" || fail "satellite sensor not off"
+mesh CONNECTED; al; [ "$(ev satellite_online)" = 1 ] || fail "satellite return not reported"
+grep -q '"message":"Mesh satellite back: Archer_C6' "$T/mqtt_sent" || fail "satellite return message"
+# One read with no list at all (TP-Link rewriting it) is nothing; two are.
+rm -f "$T/mesh.json"; al; [ "$(ev satellite_offline)" = 1 ] || fail "one missing read reported as offline"
+mesh CONNECTED; al; al; [ "$(ev satellite_offline)" = 1 ] && [ "$(ev satellite_online)" = 1 ] || fail "a blip produced alerts"
+rm -f "$T/mesh.json"; al; al; [ "$(ev satellite_offline)" = 2 ] || fail "satellite gone from the list not reported as offline"
+# A long broker outage: events beyond MQ_MAX push out the oldest events, never the
+# retained discovery and sensor states, which all go once the broker is back.
+rm -f "$T/mqtt_ok"; : > "$T/mqtt_sent"
+i=0; while [ $i -lt 150 ]; do printf '0\tax10/event\t{"event_type":"test","n":%s}\n' $i; i=$((i + 1)); done > "$T/run/alerts.q"
+rm -f "$T/run/alerts.fail"; : > "$T/run/alerts.ret.dirty"; al
+: > "$T/mqtt_ok"; rm -f "$T/run/alerts.fail"; al
+grep -q "homeassistant/binary_sensor/ax10/internet/config" "$T/mqtt_sent" && grep -q "ax10/internet	ON" "$T/mqtt_sent" &&
+    grep -q "ax10/satellite	" "$T/mqtt_sent" || fail "retained states lost in a long outage"
+[ "$(grep -c '"event_type":"test"' "$T/mqtt_sent")" -le 100 ] || fail "queue grew past its limit"
+grep -q '"n":149}' "$T/mqtt_sent" || fail "the newest events were dropped instead of the oldest"
+: > "$T/mqtt_sent"
+# The home allow list drops an unlisted client (04) and kicks one off its Wi-Fi (21): once each.
+: > "$T/home_on"; rm -f "$T/run/home_drop"
+iot "$T/bin/uci12" "$ROOT/ax10.sh" home >/dev/null 2>&1 || true
+iot "$T/bin/uci12" "$ROOT/ax10.sh" home >/dev/null 2>&1 || true
+[ "$(grep -c '"event_type":"blocked_device".*"mac":"aa:bb:cc:00:00:04"' "$T/run/alerts.q")" = 1 ] || fail "dropped device not reported once"
+grep -q '"event_type":"blocked_device","message":"Unlisted device removed from the home Wi-Fi: unnamed (aa:bb:cc:00:00:21)"' "$T/run/alerts.q" || fail "kicked device not reported"
+rm -f "$T/home_on"
+# "Router started" only shortly after a boot.
+rm -f "$T/run/alerts.boot"; (BOOT_GRACE=99999999999; al); [ "$(ev router_started)" = 1 ] || fail "router start not reported"
+rm -f "$T/run/alerts.boot"; al; [ "$(ev router_started)" = 1 ] || fail "router start reported outside the boot grace time"
+# A test alert, sent at once (on its own: nothing retained changed, so nothing
+# retained goes with it); with the broker down it says so and stays queued.
+: > "$T/mqtt_sent"
+iot "$T/bin/uci12" "$ROOT/ax10.sh" alert-test >/dev/null 2>&1 || fail "alert-test failed"
+grep -q "^1	" "$T/mqtt_sent" && fail "unchanged retained messages sent again with an event"
+grep -q '"event_type":"test"' "$T/mqtt_sent" || fail "test alert not sent"
+rm -f "$T/mqtt_ok"
+iot "$T/bin/uci12" "$ROOT/ax10.sh" alert-test >/dev/null 2>&1 && fail "alert-test said sent with the broker down"
+grep -q '"event_type":"test"' "$T/run/alerts.q" || fail "unsent test alert not queued"
+# Switched off: nothing sent, the state forgotten.
+iot "$T/bin/uci6" "$ROOT/ax10.sh" alerts >/dev/null 2>&1 || true
+{ [ -e "$T/run/alerts.q" ] || [ -e "$T/run/alerts.known" ]; } && fail "alerts state kept after switching off"
+# The BusyBox grep stand-in was really used by ax10.sh.
+[ -s "$T/grep_calls" ] || fail "ax10.sh never ran the BusyBox grep stand-in"
 
 echo "ax10.sh tests passed"

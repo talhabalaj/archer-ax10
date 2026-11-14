@@ -126,9 +126,10 @@ home_sync_lists() {
         have="$($WL -i "$i" mac 2>/dev/null | awk '{print toupper($2)}' | sort | tr '\n' ' ')"
         [ "$want" = "$have" ] || { $WL -i "$i" mac none 2>/dev/null; $WL -i "$i" mac $want; }
         [ "$($WL -i "$i" macmode 2>/dev/null)" = 2 ] || { $WL -i "$i" macmode 2; log "home Wi-Fi ($i) locked to $(echo $want | wc -w) device(s)"; }
-        grep -qx "$i" "$RUN/home_owned" 2>/dev/null || echo "$i" >> "$RUN/home_owned"
+        has_line "$RUN/home_owned" "$i" || echo "$i" >> "$RUN/home_owned"
         for m in $($WL -i "$i" assoclist 2>/dev/null | awk '{print toupper($2)}'); do
-            case " $want " in *" $m "*) ;; *) $WL -i "$i" deauthenticate "$m" 2>/dev/null; log "removed unlisted device $m from the home Wi-Fi ($i)" ;; esac
+            case " $want " in *" $m "*) ;; *) $WL -i "$i" deauthenticate "$m" 2>/dev/null; log "removed unlisted device $m from the home Wi-Fi ($i)"
+                alert_blocked "$(echo "$m" | tr A-F a-f)" "removed from the home Wi-Fi" ;; esac
         done
     done
     # Devices behind the satellite or wired: drop unlisted home clients by MAC.
@@ -136,7 +137,7 @@ home_sync_lists() {
     # until it is listed or shows up on the guest Wi-Fi: guests are never dropped,
     # and neither are mesh satellites (mesh_macs).
     g=" $(guest_macs | sort -u | tr '\n' ' ') $(mesh_macs | tr '\n' ' ') "
-    drop="$(cat "$RUN/home_drop" 2>/dev/null)"
+    drop="$(cat "$RUN/home_drop" 2>/dev/null)"; o_drop=" $drop "
     for m in $conn; do drop="$drop $m"; done
     keep=""; for m in $drop; do
         home_listed "$m" && continue
@@ -144,6 +145,7 @@ home_sync_lists() {
         case " $keep " in *" $m "*) ;; *) keep="$keep $m" ;; esac
     done
     drop="$(echo $keep)"; echo "$drop" > "$RUN/home_drop"
+    for m in $drop; do case "$o_drop" in *" $m "*) ;; *) alert_blocked "$m" "blocked from the home network" ;; esac; done
     for t in "$IPT" "$IPT6"; do
         $t -t raw -N $CH_HOME 2>/dev/null
         $t -t raw -C PREROUTING -i "$LANBR" -j $CH_HOME 2>/dev/null || $t -t raw -I PREROUTING 1 -i "$LANBR" -j $CH_HOME

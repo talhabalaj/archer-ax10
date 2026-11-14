@@ -207,6 +207,41 @@ the last readings. The whole-connection limit and device caps take traffic off t
 hardware fast path, so the processor is where a busy router shows first. Typical:
 20-30% busy at a few Mbps with the limit on.
 
+## Alerts over MQTT (Home Assistant)
+
+With `iot_mqtt_host` set, each watcher pass (every 15 s) watches for, and sends to that
+MQTT broker:
+
+- the internet connection going down (two lost pings in a row, or the connection itself
+  down) and coming back, with how long it was gone; the broker is normally at home, so
+  this arrives during the outage;
+- a device this router hasn't seen before joining the home, guest or IoT network (what is
+  already known is learned quietly when alerts are switched on);
+- the home allow list dropping an unlisted device, or kicking one off the home Wi-Fi
+  (once per device per boot);
+- a mesh satellite going offline (two looks in a row) and coming back;
+- the router having started (right after a boot only).
+
+Each is a JSON event on `ax10/event` (`event_type`, `message`, details such as `mac`,
+`ip`, `network`, `name`, `time`). Home Assistant picks everything up through MQTT
+discovery as a device "Archer AX10": an Alert event entity, Internet and Mesh satellite
+connectivity sensors (`ax10/internet`, `ax10/satellite`) and Last start (`ax10/boot`).
+Discovery and sensor states are retained; events wait in a queue in RAM (at most 100)
+while the broker can't be reached, retried once a minute.
+
+```sh
+sh /tmp/ax10.sh set mqtt_host 192.168.0.5
+sh /tmp/ax10.sh set mqtt_port 1883
+sh /tmp/ax10.sh set mqtt_user ax10                 # if the broker wants a login
+sh /tmp/ax10.sh set mqtt_pass "<password>"
+sh /tmp/ax10.sh alert-test                         # sends a test event now
+```
+
+The router publishes to `ax10/#` and `homeassistant/+/ax10/#` only, so a broker ACL can
+limit its login to those. The helper (helpers/mqtt.lua) speaks MQTT 3.1.1 at QoS 0 over
+one short connection per send, with nixio; the password is passed in its environment,
+never on a command line.
+
 ## Boot from the saved copy
 
 The boot hook starts a copy of `ax10.sh` saved in flash first, if its signature

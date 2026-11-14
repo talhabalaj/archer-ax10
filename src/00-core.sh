@@ -50,6 +50,7 @@
 #   ax10.sh home-set lock 0|1 / home-set expire <days>
 #   ax10.sh forget-device <mac>[,<mac>...]  forget devices: all their settings, hidden while offline
 #   ax10.sh usage        data used: per day, per month, per device this month
+#   ax10.sh alerts       one alerts pass now; ax10.sh alert-test   send a test alert (MQTT, see 65-alerts)
 #   ax10.sh reboot       save the usage log, then reboot
 #   ax10.sh sync         apply everything now (after forget-device / entry, which only save)
 #   ax10.sh entry caps|noinet|guest_fast|lan_allow|lan_open <mac> <value|on|off>   one device's setting
@@ -60,11 +61,13 @@
 #                     ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
 #                     ax10.sh set noinet "aa:bb:cc:dd:ee:02"
 #                     ax10.sh set allow_lan "tcp:8899@192.168.50.10"
+#                     ax10.sh set mqtt_host 192.168.0.5   (alerts to that MQTT broker; mqtt_port, mqtt_user, mqtt_pass)
 #                     ax10.sh set mdns all   (IoT speakers' AirPlay/Spotify seen from home; or IoT addresses)
 #                     ax10.sh set lan_mode selected; ax10.sh set lan_allow "<phone-mac>"
 #                     ax10.sh set enabled 1
 # ============================================================
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# (AX10_TEST_PATH: the offline tests put stand-ins with the router's limits first.)
+export PATH="${AX10_TEST_PATH:+$AX10_TEST_PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Binaries and paths, overridable for tests.
 UCI="${UCI:-/sbin/uci}"
@@ -114,5 +117,9 @@ load() {
     LAN_ALLOW="$(cfg lan_allow '')"     # home MACs allowed to reach IoT (mode selected)
     LAN_OPEN="$(cfg lan_open '')"       # IoT MACs allowed to reach home devices, any port
 }
+# has_line <file> <text>: does the file have a line that is exactly <text>? (BusyBox
+# 1.19's grep has no -x, and a pattern would treat the dots in wl0.1 as wildcards.)
+# The text goes in through the environment: awk -v would turn a "\n" in it into a newline.
+has_line() { [ -f "$1" ] && HL_T="$2" awk '$0 == ENVIRON["HL_T"] { f = 1; exit } END { exit !f }' "$1"; }
 log() { mkdir -p "$RUN"; echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s $*" >> "$LOG"; }
 trim_log() { if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ]; then tail -n 200 "$LOG" > "$LOG.1" && mv "$LOG.1" "$LOG"; fi; }

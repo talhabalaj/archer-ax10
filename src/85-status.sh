@@ -13,6 +13,8 @@ status() {
     echo "allow-lan: ${ALLOW_LAN:-none}"
     echo "iot->home any port: ${LAN_OPEN:-none}"
     if mdns_running; then echo "speakers seen from home: $(echo $(mdns_ips)) ($(tr '\n' ' ' < "$RUN/mdns.stat" 2>/dev/null))"; else echo "speakers seen from home: ${MDNS:+not running }${MDNS:-none}"; fi
+    if alerts_on; then echo "alerts:    MQTT $(cfg mqtt_host ''):$(cfg mqtt_port 1883)$([ -n "$(cfg mqtt_user '')" ] && echo " as $(cfg mqtt_user '')"), $(mq_waiting && echo "$( [ -s "$MQ_Q" ] && wc -l < "$MQ_Q" || echo 0) event(s) waiting ($(head -c 120 "$RUN/alerts.err" 2>/dev/null))" || echo "nothing waiting")"
+    else echo "alerts:    off"; fi
     echo "home->iot: $LAN_MODE$([ "$LAN_MODE" = selected ] && echo " (${LAN_ALLOW:-nobody})")"
     firewall_ok && echo "firewall:  ok" || echo "firewall:  MISSING/outdated"
     grep -q "^$MARK_BEGIN\$" "$DNSMASQ_CONF" 2>/dev/null && echo "dhcp:      dnsmasq block present" || echo "dhcp:      MISSING"
