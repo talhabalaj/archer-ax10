@@ -12,6 +12,26 @@
 # up. Last-seen times are kept in RAM and saved to flash once a day; with
 # iot_home_expire=N, entries not seen for N days are removed (iot_home_keep never).
 CH_HOME=AX10_HOME
+MESH_LIST="${MESH_LIST:-/tmp/easymesh_client_list}"
+# The mesh satellites' own MACs, from TP-Link's EasyMesh list. On a wired backhaul a
+# satellite shows up in the client list as a wired home client; it must never be
+# dropped, listed or not, or everything behind it loses its link to this router.
+# Only the "device" objects' own MAC fields count: client entries (StationGrid) carry
+# names their owners choose, and must never add a MAC here.
+mesh_macs() {
+    [ -f "$MESH_LIST" ] || return 0
+    awk 'BEGIN { RS = "\001" } {
+        s = $0
+        while (match(s, /"device"[ \t\r\n]*:[ \t\r\n]*\{[^{}]*\}/)) {
+            d = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+            while (match(d, /"mac(_24g|_5g)?"[ \t\r\n]*:[ \t\r\n]*"[0-9A-Fa-f][0-9A-Fa-f]([-:][0-9A-Fa-f][0-9A-Fa-f])([-:][0-9A-Fa-f][0-9A-Fa-f])([-:][0-9A-Fa-f][0-9A-Fa-f])([-:][0-9A-Fa-f][0-9A-Fa-f])([-:][0-9A-Fa-f][0-9A-Fa-f])"/)) {
+                m = substr(d, RSTART + RLENGTH - 18, 17); d = substr(d, RSTART + RLENGTH)
+                m = tolower(m); gsub(/-/, ":", m)
+                if (m != "00:00:00:00:00:00") print m
+            }
+        }
+    }' "$MESH_LIST"
+}
 home_load() {
     H_LOCK="$(cfg home_lock 0)"
     H_ALLOW="$(cfg home_allow '' | tr 'A-F-' 'a-f:')"
@@ -113,8 +133,9 @@ home_sync_lists() {
     done
     # Devices behind the satellite or wired: drop unlisted home clients by MAC.
     # A MAC stays dropped once seen (it vanishes from the client list when cut off),
-    # until it is listed or shows up on the guest Wi-Fi: guests are never dropped.
-    g=" $(guest_macs | sort -u | tr '\n' ' ') "
+    # until it is listed or shows up on the guest Wi-Fi: guests are never dropped,
+    # and neither are mesh satellites (mesh_macs).
+    g=" $(guest_macs | sort -u | tr '\n' ' ') $(mesh_macs | tr '\n' ' ') "
     drop="$(cat "$RUN/home_drop" 2>/dev/null)"
     for m in $conn; do drop="$drop $m"; done
     keep=""; for m in $drop; do

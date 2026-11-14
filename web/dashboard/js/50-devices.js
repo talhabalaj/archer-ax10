@@ -137,6 +137,7 @@ function deviceDetail(d) {
       ${S.editing === d.mac ? "" : `<button class="btn sm" data-act="rename" data-mac="${d.mac}">Rename</button>`}
       ${d.net !== "iot" && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap" data-mac="${d.mac}">${d.cap ? "Change speed cap" : "Cap speed"}</button>` : ""}
       ${d.cap && S.capEdit !== d.mac ? `<button class="btn sm" data-act="cap-remove" data-mac="${d.mac}">Remove cap</button>` : ""}
+      ${d.net !== "iot" && d.pinned ? `<button class="btn sm" data-act="forget" data-mac="${d.mac}" title="Left over from when it was on the IoT network">Remove old IoT address (${esc(d.pinned)})</button>` : ""}
       ${d.net !== "iot" && D.white ? (d.onWhite
         ? (d.this ? "" : `<button class="btn sm" data-act="ac-remove" data-mac="${d.mac}">Remove from home Wi-Fi</button>`)
         : `<button class="btn sm" data-act="ac-allow" data-mac="${d.mac}">Allow on home Wi-Fi</button>`) : ""}

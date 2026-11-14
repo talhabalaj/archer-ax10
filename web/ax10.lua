@@ -143,6 +143,31 @@ local function uptime()
     local f = io.open("/proc/uptime"); if not f then return 0 end
     local v = tonumber((f:read("*l") or ""):match("^(%S+)")) or 0; f:close(); return v
 end
+-- { {mac, connection_type} } for the mesh satellites' Wi-Fi clients, from TP-Link's
+-- /tmp/easymesh_client_list; {} if it is missing or not the JSON we expect.
+local function mesh_stations(text)
+    if not text then
+        local f = io.open("/tmp/easymesh_client_list"); if not f then return {} end
+        text = f:read("*a") or ""; f:close()
+    end
+    local ok, d = pcall(json.decode, text)
+    local out = {}
+    local list = ok and type(d) == "table" and d.easymesh_client_list
+    if type(list) ~= "table" then return out end
+    for _, agent in ipairs(list) do
+        local grid = type(agent) == "table" and agent.StationGrid
+        if type(grid) == "table" then
+            for _, o in ipairs(grid) do
+                local raw = type(o) == "table" and type(o.mac) == "string" and
+                    o.mac:match("^%x%x[%-:]%x%x[%-:]%x%x[%-:]%x%x[%-:]%x%x[%-:]%x%x$")
+                if raw then
+                    out[#out + 1] = { (raw:lower():gsub("-", ":")), type(o.connection_type) == "string" and o.connection_type or "" }
+                end
+            end
+        end
+    end
+    return out
+end
 local function probe()
     local at, atif, st, ports, mode, where, ifn = {}, {}, {}, {}, "", nil, nil
     for line in sh(PROBE):gmatch("[^\n]+") do
@@ -173,6 +198,17 @@ local function probe()
         elseif mode == "A" then
             local flags, mac = line:match("^%S+%s+%S+%s+(%S+)%s+(%S+)")
             if flags == "0x2" and mac and not at[mac:lower()] then at[mac:lower()] = "Online" end
+        end
+    end
+    -- The mesh satellite's Wi-Fi clients (TP-Link's EasyMesh list). On a wired
+    -- backhaul they come in on a LAN port, which would read as "Wired". Decoded as
+    -- JSON: client names are chosen by their owners and may hold any punctuation.
+    for _, st_ in ipairs(mesh_stations()) do
+        local mac, ct = st_[1], st_[2]
+        local w = at[mac]
+        if w == nil or w == "Wired" or w == "Online" or w:match("^Mesh satellite") then
+            local band = ct:match("^5") and " (5 GHz)" or ct:match("^2") and " (2.4 GHz)" or ""
+            at[mac] = "Mesh satellite" .. band
         end
     end
     return at, atif, st
@@ -397,6 +433,73 @@ local function stock_clients()
     return t
 end
 
+-- [device_net] ------------------------------------------------- which network
+-- Which network a device is on, and its address there. What it is connected to now
+-- decides, not an address: a lease or a fixed IoT address can be left over from
+-- when the device was on the other network (a home server once set up on the IoT
+-- Wi-Fi keeps its IoT pin after it moves to the home Wi-Fi with a static address).
+--   ip     the address found for it, or nil
+--   strong true if ip is live information (a lease, TP-Link's client list), false
+--          if it is only a setting (a fixed IoT address)
+--   ifn    the Wi-Fi interface or LAN port it is on now, or nil / ""
+--   live   its neighbour-table entries: { lan = {ip...}, iot = {ip...}, fresh = {[ip] = true} }
+--          (fresh: confirmed reachable just now; other entries can be minutes old)
+--   prefix the IoT subnet's first three octets, e.g. "192.168.50"
+--   on_iot_if(ifn): is that interface a port of the IoT bridge?
+-- Returns the address to show (nil when the known one is from the other network)
+-- and whether the device is on the IoT network.
+local function device_net(ip, strong, ifn, live, prefix, on_iot_if)
+    local function in_iot(a) return a ~= nil and a:sub(1, #prefix + 1) == prefix .. "." end
+    live = live or {}
+    local fresh = live.fresh or {}
+    -- One address from a bridge's entries: the one we already know, else a fresh one.
+    local function pick(list, fresh_only)
+        if not list then return nil end
+        if strong then for _, x in ipairs(list) do if x == ip and (fresh[x] or not fresh_only) then return x end end end
+        for _, x in ipairs(list) do if fresh[x] then return x end end
+        if not fresh_only then return list[1] end
+    end
+    local iot
+    if ifn and ifn ~= "" then iot = on_iot_if(ifn)
+    else
+        -- Only the neighbour table: a fresh entry on one side decides; an older one
+        -- only when it doesn't contradict live information we have.
+        local fl, fi = pick(live.lan, true), pick(live.iot, true)
+        if fl and not fi then iot = false
+        elseif fi and not fl then iot = true
+        elseif not fl and not fi then
+            if live.lan and not live.iot and not (strong and in_iot(ip)) then iot = false
+            elseif live.iot and not live.lan and not (strong and ip and not in_iot(ip)) then iot = true end
+        end
+    end
+    if iot == nil then return ip, in_iot(ip) end          -- offline or unclear: the address
+    local list
+    if iot then list = live.iot else list = live.lan end
+    local same = ip ~= nil and in_iot(ip) == iot
+    -- A fresh entry, else live information on that network, else an older entry.
+    local now = pick(list, true)
+    if now then return now, iot end
+    if strong and same then return ip, iot end
+    now = pick(list)
+    if now then return now, iot end
+    if same then return ip, iot end
+    return nil, iot
+end
+
+-- Every address found for a device, keeping the best: TP-Link's list of connected
+-- clients, then a lease, then a fresh neighbour entry, then an older one, then a
+-- fixed IoT address (a setting, not evidence of where it is). Gathered before the
+-- device is placed, so a weaker source seen first can't decide.
+local RANK = { stock = 4, lease = 3, fresh = 2, arp = 1, pin = 0, none = -1 }
+local function offer(cands, mac, ip, host, kind)
+    local c = cands[mac]
+    if not c then c = { rank = -1 }; cands[mac] = c end
+    if host and host ~= "" and host ~= "*" and not c.host then c.host = host end
+    if ip and ip ~= "" and ip ~= "0.0.0.0" and RANK[kind] > c.rank then c.ip, c.rank = ip, RANK[kind] end
+end
+-- [/device_net] ----------------------------------------------------------------
+
+local IOT_BR = "br-iot"
 local function devices()
     local at, atif, st, t = presence()
     local tf = tfstats()
@@ -410,7 +513,32 @@ local function devices()
         local m, ip = e:match("^([%x:]+),(%S+)$")
         if m then pins[normmac(m)] = ip end
     end
-    local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.")
+    local prefix = get("ip", "192.168.50.1"):match("^(%d+%.%d+%.%d+)%.") or "192.168.50"
+    -- The neighbour table: each MAC's addresses on the home and the IoT bridge, and
+    -- which of them were confirmed reachable just now (REACHABLE, DELAY, PROBE).
+    local live = {}
+    for line in sh("/usr/sbin/ip -4 neigh show"):gmatch("[^\n]+") do
+        local ip, dev, m = line:match("^(%d+%.%d+%.%d+%.%d+) dev (%S+) lladdr (%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)")
+        local state = line:match("(%u+)%s*$")
+        if ip and (dev == "br-lan" or dev == IOT_BR) and state ~= "FAILED" and state ~= "INCOMPLETE" then
+            m = normmac(m)
+            local e = live[m] or { lan = nil, iot = nil, fresh = {} }
+            live[m] = e
+            local side = dev == IOT_BR and "iot" or "lan"
+            e[side] = e[side] or {}
+            table.insert(e[side], ip)
+            if state == "REACHABLE" or state == "DELAY" or state == "PROBE" or state == "PERMANENT" then e.fresh[ip] = true end
+        end
+    end
+    local iot_ports = {}
+    local function on_iot_if(ifn)
+        if iot_ports[ifn] == nil then
+            local f = io.open("/sys/class/net/" .. IOT_BR .. "/brif/" .. ifn .. "/port_no")
+            iot_ports[ifn] = f ~= nil
+            if f then f:close() end
+        end
+        return iot_ports[ifn]
+    end
     local ok, addr = pcall(http.getenv, "REMOTE_ADDR")
     local me = ((ok and addr) or os.getenv("REMOTE_ADDR") or ""):gsub("^::ffff:", "")
     local rows, seen = {}, {}
@@ -424,7 +552,7 @@ local function devices()
     end
     for _, m in ipairs(words(get("hidden_devices", ""))) do hidden[normmac(m)] = true end
     local stock = stock_clients()
-    local function add(mac, ip, host)
+    local function add(mac, ip, host, strong)
         mac = normmac(mac)
         if seen[mac] or not mac:match(MAC_PAT) then return end
         -- Forgotten devices stay off the list while offline. Online by any source
@@ -432,12 +560,18 @@ local function devices()
         -- blocked device stays, so it can still be unblocked.
         if hidden[mac] and not at[mac] and not (stock[mac] and stock[mac].on) and not blocked[mac] then return end
         seen[mac] = true
-        local iot = (ip and prefix and ip:sub(1, #prefix + 1) == prefix .. ".") or false
+        -- "This device": the requester's address is any of the device's, whichever is shown.
+        local this = me ~= "" and ip == me
+        for _, side in ipairs({ "lan", "iot" }) do
+            for _, x in ipairs((live[mac] or {})[side] or {}) do if x == me then this = true end end
+        end
+        local iot
+        ip, iot = device_net(ip, strong ~= false, atif[mac], live[mac], prefix, on_iot_if)
         local net = iot and "iot" or (gif[atif[mac] or ""] and "guest") or "home"
         rows[#rows + 1] = {
             mac = mac:upper(), ip = ip or "", host = (host ~= "*" and host) or "",
             name = nm[mac] or "", where = at[mac] or "", online = at[mac] and true or false,
-            net = net, this = (ip ~= nil and ip == me), blocked = blocked[mac] or false,
+            net = net, this = this, blocked = blocked[mac] or false,
             internet = not has(noinet, mac), fast = has(fast, mac), allowed = has(allow, mac), reach = has(open, mac),
             cap = cp[mac] or false, pinned = pins[mac] or false, seen = last[mac],
         }
@@ -445,31 +579,32 @@ local function devices()
         if x then r.down, r.up, r.rssi, r.rate, r.conn = x.down, x.up, x.rssi, x.rate, x.conn
         elseif tf[mac] then r.down, r.up, r.approx = tf[mac].down, tf[mac].up, true end
     end
+    -- Every device we know of, with each source's address (offer keeps the best):
+    -- leases; fixed IoT addresses (also devices without a lease right now); the
+    -- neighbour table (devices that kept their address through a router reboot, or
+    -- set a static one); TP-Link's client list (satellite clients); and offline
+    -- devices that still have a setting.
+    local cands = {}
+    local function offer_(m, ip, host, kind) offer(cands, normmac(m), ip, host, kind) end
     local f = io.open("/tmp/dhcp.leases")
     if f then
         for line in f:lines() do
             local _, mac, ip, host = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-            if mac then add(mac, ip, host) end
+            if mac then offer_(mac, ip, host, "lease") end
         end
         f:close()
     end
-    -- Pinned IoT devices first: their reserved address marks them as IoT even when
-    -- they have no lease right now and also appear in a setting list below.
-    for m, ip in pairs(pins) do add(m, ip, nil) end
-    -- Online devices without a lease (e.g. kept their address through a router
-    -- reboot): the neighbour table, then TP-Link's client list (satellite clients).
-    local af = io.open("/proc/net/arp")
-    if af then
-        for line in af:lines() do
-            local ip, flags, m, dev = line:match("^(%d+%.%d+%.%d+%.%d+)%s+%S+%s+(%S+)%s+(%S+)%s+%S+%s+(%S+)")
-            if ip and flags ~= "0x0" and dev == "br-lan" then add(m, ip, nil) end
+    for m, ip in pairs(pins) do offer_(m, ip, nil, "pin") end
+    for m, e in pairs(live) do
+        for _, side in ipairs({ "lan", "iot" }) do
+            for _, ip in ipairs(e[side] or {}) do offer_(m, ip, nil, e.fresh[ip] and "fresh" or "arp") end
         end
-        af:close()
     end
-    for m, c in pairs(stock) do if c.on then add(m, c.ip, c.name) end end
-    for _, l in ipairs({ noinet, fast, allow, open }) do for _, m in ipairs(l) do add(m, nil, nil) end end
-    for m in pairs(blocked) do add(m, nil, nil) end
-    for m in pairs(cp) do add(m, nil, nil) end
+    for m, c in pairs(stock) do if c.on then offer_(m, c.ip, c.name, "stock") end end
+    for _, l in ipairs({ noinet, fast, allow, open }) do for _, m in ipairs(l) do offer_(m, nil, nil, "none") end end
+    for m in pairs(blocked) do offer_(m, nil, nil, "none") end
+    for m in pairs(cp) do offer_(m, nil, nil, "none") end
+    for m, c in pairs(cands) do add(m, c.ip, c.host, c.rank >= RANK.fresh) end
     return { list = rows, t = t, now = os.time(), lan_mode = get("lan_mode", "all"), iot_enabled = get("enabled", "0") == "1",
              guest_limit = get("guest_limit", "0") == "1",
              guest_down = tonumber(get("guest_down", "5")), guest_up = tonumber(get("guest_up", "2")),

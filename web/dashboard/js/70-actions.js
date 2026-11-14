@@ -74,7 +74,8 @@ document.addEventListener("click", async ev => {
     }
     if (act === "forget") {
       const d = findDev(mac); if (!d) return;
-      if (!await confirmBox(`Remove the fixed address of ${devName(d)}?`, S.iot && S.iot.lock === "on" ? "It can no longer join the IoT network until you allow new devices." : "If it joins again it gets a new address.", "Remove fixed address", true)) return;
+      if (!await confirmBox(`Remove the fixed address of ${devName(d)}?`, d.net !== "iot" ? `It is on the home network now; ${d.pinned} was kept from when it was on the IoT network. Its home address doesn't change.`
+        : S.iot && S.iot.lock === "on" ? "It can no longer join the IoT network until you allow new devices." : "If it joins again it gets a new address.", "Remove fixed address", true)) return;
       try { await iot("device", { operation: "write", mac, pin: "off" }); await loadDevices(); render(); toast(`Fixed address removed: ${devName(d)}`); } catch (e) { fail(e); }
       return;
     }

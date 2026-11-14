@@ -175,7 +175,7 @@ iot() {
       MOUNT="$T/bin/mount" UMOUNT="$T/bin/umount" PROC_MOUNTS="$T/mounts" NVRAM="$T/bin/nvram" BRF="$T/brf" \
       WIFI_SH="$T/tplink_brcm.sh" DNSMASQ_CONF="$T/dnsmasq.conf" DNSMASQ_INIT="$T/bin/dnsmasq-init" \
       NET="$T/net" RUN="$T/run" INITTAB="$T/inittab" SELF="$T/ax10.sh" LEGACY_SELF="$T/iot.sh" WWW="$T/www" LUCI_CTL="$T/ctl" \
-      ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true CLIENTS="$T/clients.json" \
+      ARP="$T/arp" SYS6="$T/sys6" LEASES="$T/leases" INIT_HUP=true CLIENTS="$T/clients.json" MESH_LIST="$T/mesh.json" \
       LIFELINE_BIN="$T/bin/dropbear" LIFELINE_PID="$T/run/ssh.pid" UBUS="$T/bin/ubus" PATH="$T/bin:$PATH" \
       LOCKRUN="$PY $T/lockrun.py" WATCH_BUSY_SLEEP=0 \
       sh "$s" "$@"
@@ -618,6 +618,25 @@ grep -q "aa:bb:cc:00:00:04" "$T/run/home_drop" || fail "unlisted home device no 
 : > "$T/calls"
 iot "$T/bin/uci6" "$ROOT/ax10.sh" home >/dev/null 2>&1 || true
 grep -q "raw -F AX10_HOME\|macmode 2" "$T/calls" && fail "home allow list rebuilt with no change"
+# A satellite on a wired backhaul is a wired home client to TP-Link (40 here); unlisted,
+# it is still never dropped. Its Wi-Fi client (41) is an ordinary home client.
+cp "$T/clients.json" "$T/clients.keep"
+sed 's/}}$/},"AA-BB-CC-00-00-40":{"mac":"AA-BB-CC-00-00-40","connect_status":1,"guest":"NON_GUEST"},"AA-BB-CC-00-00-41":{"mac":"AA-BB-CC-00-00-41","connect_status":1,"guest":"NON_GUEST"}}/' "$T/clients.keep" > "$T/clients.json"
+# Spread over lines, and the client's chosen name is "product_name": only the
+# "device" object's MACs count, so the client gets no exemption from its name.
+cat > "$T/mesh.json" <<'X'
+{ "easymesh_client_list": [ { "StationGrid": [
+    { "mac": "AA-BB-CC-00-00-41", "name": "product_name", "connection_type": "5GHz" } ],
+  "device": {
+    "status": "CONNECTED", "connection_type": "wire", "product_name": "Archer C6",
+    "ip_mac": "00-00-00-00-00-00", "mac_24g": "AA-BB-CC-00-00-42", "mac_5g": "AA-BB-CC-00-00-43",
+    "mac": "AA-BB-CC-00-00-40" },
+  "mac": "AA-BB-CC-00-00-40" } ] }
+X
+: > "$T/calls"; iot "$T/bin/uci6" "$ROOT/ax10.sh" home >/dev/null 2>&1 || true
+grep -q "aa:bb:cc:00:00:40" "$T/run/home_drop" && fail "the mesh satellite was dropped by the home allow list"
+grep -q "aa:bb:cc:00:00:41" "$T/run/home_drop" || fail "an unlisted client of the satellite was not dropped"
+mv "$T/clients.keep" "$T/clients.json"; rm -f "$T/mesh.json"; echo "aa:bb:cc:00:00:04" > "$T/run/home_drop"
 # Lock off: radios open, chain gone.
 rm -f "$T/home_on"; : > "$T/calls"
 iot "$T/bin/uci6" "$ROOT/ax10.sh" home >/dev/null 2>&1 || true

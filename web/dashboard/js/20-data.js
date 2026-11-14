@@ -12,7 +12,7 @@ async function loadDevices() {
   if (Array.isArray(stock)) {
     const by = {};
     stock.forEach(x => { if (x.mac) by[x.mac.toUpperCase().replace(/-/g, ":")] = x; });
-    const keep = d => d.name || d.blocked || d.fast || d.allowed || d.reach || !d.internet;   // has a setting
+    const keep = d => d.name || d.blocked || d.fast || d.allowed || d.reach || d.pinned || !d.internet;   // has a setting
     r.list = r.list.filter(d => {
       if (d.net === "iot") return true;
       // Guests on our own guest Wi-Fi radio: TP-Link's list leaves them out while

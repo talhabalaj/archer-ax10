@@ -45,6 +45,11 @@ if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/mdns_parse.lua helpers/mdns.lua
 elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
 else echo "SKIP: no lua found"; fi
 
+echo "== dashboard backend: which network a device is on"
+if [ -n "$LUA_BIN" ]; then "$LUA_BIN" tests/device_net.lua web/ax10.lua
+elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
+else echo "SKIP: no lua found"; fi
+
 echo "== IoT -> home rules: the three parsers agree"
 if [ -n "$LUA_BIN" ]; then sh tests/rules_parity.sh "$LUA_BIN"
 elif [ -n "$CI" ]; then echo "ERROR: no lua found in CI" >&2; exit 1
