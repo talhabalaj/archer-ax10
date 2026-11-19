@@ -26,6 +26,8 @@
 #   IoT       -> home LAN   blocked   (except replies, iot_allow_lan exceptions, and
 #                                      IoT MACs in iot_lan_open: any port)
 #   IoT       -> router     DHCP, DNS and ping only (no web GUI / SSH)
+#   home LAN  -> IoT        passed on as the router's own for iot_via_router rules
+#                           (devices that only answer their own subnet)
 #   IoT       -> internet   allowed, except MACs listed in iot_noinet
 #
 # Settings are UCI options on openvpn.archer_boot (next to the SSH host key), the one
@@ -61,6 +63,7 @@
 #                     ax10.sh set static "aa:bb:cc:dd:ee:01,192.168.50.10"
 #                     ax10.sh set noinet "aa:bb:cc:dd:ee:02"
 #                     ax10.sh set allow_lan "tcp:8899@192.168.50.10"
+#                     ax10.sh set via_router "udp:54321@192.168.0.5>192.168.50.20"   (home -> IoT as the router)
 #                     ax10.sh set mqtt_host 192.168.0.5   (alerts to that MQTT broker; mqtt_port, mqtt_user, mqtt_pass)
 #                     ax10.sh set mdns all   (IoT speakers' AirPlay/Spotify seen from home; or IoT addresses)
 #                     ax10.sh set lan_mode selected; ax10.sh set lan_allow "<phone-mac>"
@@ -116,6 +119,7 @@ load() {
     LAN_MODE="$(cfg lan_mode all)"      # all | selected
     LAN_ALLOW="$(cfg lan_allow '')"     # home MACs allowed to reach IoT (mode selected)
     LAN_OPEN="$(cfg lan_open '')"       # IoT MACs allowed to reach home devices, any port
+    VIA_ROUTER="$(cfg via_router '')"   # home -> IoT rules passed on as the router's own (22-iot-firewall.sh)
 }
 # has_line <file> <text>: does the file have a line that is exactly <text>? (BusyBox
 # 1.19's grep has no -x, and a pattern would treat the dots in wl0.1 as wildcards.)

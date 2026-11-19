@@ -35,7 +35,7 @@ v6_firewall_remove() {
 }
 
 # Bump when the rules built by firewall() change, so a running router rebuilds.
-FW_VER=3
+FW_VER=4
 # Our chains exactly as iptables lists them, in order. firewall() saves
 # this after a rebuild and firewall_ok() compares, so a missing, extra or
 # reordered rule triggers a rebuild. If this iptables has no -S, both sides
@@ -109,17 +109,27 @@ firewall() {
     # nat: masquerade IoT traffic leaving through any non-bridge (WAN, ppp0, ...).
     $IPT -t nat -N $CH_NAT 2>/dev/null; $IPT -t nat -F $CH_NAT
     $IPT -t nat -A $CH_NAT -s "$PREFIX.0/24" ! -o br+ -j MASQUERADE
+    # Home -> IoT connections passed on as the router's own (iot_via_router): some IoT
+    # devices (Xiaomi's, for one) ignore requests from outside their own subnet, so the
+    # router rewrites the source to its IoT address. Written like an IoT -> home rule
+    # (allow_rule), but "@" is the home address and ">" the IoT device, which every rule
+    # must name: an open-ended rule would hide every home device behind the router.
+    # Only the source address changes; the filter rules above still decide what passes.
+    for a in $VIA_ROUTER; do
+        allow_rule "$a" && [ -n "$AR_T" ] || { log "via-router rule skipped, not tcp|udp:port[-port] or any, [@home ip] >IoT ip: $a"; continue; }
+        $IPT -t nat -A $CH_NAT -o $BR ${AR_S:+-s "$AR_S"} -d "$AR_T" ${AR_P:+-p "$AR_P" --dport "$AR_D"} -j MASQUERADE
+    done
     $IPT -t nat -C POSTROUTING -j $CH_NAT 2>/dev/null || $IPT -t nat -I POSTROUTING 1 -j $CH_NAT
 
     v6_firewall
 
     # Broadcom flow cache can keep forwarding already-accelerated flows.
     command -v fcctl >/dev/null 2>&1 && fcctl flush >/dev/null 2>&1
-    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS" > "$RUN/fw.sig"
+    echo "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS|$VIA_ROUTER" > "$RUN/fw.sig"
     fw_dump > "$RUN/fw.snap"
 }
 firewall_ok() {
-    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS" ] &&
+    [ "$(cat "$RUN/fw.sig" 2>/dev/null)" = "$FW_VER|$NOINET|$ALLOW_LAN|$LAN_MODE|$LAN_ALLOW|$LAN_OPEN|$MDNS|$VIA_ROUTER" ] &&
     $IPT -C FORWARD -i $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C FORWARD -o $BR -j $CH_FWD 2>/dev/null &&
     $IPT -C $CH_FWD -i $BR -j ACCEPT 2>/dev/null &&

@@ -42,6 +42,7 @@ case "\$*" in
   *iot_noinet*) echo "aa:bb:cc:dd:ee:02" ;;
   *iot_lan_open*) echo "aa:bb:cc:dd:ee:05" ;;
   *iot_static*) echo "aa:bb:cc:dd:ee:01,192.168.50.10" ;;
+  *iot_via_router*) echo "udp:54321@192.168.0.5>192.168.50.20 any>192.168.50.21 tcp:80@192.168.0.6 tcp:80;x>192.168.50.22 icmp:1>192.168.50.23 tcp:81@1.2.3>192.168.50.24" ;;
   *iot_allow_lan*) echo "tcp:8899@192.168.50.10 udp:5353 udp:6001-6010@192.168.50.137 tcp:9-1 icmp:1 tcp:80@1.2.3 tcp:80;x tcp:70000 tcp:81@192.168.50.010 tcp:8123@192.168.50.137>192.168.0.20 any@192.168.50.11>192.168.0.21 any>192.168.0.22 tcp:82>1.2.3 any:83 tcp:84>192.168.0.5>192.168.0.6 tcp:85@192.168.50.137>192.168.0.020" ;;
   *) exit 1 ;;
 esac
@@ -249,6 +250,11 @@ grep -q 'AX10_IOT_IN.*ee:05' "$T/rules" && fail "any-port IoT device was let int
 has "iptables -A AX10_IOT_IN -j DROP"
 has "dnsmasq restart"
 has "iptables -t nat -A AX10_IOT_NAT -s 192.168.50.0/24 ! -o br+ -j MASQUERADE"
+# Home -> IoT as the router (iot_via_router): only the named IoT device, source
+# rewritten on the way into br-iot; a rule without an IoT address, or malformed, is skipped.
+has "iptables -t nat -A AX10_IOT_NAT -o br-iot -s 192.168.0.5 -d 192.168.50.20 -p udp --dport 54321 -j MASQUERADE"
+has "iptables -t nat -A AX10_IOT_NAT -o br-iot -d 192.168.50.21 -j MASQUERADE"
+[ "$(grep -c 'AX10_IOT_NAT -o br-iot' "$T/calls")" = 2 ] || fail "a via-router rule without an IoT address, or malformed, reached iptables: $(grep 'AX10_IOT_NAT -o br-iot' "$T/calls")"
 grep -qx "cache-size=0" "$T/dnsmasq.conf" || fail "stock dnsmasq lines kept"
 [ "$(echo $(cat "$T/brf/deny_all"))" = "wl0.4 wds0.4" ] || fail "br-filter deny_all still lists wl1.4: $(cat "$T/brf/deny_all")"
 grep -qx "dhcp-range=set:iot,192.168.50.100,192.168.50.200,255.255.255.0,12h" "$T/dnsmasq.conf" || fail "dhcp range"

@@ -12,6 +12,7 @@ status() {
     echo "lock:      $([ "$(cfg lock 0)" = 1 ] && { lock_open && echo "on, open to new devices" || echo "on ($($WL -i "$VIF" macmode 2>/dev/null) = allow list)"; } || echo off)"
     echo "allow-lan: ${ALLOW_LAN:-none}"
     echo "iot->home any port: ${LAN_OPEN:-none}"
+    echo "home->iot as router: ${VIA_ROUTER:-none}"
     if mdns_running; then echo "speakers seen from home: $(echo $(mdns_ips)) ($(tr '\n' ' ' < "$RUN/mdns.stat" 2>/dev/null))"; else echo "speakers seen from home: ${MDNS:+not running }${MDNS:-none}"; fi
     if [ -n "$EXTRA_LOADED" ]; then echo "extras:    loaded (speakers, usage, load, alerts)"
     else echo "extras:    not loaded$([ -f "$EXTRA" ] && echo ": extra.sh is from another release" || echo ": waiting for the downloaded files")"; fi

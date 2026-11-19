@@ -19,7 +19,7 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
 
 | From → to | Result |
 | --- | --- |
-| Home LAN → IoT | allowed (apps, inverter-link) |
+| Home LAN → IoT | allowed (apps, inverter-link); for `iot_via_router` rules the router passes the connection on as its own (see below) |
 | IoT → home LAN | blocked, except replies, `iot_allow_lan` exceptions (the IoT tab's "What IoT devices can reach" table), and IoT MACs in `iot_lan_open`, which may use any port (the device's "Home" switch) |
 | IoT → router | DHCP, DNS and ping only (no web UI, no SSH) |
 | IoT → internet | allowed, except MACs in `iot_noinet` (switching a device off also cuts its open connections) |
@@ -31,7 +31,16 @@ br-iot  192.168.50.1/24  IoT:  wl1.4 (the IoT SSID)
 - **DHCP:** a block in `/etc/dnsmasq.conf` makes the stock dnsmasq serve
   `192.168.50.100–200`, plus static leases.
 - **Firewall:** the chains `AX10_IOT_FWD`, `AX10_IOT_IN` and `AX10_IOT_NAT`
-  (masquerade out any non-bridge interface).
+  (masquerade out any non-bridge interface, plus the `iot_via_router` rules).
+- **Home → IoT as the router (`iot_via_router`):** some IoT devices ignore requests
+  from outside their own subnet (Xiaomi's Wi-Fi devices drop their local protocol,
+  UDP 54321, from a home address while still answering ping). A rule here makes the
+  router rewrite the source of matching home → IoT traffic to its IoT address,
+  `192.168.50.1`. Written like an `iot_allow_lan` rule, but `@` is the home address
+  and `>` the IoT device, which is required: `udp:54321@192.168.0.5>192.168.50.20`.
+  Only the source address changes; whether the traffic may pass is still the filter's
+  call (`iot_lan_mode`). Set with `ax10.sh set via_router "<rule> <rule>"`; not on
+  the dashboard yet.
 - **Watcher:** busybox-init `respawn` runs `ax10.sh watch`, which re-applies every
   15 s whatever TP-Link undoes.
 - **Dashboard:** `https://192.168.0.1/` opens our own dashboard (see
