@@ -1390,6 +1390,13 @@ grep -q "ax10/internet	OFF" "$T/mqtt_sent" || fail "internet sensor not off"
 rm -f "$T/wan_up"; al; [ "$(ev internet_down)" = 1 ] || fail "outage reported twice"
 : > "$T/wan_up"; : > "$T/ping_ok"; al
 grep -q '"event_type":"internet_up","message":"Internet connection back after [0-9]' "$T/mqtt_sent" || fail "return not reported"
+# One line per retained topic, holding the latest value (BusyBox 1.19 awk ignored -F '\t',
+# so OFF was added next to ON, the return to ON was skipped, and resends ended on OFF).
+[ "$(grep -c '^ax10/internet	' "$T/run/alerts.ret")" = 1 ] || fail "internet state kept twice: $(grep '^ax10/internet' "$T/run/alerts.ret" | tr '\n' ' ')"
+grep -q '^ax10/internet	ON$' "$T/run/alerts.ret" || fail "internet state not back to ON in the retained messages"
+# A file left with both lines by the old code is cleaned up at the next resend.
+printf 'ax10/internet\tON\nax10/internet\tOFF\n' >> "$T/run/alerts.ret"; rm -f "$T/run/alerts.disc"; al
+[ "$(grep -c '^ax10/internet	' "$T/run/alerts.ret")" = 1 ] && grep -q '^ax10/internet	ON$' "$T/run/alerts.ret" || fail "stale internet state not cleaned up at the resend: $(grep '^ax10/internet' "$T/run/alerts.ret" | tr '\n' ' ')"
 # New devices: a home client never seen (its name cleaned for JSON) and an IoT lease; the
 # devices known from the start are not new.
 cp "$T/clients.json" "$T/clients.keep"; cp "$T/leases" "$T/leases.keep"

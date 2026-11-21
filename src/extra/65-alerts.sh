@@ -18,7 +18,7 @@
 MQ_Q="$RUN/alerts.q"                # events waiting to be sent
 MQ_RET="$RUN/alerts.ret"            # retained messages (discovery, sensor states): the latest per topic
 MQ_MAX=100
-MQ_VER=1                           # bump when the discovery messages change
+MQ_VER=2                           # bump when the discovery messages change (2: resend states once, cleaning up after the -F bug)
 PING="${PING:-ping}"
 BOOT_GRACE="${BOOT_GRACE:-600}"    # "router started" only within this long after boot
 alerts_on() { [ -n "$(cfg mqtt_host '')" ]; }
@@ -43,12 +43,16 @@ mq_clean() {
 # kept). A retained message replaces that topic's line in MQ_RET, and if it changed,
 # all of MQ_RET is sent with the next flush (MQ_RET.dirty): a burst of events can't
 # push a sensor's state out, and whatever the broker missed is sent again whole.
+# The tab is set in BEGIN, not with -F '\t': the router's BusyBox 1.19 awk takes -F '\t'
+# literally, so the old line was never removed. A topic then had an ON and an OFF line,
+# a change back to a value already in the file was skipped, and every resend ended on
+# the stale one (Home Assistant showed Internet and Mesh satellite as disconnected).
 mq_put() {
     mkdir -p "$RUN"
     if [ "$1" = 1 ]; then
         mq_line="$(printf '%s\t%s' "$2" "$3")"
-        has_line "$MQ_RET" "$mq_line" && return 0
-        { [ -f "$MQ_RET" ] && awk -F '\t' -v t="$2" '$1 != t' "$MQ_RET"; printf '%s\n' "$mq_line"; } > "$MQ_RET.t"
+        [ -f "$MQ_RET" ] && [ "$(awk -v t="$2" 'BEGIN { FS = "\t" } $1 == t { l = $0 } END { print l }' "$MQ_RET")" = "$mq_line" ] && return 0
+        { [ -f "$MQ_RET" ] && awk -v t="$2" 'BEGIN { FS = "\t" } $1 != t' "$MQ_RET"; printf '%s\n' "$mq_line"; } > "$MQ_RET.t"
         mv "$MQ_RET.t" "$MQ_RET"; : > "$MQ_RET.dirty"
         return 0
     fi
@@ -84,8 +88,16 @@ alerts_discovery() {
     sig="$MQ_VER|$(cfg mqtt_host '')|$(cfg mqtt_port 1883)"; t="$(now_s)"
     o_sig=""; o_t=0; [ -f "$RUN/alerts.disc" ] && read -r o_sig o_t < "$RUN/alerts.disc"
     [ "$o_sig" = "$sig" ] && [ $((t - ${o_t:-0})) -lt 21600 ] && return 0
-    # Everything retained goes again (states too): a new broker has none of it.
-    mq_discovery; : > "$RUN/alerts.ret.dirty"; echo "$sig $t" > "$RUN/alerts.disc"
+    # Everything retained goes again (states too): a new broker has none of it. The
+    # sensor states are put again from what the watcher knows now, so a stale value in
+    # MQ_RET can't outlive the next resend.
+    mq_discovery
+    if [ -f "$RUN/alerts.inet" ]; then
+        read -r di_s _ < "$RUN/alerts.inet"
+        case "$di_s" in 1) mq_put 1 ax10/internet ON ;; 0) mq_put 1 ax10/internet OFF ;; esac
+    fi
+    [ -f "$RUN/alerts.mesh" ] && mesh_sensor
+    : > "$RUN/alerts.ret.dirty"; echo "$sig $t" > "$RUN/alerts.disc"
 }
 
 # ---------------------------------------------------------------- the router started
